@@ -686,6 +686,31 @@ tbody tr:last-child td { border-bottom: none; }
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+}
+.pos-mode-toggle {
+  display: flex;
+  gap: 4px;
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 3px;
+}
+.pos-mode-toggle button {
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: var(--font-main);
+  background: transparent;
+  color: var(--text3);
+  transition: all 0.15s;
+}
+.pos-mode-toggle button.active-mode {
+  background: var(--blue);
+  color: white;
+  box-shadow: 0 2px 6px rgba(30,144,255,0.3);
 }
 .cart-items {
   flex: 1;
@@ -810,6 +835,16 @@ tbody tr:last-child td { border-bottom: none; }
   border-bottom: 1px dashed var(--border);
 }
 .checkout-item-line:last-child { border-bottom: none; }
+.checkout-mode-badge {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 8px;
+  margin-bottom: -2px;
+}
+.checkout-mode-badge.retail { background: #eff6ff; color: var(--blue); }
+.checkout-mode-badge.wholesale { background: #f0fdf4; color: var(--green); }
 .checkout-total-line {
   display: flex;
   justify-content: space-between;
@@ -1831,45 +1866,4 @@ tbody tr:last-child td { border-bottom: none; }
   object-fit: cover;
   background: #000;
   display: block;
-}
-
-/* ═══════════════════════════════════════════
-   WHOLESALERS MODULE
-   ═══════════════════════════════════════════ */
-.ws-call-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  text-decoration: none;
-  font-size: 1rem;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: #d1fae5;
-  border: 1px solid #bbf7d0;
-  cursor: pointer;
-  transition: background 0.15s, transform 0.1s;
-  flex-shrink: 0;
-}
-.ws-call-btn:hover {
-  background: var(--green);
-  transform: scale(1.1);
-}
-.ws-copy-btn {
-  font-size: 0.7rem;
-  font-weight: 600;
-  font-family: var(--font-main);
-  padding: 3px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg2);
-  color: var(--text2);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  white-space: nowrap;
-}
-.ws-copy-btn:hover {
-  background: var(--blue);
-  color: white;
-  border-color: var(--blue);
 }
