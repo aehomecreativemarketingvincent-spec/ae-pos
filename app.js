@@ -2503,7 +2503,7 @@ function openImportModal() {
   openModal(`
 <div class="modal-title">Import Products from CSV/Excel</div>
     <p style="color:var(--text2);font-size:0.88rem;margin-bottom:12px">
-      Required column: <b>name</b>. Optional: barcode, qtyPcs, qtyPacks, pricePer, pricePack.<br>
+      Required column: <b>name</b>. Optional: barcode, qtyPcs, qtyPacks, pricePer, pricePack, wholesalePricePer, wholesalePricePack.<br>
       <span style="color:var(--text3);font-size:0.8rem">Tip: Use comma-separated CSV or Excel (.xlsx/.xls)</span>
     </p>
 <div class="import-area" id="importArea" onclick="document.getElementById('importFile').click()">
@@ -2610,7 +2610,7 @@ function processImportCSV(csvText, filename) {
     <div style="font-size:0.82rem;font-weight:700;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Preview (first 10 rows)</div>
 <div class="tbl-wrap" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:10px">
       <table>
-        <thead><tr><th>#</th><th>Name</th><th>Barcode</th><th>Qty Pcs</th><th>Qty Packs</th><th>Price/Pc</th><th>Price/Pack</th></tr></thead>
+        <thead><tr><th>#</th><th>Name</th><th>Barcode</th><th>Qty Pcs</th><th>Qty Packs</th><th>Price/Pc</th><th>Price/Pack</th><th>Wholesale/Pc</th><th>Wholesale/Pack</th></tr></thead>
         <tbody>
           ${rows.slice(0, 10).map((r, i) => `<tr>
             <td class="text-muted">${i+1}</td>
@@ -2620,6 +2620,8 @@ function processImportCSV(csvText, filename) {
             <td>${r.qtypacks || r.qtyPacks || r['qty(packs)'] || 0}</td>
             <td>₱${parseFloat(r.priceper || r.pricePer || r['price/pc'] || 0).toFixed(2)}</td>
             <td>₱${parseFloat(r.pricepack || r.pricePack || r['price/pack'] || 0).toFixed(2)}</td>
+            <td>${parseFloat(r.wholesalepriceper || r.wholesalepricepc || r['wholesale/pc'] || r['wholesaleprice/pc'] || 0) > 0 ? '₱' + parseFloat(r.wholesalepriceper || r.wholesalepricepc || r['wholesale/pc'] || r['wholesaleprice/pc']).toFixed(2) : '—'}</td>
+            <td>${parseFloat(r.wholesalepricepack || r['wholesale/pack'] || r['wholesaleprice/pack'] || 0) > 0 ? '₱' + parseFloat(r.wholesalepricepack || r['wholesale/pack'] || r['wholesaleprice/pack']).toFixed(2) : '—'}</td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -2644,6 +2646,8 @@ async function gasBulkImport(batch) {
     qtyPacks:  String(p.qtypacks  || p.qtyPacks  || p['qty(packs)'] || p['Qty Packs'] || p['QTY PACKS'] || '0'),
     pricePer:  String(p.priceper  || p.pricePer  || p['price/pc']   || p['Price/Pc']  || p['PRICE/PC']  || '0'),
     pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || p['Price/Pack']|| p['PRICE/PACK']|| '0'),
+    wholesalePricePer:  String(p.wholesalepriceper  || p.wholesalepricepc  || p['wholesale/pc']   || p['wholesaleprice/pc']   || p['Wholesale/Pc']   || p['Wholesale Price Per']  || '0'),
+    wholesalePricePack: String(p.wholesalepricepack || p['wholesale/pack'] || p['wholesaleprice/pack'] || p['Wholesale/Pack'] || p['Wholesale Price Pack'] || '0'),
   })).filter(p => p.name);
 
   // Use GET + base64 payload (same as gasPost) — avoids CORS block
@@ -2703,6 +2707,8 @@ async function confirmImport() {
 
   let totalImported = 0;
   let failed = 0;
+  const failedRows = []; // BUG FIX: track only the rows that actually failed,
+                          // so "Retry Failed" doesn't re-import already-saved rows.
 
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
@@ -2727,6 +2733,7 @@ async function confirmImport() {
         totalImported += res.count || batch.length;
       } else {
         failed += batch.length;
+        failedRows.push(...batch);
         console.warn('Batch ' + batchNum + ' failed:', res.message);
       }
     } catch(e) {
@@ -2735,9 +2742,10 @@ async function confirmImport() {
       try {
         const res2 = await gasBulkImport(batch);
         if (res2.success) totalImported += res2.count || batch.length;
-        else failed += batch.length;
+        else { failed += batch.length; failedRows.push(...batch); }
       } catch(e2) {
         failed += batch.length;
+        failedRows.push(...batch);
         console.warn('Batch ' + batchNum + ' retry also failed:', e2.message);
       }
     }
@@ -2755,10 +2763,14 @@ async function confirmImport() {
   } else if (totalImported > 0) {
  if (statusEl) statusEl.innerHTML = `<div style="color:#f59e0b;font-weight:700">️ Imported ${totalImported} products. ${failed} failed — try importing the rest again.</div>`;
  toast(`Partial import: ${totalImported} saved, ${failed} failed.`, 'warning');
+    // BUG FIX: only retry the rows that failed, not the full original file
+    pendingImportRows = failedRows;
  if (btn) { btn.disabled = false; btn.innerHTML = ' Retry Failed'; }
   } else {
  if (statusEl) statusEl.innerHTML = '<div style="color:#ef4444;font-weight:700">Import failed. Check your connection and try again.</div>';
  toast('Import failed. Try again.', 'error');
+    // BUG FIX: keep only the failed rows for retry here too
+    pendingImportRows = failedRows;
  if (btn) { btn.disabled = false; btn.innerHTML = ' Retry Import'; }
   }
 }
