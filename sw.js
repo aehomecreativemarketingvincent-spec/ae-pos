@@ -1,8 +1,10 @@
-// ─── AE Home POS — Service Worker v5 ────────────────────────────────────────
-// v5: Production hardened — Vercel/Netlify compatible, proper cache busting
-const CACHE_VERSION = 'ae-pos-v6';
+// ─── AE Home POS — Service Worker ────────────────────────────────────────
+// v4 — Fixed for GitHub Pages (relative paths, no absolute /index.html)
+const CACHE   = 'ae-pos-v5';
 const SW_BASE = self.location.pathname.replace(/\/sw\.js$/, '') || '';
 
+// Derive base path from where sw.js is registered
+// e.g. "" for username.github.io or "/reponame" for project repos
 const PRECACHE_URLS = [
   SW_BASE + '/',
   SW_BASE + '/index.html',
@@ -13,60 +15,43 @@ const PRECACHE_URLS = [
   SW_BASE + '/icon-512.png',
 ];
 
-// ── Install: pre-cache critical assets ────────────────────────────────────────
+// ── Install: pre-cache static assets ─────────────────────────────────────
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_VERSION)
-      .then(cache =>
-        Promise.allSettled(
-          PRECACHE_URLS.map(url => cache.add(url).catch(() => {}))
-        )
-      )
-      .then(() => self.skipWaiting()) // activate immediately on all clients
+    caches.open(CACHE)
+      .then(cache => {
+        return Promise.allSettled(
+          PRECACHE_URLS.map(url =>
+            cache.add(url).catch(() => {}) // skip if a file fails
+          )
+        );
+      })
   );
+  self.skipWaiting();
 });
 
-// ── Activate: purge ALL old caches ────────────────────────────────────────────
+// ── Activate: remove old caches ───────────────────────────────────────────
 self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys()
-      .then(keys => Promise.all(
-        keys
-          .filter(k => k !== CACHE_VERSION)
-          .map(k => {
-            console.log('[SW] Deleting old cache:', k);
-            return caches.delete(k);
-          })
-      ))
-      .then(() => self.clients.claim()) // take control of all open tabs immediately
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+    )
   );
+  self.clients.claim();
 });
 
-// ── Message handler: force refresh from app ───────────────────────────────────
-self.addEventListener('message', event => {
-  if (event.data && event.data.type === 'SKIP_WAITING') {
-    self.skipWaiting();
-  }
-  if (event.data && event.data.type === 'CLEAR_CACHE') {
-    caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k))));
-  }
-});
-
-// ── Fetch: network-first for HTML, cache-first for assets ─────────────────────
+// ── Fetch: smart routing ──────────────────────────────────────────────────
 self.addEventListener('fetch', event => {
   const req = event.request;
   const url = req.url;
 
-  // Passthrough: non-GET, GAS, external CDNs, analytics
-  if (req.method !== 'GET') return;
-  if (url.includes('script.google.com'))    return;
+  // Never intercept GAS requests or non-GET
+  if (url.includes('script.google.com')) return;
   if (url.includes('fonts.googleapis.com')) return;
-  if (url.includes('fonts.gstatic.com'))    return;
   if (url.includes('cdnjs.cloudflare.com')) return;
-  if (url.includes('cdn.jsdelivr.net'))     return;
+  if (req.method !== 'GET') return;
 
-  // HTML navigation: always network-first → fallback to cached index.html
-  // This ensures fresh app loads and prevents 404 on route refreshes
+  // HTML navigation — always fetch fresh, fall back to cached index.html
   const isNavigate =
     req.mode === 'navigate' ||
     (req.headers.get('accept') || '').includes('text/html');
@@ -75,30 +60,44 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetch(req, { cache: 'no-cache' })
         .catch(() =>
-          caches.match(SW_BASE + '/index.html')
-            .then(r => r || caches.match(SW_BASE + '/'))
+          caches.match(SW_BASE + '/index.html') ||
+          caches.match(SW_BASE + '/')
         )
     );
     return;
   }
 
-  // Static assets: cache-first, update cache in background (stale-while-revalidate)
+  // App code (JS/CSS) — ALWAYS try the network first so a new deploy takes
+  // effect immediately on every device, on next load, with no need to
+  // manually bump CACHE anymore. Falls back to the cached copy only when
+  // offline (keeps the app usable without internet).
+  const isAppCode = url.endsWith('.js') || url.endsWith('.css');
+  if (isAppCode) {
+    event.respondWith(
+      fetch(req, { cache: 'no-cache' })
+        .then(response => {
+          if (response && response.status === 200 && response.type === 'basic') {
+            const clone = response.clone();
+            caches.open(CACHE).then(c => c.put(req, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  // Other static assets (icons, manifest) — cache-first, then network
   event.respondWith(
     caches.match(req).then(cached => {
-      const networkFetch = fetch(req).then(response => {
-        if (
-          response &&
-          response.status === 200 &&
-          (response.type === 'basic' || response.type === 'cors')
-        ) {
+      if (cached) return cached;
+      return fetch(req).then(response => {
+        if (response && response.status === 200 && response.type === 'basic') {
           const clone = response.clone();
-          caches.open(CACHE_VERSION).then(c => c.put(req, clone));
+          caches.open(CACHE).then(c => c.put(req, clone));
         }
         return response;
-      }).catch(() => cached); // network failed → return cached copy
-
-      // Return cached immediately, but revalidate in background
-      return cached || networkFetch;
+      }).catch(() => cached);
     })
   );
 });
