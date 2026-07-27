@@ -26,53 +26,40 @@ function lsDel(key) {
 
 
 
-// ─── GLOBAL ERROR HANDLERS ───────────────────
-window.onerror = function(msg, src, line, col, err) {
-  // Silently log — don't alert users in production
-  console.error('[POS Error]', msg, 'at', src + ':' + line + ':' + col, err || '');
-  return false; // allow default browser handling
-};
-
-window.addEventListener('unhandledrejection', function(e) {
-  console.error('[POS UnhandledPromise]', e.reason);
-  // Prevent silent failures from crashing the app
-  e.preventDefault();
-});
-
 // ─── STATE ────────────────────────────────────
 let currentUser = null; // { id, name, role, username }
 let currentPage = 'dashboard';
 let cart = [];
+let posMode = 'retail'; // 'retail' | 'wholesale' — default Retail per spec
 let activeUsers = {};   // { sessionId: { name, role, loginTime } }
 let mySessionId = null;
 
 // ─── ROLE CONFIG ──────────────────────────────
 const ROLE_NAV = {
   admin: [
-    { id: 'dashboard',   icon: '', label: 'Dashboard' },
-    { id: 'pos',         icon: '', label: 'Point of Sale' },
-    { id: 'inventory',   icon: '', label: 'Inventory' },
-    { id: 'finance',     icon: '', label: 'Finance' },
-    { id: 'cashiers',    icon: '', label: 'Users' },
-    { id: 'receipts',    icon: '', label: 'Receipts' },
-    { id: 'summary',     icon: '', label: 'Sales Summary' },
-    { id: 'logs',        icon: '', label: 'Analytics' },
+    { id: 'dashboard', icon: '', label: 'Dashboard' },
+    { id: 'pos', icon: '', label: 'Point of Sale' },
+    { id: 'inventory', icon: '', label: 'Inventory' },
+    { id: 'finance', icon: '', label: 'Finance' },
+    { id: 'cashiers', icon: '', label: 'Users' },
+    { id: 'receipts', icon: '', label: 'Receipts' },
+    { id: 'summary', icon: '', label: 'Sales Summary' },
+    { id: 'logs', icon: '', label: 'Analytics' },
+    { id: 'void', icon: '', label: 'Void Transactions' },
     { id: 'salesExport', icon: '', label: 'Sales Export' },
-    { id: 'wholesalers', icon: '', label: 'Wholesalers' },
   ],
   cashier: [
-    { id: 'pos',         icon: '', label: 'Point of Sale' },
-    { id: 'summary',     icon: '', label: 'Sales Summary' },
-    { id: 'receipts',    icon: '', label: 'Receipts' },
-    { id: 'wholesalers', icon: '', label: 'Wholesalers' },
+    { id: 'pos', icon: '', label: 'Point of Sale' },
+    { id: 'summary', icon: '', label: 'Sales Summary' },
+    { id: 'receipts', icon: '', label: 'Receipts' },
   ],
   clerk: [
-    { id: 'inventory',   icon: '', label: 'Inventory' },
-    { id: 'summary',     icon: '', label: 'Sales Summary' },
-    { id: 'pos',         icon: '', label: 'Point of Sale' },
-    { id: 'logs',        icon: '', label: 'Analytics' },
+    { id: 'inventory', icon: '', label: 'Inventory' },
+    { id: 'summary', icon: '', label: 'Sales Summary' },
+    { id: 'pos', icon: '', label: 'Point of Sale' },
+    { id: 'logs', icon: '', label: 'Analytics' },
+    { id: 'void', icon: '', label: 'Void Transactions' },
     { id: 'salesExport', icon: '', label: 'Sales Export' },
-    { id: 'wholesalers', icon: '', label: 'Wholesalers' },
   ],
   viewer: [
     { id: 'dashboard', icon: '', label: 'Dashboard' },
@@ -131,33 +118,6 @@ function localDateStr(d) {
   return `${y}-${m}-${dd}`;
 }
 
-/**
- * Safe date formatter — never returns "Invalid Date".
- * Uses parseDate() for robustness, returns fallback string if date is invalid.
- */
-function safeFormatDate(val, options, fallback = 'N/A') {
-  if (!val) return fallback;
-  const d = val instanceof Date ? val : parseDate(val);
-  if (!d || isNaN(d.getTime())) return fallback;
-  try {
-    return d.toLocaleString('en-PH', options);
-  } catch(e) {
-    return fallback;
-  }
-}
-
-function safeFormatDateOnly(val, fallback = 'N/A') {
-  return safeFormatDate(val, { dateStyle: 'medium' }, fallback);
-}
-
-function safeFormatDateTime(val, fallback = 'N/A') {
-  return safeFormatDate(val, { dateStyle: 'short', timeStyle: 'short' }, fallback);
-}
-
-function safeFormatDateLong(val, fallback = 'N/A') {
-  return safeFormatDate(val, { dateStyle: 'long', timeStyle: 'short' }, fallback);
-}
-
 /** Returns start (00:00:00) and end (23:59:59.999) of a local calendar day */
 function dayRange(date) {
   const d   = date instanceof Date ? date : new Date();
@@ -187,29 +147,18 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function registerSW() {
-  if (!('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
-    .then(reg => {
-      // Check for SW updates on page focus (catches deployments)
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') reg.update().catch(() => {});
-      }, { once: false });
-    })
-    .catch(e => console.warn('[POS] SW registration failed:', e.message));
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
 }
 
-let _clockInterval = null;
 function startClock() {
-  if (_clockInterval) return; // prevent duplicate intervals on re-init
   const tick = () => {
     const el = document.getElementById('liveClock');
-    if (el) el.textContent = new Date().toLocaleString('en-PH', {
-      hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit',
-      weekday: 'short', month: 'short', day: 'numeric'
-    });
+ if (el) el.textContent = new Date().toLocaleString('en-PH', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit', weekday: 'short', month: 'short', day: 'numeric' });
   };
   tick();
-  _clockInterval = setInterval(tick, 1000);
+  setInterval(tick, 1000);
 }
 
 // ─── LOGIN ────────────────────────────────────
@@ -375,38 +324,21 @@ function trackActiveUser(add) {
 function showActiveUsers() {
   const users = lsGet('ae_active_users', {});
   const panel = document.getElementById('activeUsersPanel');
-  const list  = document.getElementById('activeUsersList');
-  if (!panel || !list) return;
-  list.innerHTML = '';
+  const list = document.getElementById('activeUsersList');
   const entries = Object.entries(users);
-  if (!entries.length) {
-    const p = document.createElement('p');
-    p.className   = 'text-muted text-center mt-10';
-    p.textContent = 'No active users tracked.';
-    list.appendChild(p);
+  if (entries.length === 0) {
+ list.innerHTML = '<p class="text-muted text-center mt-10">No active users tracked.</p>';
   } else {
-    entries.forEach(([, u]) => {
-      const item = document.createElement('div');
-      item.className = 'aup-item';
-      const dot  = document.createElement('div');
-      dot.className = 'aup-dot';
-      const info = document.createElement('div');
-      const name = document.createElement('div');
-      name.className   = 'aup-name';
-      name.textContent = u.name || 'Unknown';
-      const role = document.createElement('div');
-      role.className   = 'aup-role';
-      role.textContent = u.role || '';
-      info.appendChild(name);
-      info.appendChild(role);
-      const time = document.createElement('div');
-      time.className   = 'aup-time';
-      time.textContent = u.loginTime ? new Date(u.loginTime).toLocaleTimeString('en-PH', { hour12: true }) : '';
-      item.appendChild(dot);
-      item.appendChild(info);
-      item.appendChild(time);
-      list.appendChild(item);
-    });
+ list.innerHTML = entries.map(([sid, u]) =>`
+<div class="aup-item">
+ <div class="aup-dot"></div>
+        <div>
+<div class="aup-name">${u.name}</div>
+<div class="aup-role">${u.role}</div>
+        </div>
+<div class="aup-time">${new Date(u.loginTime).toLocaleTimeString('en-PH', { hour12: true })}</div>
+      </div>
+    `).join('');
   }
   panel.classList.remove('hidden');
 }
@@ -455,8 +387,8 @@ function navigateTo(page) {
     inventory: 'Inventory Management', finance: 'Finance',
     cashiers: 'User Management', receipts: 'Receipts',
     summary: 'Sales Summary', logs: 'Analytics & Insights',
-    salesExport: 'Sales Export',
-    wholesalers: 'Wholesalers Information'
+    void: 'Void Transactions',
+    salesExport: 'Sales Export'
   };
  document.getElementById('topbarTitle').textContent = titles[page] || page;
   // render
@@ -493,8 +425,8 @@ function renderPage(page) {
     receipts: renderReceipts,
     summary: renderSummary,
     logs: renderLogs,
+    void: renderVoidTransactions,
     salesExport: renderSalesExport,
-    wholesalers: renderWholesalers,
   };
   if (pages[page]) pages[page]();
   else {
@@ -522,10 +454,6 @@ async function gasRequest(params, timeoutMs = 30000) {
 }
 
 async function gasPost(payload, timeoutMs = 45000) {
-  // GAS CORS rule: only GET with no custom headers works cross-origin.
-  // POST is blocked by CORS. Solution: GET + base64 payload in URL param.
-  // We check for e.parameter.data (not e.parameter.method) in doGet
-  // so it works even if params survive the redirect.
   const json = JSON.stringify(payload);
   let encoded;
   try {
@@ -535,14 +463,14 @@ async function gasPost(payload, timeoutMs = 45000) {
     const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
     encoded = btoa(binary);
   }
-  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
-  const ctrl  = new AbortController();
+  const url  = GAS_URL + '?method=post&data=' + encodeURIComponent(encoded);
+  const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
     clearTimeout(timer);
     const text = await res.text();
-    if (!text || !text.trim()) return { success: true };
+    if (!text || !text.trim()) return { success: true }; // GAS empty-body = success
     try { return JSON.parse(text); }
     catch (e) { return { success: true }; }
   } catch (e) {
@@ -557,23 +485,12 @@ async function gasPost(payload, timeoutMs = 45000) {
 // ─── TOAST ────────────────────────────────────
 function toast(msg, type = 'info', duration = 3500) {
   const icons = { success: '✓', error: '✕', warning: '!', info: 'i' };
-  const el    = document.createElement('div');
-  el.className = 'toast ' + type;
-  const iconSpan = document.createElement('span');
-  iconSpan.className   = 'toast-icon';
-  iconSpan.textContent = icons[type] || 'i';
-  const msgSpan = document.createElement('span');
-  msgSpan.textContent  = String(msg || '');
-  el.appendChild(iconSpan);
-  el.appendChild(msgSpan);
-  const container = document.getElementById('toastContainer');
-  if (!container) return;
-  container.appendChild(el);
-  // Limit toasts to prevent DOM flooding
-  const allToasts = container.querySelectorAll('.toast');
-  if (allToasts.length > 5) allToasts[0].remove();
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span class="toast-icon">${icons[type]||'i'}</span><span>${msg}</span>`;
+  document.getElementById('toastContainer').appendChild(el);
   setTimeout(() => {
-    el.style.opacity   = '0';
+    el.style.opacity = '0';
     el.style.transform = 'translateX(20px)';
     el.style.transition = 'all 0.3s ease';
     setTimeout(() => el.remove(), 300);
@@ -703,7 +620,7 @@ async function renderDashboard() {
           <td><span style="font-family:var(--font-mono);font-size:0.8rem">${s.transactionId || ''}</span></td>
           <td>${s.cashierName || ''}</td>
           <td class="text-green fw-700">₱${parseFloat(s.total||0).toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
-          <td class="text-muted" style="font-size:0.8rem">${safeFormatDateOnly(s.date)}</td>
+          <td class="text-muted" style="font-size:0.8rem">${s.date ? new Date(s.date).toLocaleDateString('en-PH') : ''}</td>
         </tr>`).join('')}</tbody>
  </table></div>` : '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No transactions yet.</div></div>';
 
@@ -760,6 +677,10 @@ async function renderPOS() {
 <div class="pos-right">
 <div class="cart-header">
           <span>🛒 Cart</span>
+<div class="pos-mode-toggle" id="posModeToggle">
+            <button data-mode="retail" class="${posMode==='retail'?'active-mode':''}" onclick="setPosMode('retail')">Retail</button>
+            <button data-mode="wholesale" class="${posMode==='wholesale'?'active-mode':''}" onclick="setPosMode('wholesale')">Wholesale</button>
+          </div>
 <button class="btn btn-ghost btn-sm" onclick="clearCart()">Clear</button>
         </div>
  <div class="cart-items" id="cartItems"></div>
@@ -772,13 +693,7 @@ async function renderPOS() {
       </div>
     </div>`;
 
-  try {
-    await loadProducts();
-  } catch(e) {
-    const grid = document.getElementById('productGrid');
-    if (grid) grid.innerHTML = '<div class="no-data" style="grid-column:1/-1"><div class="no-data-icon"></div><div>Failed to load products. Check connection.</div></div>';
-    toast('Could not load products. Pull to refresh.', 'error');
-  }
+  await loadProducts();
   renderCart();
   focusBarcodeInput();
 }
@@ -1212,26 +1127,42 @@ document.addEventListener('click', (e) => {
   if (dd && !dd.contains(e.target) && e.target.id !== 'posSearch') dd.classList.add('hidden');
 });
 
+// ─── RETAIL / WHOLESALE MODE ──────────────────
+function setPosMode(mode) {
+  if (mode !== 'retail' && mode !== 'wholesale') return;
+  posMode = mode;
+  document.querySelectorAll('#posModeToggle button').forEach(b => {
+    b.classList.toggle('active-mode', b.dataset.mode === mode);
+  });
+  renderCart();
+}
+
+// Returns { price, total, isWholesale } for a cart item under the current posMode.
+// Wholesale Mode uses the manually-entered Wholesale Price for the item's unit
+// (Piece or Pack); if that field is empty/0, it automatically falls back to the
+// existing Retail Price — Retail Mode is always unaffected.
+function getCartItemEffective(item) {
+  const prod = allProducts.find(p => p.id === item.productId);
+  let price = item.price; // Retail Price, exactly as before
+  let isWholesale = false;
+  if (posMode === 'wholesale' && prod) {
+    const wPrice = item.unit === 'pack'
+      ? parseFloat(prod.wholesalePricePack || 0)
+      : parseFloat(prod.wholesalePricePer || 0);
+    if (wPrice > 0) { price = wPrice; isWholesale = true; }
+  }
+  return { price, total: price * item.qty, isWholesale };
+}
+
 function addToCart(productId, unit) {
   const p = allProducts.find(x => x.id === productId);
   if (!p) return;
   const existing = cart.find(c => c.productId === productId && c.unit === unit);
   if (existing) {
-    // Guard: never exceed available stock
-    const maxQ = existing.maxQty || 9999;
-    if (existing.qty >= maxQ) {
-      toast(existing.name + ' — max stock reached (' + maxQ + ' available)', 'warning');
-      return;
-    }
     existing.qty++;
     existing.total = existing.qty * existing.price;
   } else {
-    const price  = unit === 'pack' ? parseFloat(p.pricePack || 0) : parseFloat(p.pricePer || 0);
-    const maxQty = unit === 'pack' ? parseInt(p.qtyPacks || 0) : parseInt(p.qtyPcs || 0);
-    if (maxQty <= 0) {
-      toast(p.name + ' is out of stock.', 'error');
-      return;
-    }
+    const price = unit === 'pack' ? parseFloat(p.pricePack || 0) : parseFloat(p.pricePer || 0);
     cart.push({
       productId, unit,
       name:    p.name,
@@ -1239,7 +1170,7 @@ function addToCart(productId, unit) {
       price,
       qty:     1,
       total:   price,
-      maxQty,
+      maxQty:  unit === 'pack' ? parseInt(p.qtyPacks || 0) : parseInt(p.qtyPcs || 0)
     });
   }
   saveCartToStorage();
@@ -1260,11 +1191,15 @@ function renderCart() {
  itemsEl.innerHTML = cart.map((item, idx) =>{
       const prod = allProducts.find(p => p.id === item.productId);
       const hasPack = prod && parseFloat(prod.pricePack||0) > 0;
+      const eff = getCartItemEffective(item);
+      const priceLabel = eff.isWholesale
+        ? `<span style="text-decoration:line-through;color:var(--text3);margin-right:4px">₱${parseFloat(item.price||0).toFixed(2)}</span>₱${eff.price.toFixed(2)} / ${item.unit} <span style="color:var(--green);font-weight:700">(Wholesale)</span>`
+        : `₱${parseFloat(eff.price||0).toFixed(2)} / ${item.unit}`;
       return `
 <div class="cart-item">
 <div class="ci-info">
 <div class="ci-name">${item.name}</div>
-<div class="ci-price">₱${parseFloat(item.price||0).toFixed(2)} / ${item.unit}</div>
+<div class="ci-price">${priceLabel}</div>
  ${hasPack ? `<div class="ci-unit-toggle">
             <button class="${item.unit==='piece'?'active-piece':''}" onclick="switchCartUnit(${idx},'piece')">Piece ₱${parseFloat(prod.pricePer||0).toFixed(2)}</button>
             <button class="${item.unit==='pack'?'active-pack':''}" onclick="switchCartUnit(${idx},'pack')">Pack ₱${parseFloat(prod.pricePack||0).toFixed(2)}</button>
@@ -1275,13 +1210,13 @@ function renderCart() {
           <input class="ci-qty-input" type="number" name="qty_${idx}" min="1" value="${item.qty}" onchange="setCartQty(${idx}, this.value)">
           <button class="ci-qty-btn" onclick="changeCartQty(${idx}, 1)">+</button>
         </div>
-<div class="ci-total">₱${parseFloat(item.total||0).toFixed(2)}</div>
+<div class="ci-total">₱${eff.total.toFixed(2)}</div>
         <button class="ci-remove" onclick="removeFromCart(${idx})">✕</button>
       </div>`;
     }).join('');
   }
 
-  const total = cart.reduce((s, c) => s + c.total, 0);
+  const total = cart.reduce((s, c) => s + getCartItemEffective(c).total, 0);
   const itemCount = cart.reduce((s, c) => s + c.qty, 0);
  if (countEl) countEl.textContent = itemCount;
  if (subtEl) subtEl.textContent = '₱' + total.toLocaleString('en-PH', { minimumFractionDigits: 2 });
@@ -1332,12 +1267,18 @@ function clearCart() {
 // ─── CHECKOUT ─────────────────────────────────
 function openCheckout() {
  if (cart.length === 0) { toast('Cart is empty!', 'warning'); return; }
-  const total = cart.reduce((s, c) => s + c.total, 0);
+  const isWholesale = posMode === 'wholesale';
+  const total = cart.reduce((s, c) => s + getCartItemEffective(c).total, 0);
   openModal(`
 <div class="modal-title">Checkout</div>
 <div class="checkout-form">
+ <div class="checkout-mode-badge ${isWholesale ? 'wholesale' : 'retail'}">Transaction Type: ${isWholesale ? 'Wholesale' : 'Retail'}</div>
 <div class="checkout-summary">
- ${cart.map(c => `<div class="checkout-item-line"><span>${c.name} (${c.unit}) x${c.qty}</span><span>₱${parseFloat(c.total||0).toFixed(2)}</span></div>`).join('')}
+ ${cart.map(c => {
+   const eff = getCartItemEffective(c);
+   const discNote = eff.isWholesale ? ` (Wholesale)` : '';
+   return `<div class="checkout-item-line"><span>${c.name} (${c.unit}) x${c.qty}${discNote}</span><span>₱${eff.total.toFixed(2)}</span></div>`;
+ }).join('')}
  <div class="checkout-total-line"><span>TOTAL</span><span>₱${total.toFixed(2)}</span></div>
       </div>
 <div class="field">
@@ -1372,12 +1313,10 @@ function updateChange(total) {
   if (cd) { cd.classList.toggle('negative', change < 0); }
 }
 
-let _checkoutInProgress = false;
 async function processCheckout(total) {
-  // ── Guard: prevent duplicate submissions (button + flag)
-  if (_checkoutInProgress) return;
-  _checkoutInProgress = true;
+  // ── Guard: prevent duplicate submissions
   const confirmBtn = document.querySelector('#modalBox .btn-primary');
+  if (confirmBtn && confirmBtn.disabled) return;
   if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Saving...'; }
 
   const paymentMethod = document.getElementById('paymentMethod')?.value || 'Cash Sale';
@@ -1394,7 +1333,13 @@ async function processCheckout(total) {
 
   // BUG 1 FIX: snapshot cart HERE before anything else —
   // was declared inside try block AFTER payload was already built, causing ReferenceError
-  const cartSnapshot = [...cart];
+  // Wholesale Mode: bake in each item's manually-entered Wholesale Price at checkout time
+  // (falling back to Retail Price if none was set). Retail Mode: unchanged.
+  const isWholesaleSale = posMode === 'wholesale';
+  const cartSnapshot = cart.map(c => {
+    const eff = getCartItemEffective(c);
+    return { ...c, price: eff.price, total: eff.total };
+  });
   if (!cartSnapshot.length) { toast('Cart is empty!', 'warning'); return; }
 
   const txId  = 'TX' + Date.now();
@@ -1412,6 +1357,7 @@ async function processCheckout(total) {
     total,
     cash:   isNonCash ? total : cash,
     change,
+    transactionType: isWholesaleSale ? 'Wholesale' : 'Retail',
   };
 
   // Close modal ONLY after validation passes
@@ -1459,7 +1405,6 @@ async function processCheckout(total) {
         paymentMethod,
       }).catch(() => {});
 
-      _checkoutInProgress = false;
       hideLoading();
       toast('Transaction saved!', 'success');
 
@@ -1473,17 +1418,23 @@ async function processCheckout(total) {
         cash:    isNonCash ? total : cash,
         change,
         paymentMethod,
+        transactionType: isWholesaleSale ? 'Wholesale' : 'Retail',
+      });
+
+      // Reset to Retail for the next transaction (default mode per spec)
+      posMode = 'retail';
+      document.querySelectorAll('#posModeToggle button').forEach(b => {
+        b.classList.toggle('active-mode', b.dataset.mode === 'retail');
       });
 
     } else {
-      _checkoutInProgress = false;
       hideLoading();
       toast('Save failed: ' + (res.message || 'Unknown error. Try again.'), 'error');
+      // Re-enable button on failure so cashier can retry
       if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
     }
 
   } catch(e) {
-    _checkoutInProgress = false;
     hideLoading();
     toast('Network error. Check connection and try again.', 'error');
     if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
@@ -1518,29 +1469,17 @@ function buildExportRows({ txId, cashier, date, items, paymentMethod }) {
 
 function saveSalesExportLocal(data) {
   try {
-    const rows     = buildExportRows(data);
+    const rows    = buildExportRows(data);
     const existing = lsGet('ae_sales_export', []);
     const updated  = [...rows, ...existing];
     if (updated.length > 5000) updated.length = 5000;
-    // If storage full, trim to 500 recent rows and retry once
-    if (!lsSet('ae_sales_export', updated)) {
-      const trimmed = updated.slice(0, 500);
-      lsSet('ae_sales_export', trimmed);
-      console.warn('[POS] Sales export trimmed to 500 rows — storage limit reached');
-    }
-  } catch(e) {
-    console.warn('[POS] saveSalesExportLocal failed:', e.message);
-  }
+    lsSet('ae_sales_export', updated);
+  } catch(e) {}
 }
 
 async function pushSalesExportToGAS(data) {
-  try {
-    const rows = buildExportRows(data);
-    return await gasPost({ action: 'saveSalesExport', rows: JSON.stringify(rows) });
-  } catch(e) {
-    console.warn('[POS] Sales export push failed (non-critical):', e.message);
-    return { success: false };
-  }
+  const rows = buildExportRows(data);
+  return gasPost({ action: 'saveSalesExport', rows: JSON.stringify(rows) });
 }
 
 function getSalesExportLocal(filters) {
@@ -1563,8 +1502,8 @@ let currentReceiptData = null;
 
 function generateAndShowReceipt(data) {
   currentReceiptData = data;
-  const { txId, siNum, cashier, date, items, total, cash, change } = data;
-  const dateStr = safeFormatDateLong(date);
+  const { txId, siNum, cashier, date, items, total, cash, change, transactionType } = data;
+  const dateStr = new Date(date).toLocaleString('en-PH', { dateStyle: 'long', timeStyle: 'short' });
   const vatRate = 0.12;
   const vatAmount = total * vatRate / (1 + vatRate);
   const netAmount = total - vatAmount;
@@ -1599,6 +1538,7 @@ function generateAndShowReceipt(data) {
         <div><b>Transaction #:</b> ${txId}</div>
         <div><b>Cashier:</b> ${cashier}</div>
         <div><b>Date & Time:</b> ${dateStr}</div>
+        <div><b>Transaction Type:</b> ${transactionType || 'Retail'}</div>
       </div>
       <hr class="receipt-divider">
 <div class="receipt-items-header">
@@ -2017,23 +1957,23 @@ function buildProductModal(p) {
       <div class="prod-modal-label">Product Details</div>
       <div class="input-row">
         <div class="field" style="grid-column:1/-1">
-          <label for="f_name">Product Name *</label>
+          <label>Product Name *</label>
           <input id="f_name" value="${p?.name || ''}" placeholder="e.g. Coca-Cola 1.5L">
         </div>
       </div>
       <div class="input-row">
         <div class="field" style="grid-column:1/-1">
-          <label for="f_desc">Description</label>
+          <label>Description</label>
           <input id="f_desc" value="${p?.description || ''}" placeholder="Optional description">
         </div>
       </div>
       <div class="input-row">
         <div class="field">
-          <label for="f_variants">Variants</label>
+          <label>Variants</label>
           <input id="f_variants" value="${p?.variants || ''}" placeholder="e.g. Red, Blue, Large">
         </div>
         <div class="field">
-          <label for="f_category">Category</label>
+          <label>Category</label>
           <input id="f_category" value="${p?.category || ''}" placeholder="e.g. Beverages">
         </div>
       </div>
@@ -2044,22 +1984,32 @@ function buildProductModal(p) {
       <div class="prod-modal-label">Stock & Pricing</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div class="field">
-          <label for="f_qtyPcs">Qty (Pcs)</label>
+          <label>Qty (Pcs)</label>
           <input id="f_qtyPcs" type="number" min="0" value="${p?.qtyPcs || 0}">
         </div>
         <div class="field">
-          <label for="f_qtyPacks">Qty (Packs)</label>
+          <label>Qty (Packs)</label>
           <input id="f_qtyPacks" type="number" min="0" value="${p?.qtyPacks || 0}">
         </div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div class="field">
-          <label for="f_pricePer">Price per Piece (₱)</label>
+          <label>Price per Piece (₱)</label>
           <input id="f_pricePer" type="number" min="0" step="0.01" value="${p?.pricePer || 0}" placeholder="0.00">
         </div>
         <div class="field">
-          <label for="f_pricePack">Price per Pack (₱)</label>
+          <label>Price per Pack (₱)</label>
           <input id="f_pricePack" type="number" min="0" step="0.01" value="${p?.pricePack || 0}" placeholder="0.00">
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="field">
+          <label>Wholesale Price / Piece (₱)</label>
+          <input id="f_wholesalePricePer" type="number" min="0" step="0.01" value="${p?.wholesalePricePer || ''}" placeholder="Leave blank to use Retail">
+        </div>
+        <div class="field">
+          <label>Wholesale Price / Pack (₱)</label>
+          <input id="f_wholesalePricePack" type="number" min="0" step="0.01" value="${p?.wholesalePricePack || ''}" placeholder="Leave blank to use Retail">
         </div>
       </div>
     </div>
@@ -2303,6 +2253,8 @@ async function saveProduct(id = null) {
     qtyPacks: parseInt(document.getElementById('f_qtyPacks')?.value || 0),
     pricePer: parseFloat(document.getElementById('f_pricePer')?.value || 0),
     pricePack: parseFloat(document.getElementById('f_pricePack')?.value || 0),
+    wholesalePricePer: parseFloat(document.getElementById('f_wholesalePricePer')?.value || 0),
+    wholesalePricePack: parseFloat(document.getElementById('f_wholesalePricePack')?.value || 0),
   };
 
   showLoading(id ? 'Updating product...' : 'Saving product...');
@@ -2401,23 +2353,23 @@ function openReceiptSettings() {
 <div class="modal-title">Receipt / Company Settings</div>
     <p style="color:var(--text3);font-size:0.82rem;margin-bottom:16px">These details will appear on every receipt.</p>
 <div class="input-row">
- <div class="field" style="grid-column:1/-1"><label for="rs_storeName">Store Name</label>
+ <div class="field" style="grid-column:1/-1"><label>Store Name</label>
  <input id="rs_storeName" value="${s.storeName}" placeholder="AE HOME"></div>
     </div>
 <div class="input-row">
- <div class="field" style="grid-column:1/-1"><label for="rs_ownedBy">Owned By</label>
+ <div class="field" style="grid-column:1/-1"><label>Owned By</label>
  <input id="rs_ownedBy" value="${s.ownedBy}" placeholder="AE Home Trade Corp."></div>
     </div>
 <div class="input-row">
- <div class="field"><label for="rs_vatTin">VAT Reg TIN</label>
+ <div class="field"><label>VAT Reg TIN</label>
  <input id="rs_vatTin" value="${s.vatTin}" placeholder="000-000-000-000"></div>
     </div>
 <div class="input-row">
- <div class="field" style="grid-column:1/-1"><label for="rs_address">Address</label>
+ <div class="field" style="grid-column:1/-1"><label>Address</label>
  <input id="rs_address" value="${s.address}" placeholder="Street, Barangay, City"></div>
     </div>
 <div class="input-row">
- <div class="field" style="grid-column:1/-1"><label for="rs_footer">Receipt Footer Note</label>
+ <div class="field" style="grid-column:1/-1"><label>Receipt Footer Note</label>
  <input id="rs_footer" value="${s.footer}" placeholder="e.g. This serves as Sales Invoice..."></div>
     </div>
     <div style="display:flex;gap:10px;margin-top:8px">
@@ -2495,7 +2447,7 @@ function processImportCSV(csvText, filename) {
     return;
   }
 
-  const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, '').replace(/\r/g, '').replace(/\s+/g, ''));
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, '').replace(/\r/g, ''));
   const rows = lines.slice(1).map(line => {
     // Handle quoted values with commas inside
     const vals = [];
@@ -2567,42 +2519,23 @@ function processImportCSV(csvText, filename) {
 
 // Special bulk import via GET — splits product data into URL-safe chunks
 async function gasBulkImport(batch) {
-  // Normalize column name variants from Excel/CSV headers
-  const products = batch.map(p => ({
-    name:      String(p.name      || p.Name      || p.NAME      || '').trim(),
-    barcode:   String(p.barcode   || p.Barcode   || p.BARCODE   || p['Barcode']    || '').trim(),
-    qtyPcs:    String(p.qtypcs    || p.qtyPcs    || p['qty(pcs)']   || p['Qty Pcs']   || p['QTY PCS']   || '0'),
-    qtyPacks:  String(p.qtypacks  || p.qtyPacks  || p['qty(packs)'] || p['Qty Packs'] || p['QTY PACKS'] || '0'),
-    pricePer:  String(p.priceper  || p.pricePer  || p['price/pc']   || p['Price/Pc']  || p['PRICE/PC']  || '0'),
-    pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || p['Price/Pack']|| p['PRICE/PACK']|| '0'),
-  })).filter(p => p.name);
-
-  // Use GET + base64 payload (same as gasPost) — avoids CORS block
-  const payload = { action: 'bulkAddProducts', products: JSON.stringify(products) };
-  const json    = JSON.stringify(payload);
-  let encoded;
-  try {
-    encoded = btoa(unescape(encodeURIComponent(json)));
-  } catch (e) {
-    const bytes  = new TextEncoder().encode(json);
-    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
-    encoded = btoa(binary);
-  }
-  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
-  const ctrl  = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 60000);
-  try {
-    const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
-    clearTimeout(timer);
-    const text = await res.text();
-    if (!text || !text.trim()) return { success: true, count: products.length };
-    try { return JSON.parse(text); }
-    catch(e) { return { success: true, count: products.length }; }
-  } catch(e) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Import timed out. Try a smaller batch.');
-    throw new Error('Import error: ' + e.message);
-  }
+  // Encode each product individually and send as numbered params
+  const params = new URLSearchParams();
+  params.set('action', 'bulkAddProducts');
+  params.set('count', batch.length);
+  batch.forEach((p, i) => {
+    params.set('p' + i + '_name', p.name || '');
+    params.set('p' + i + '_barcode', p.barcode || '');
+    params.set('p' + i + '_qtyPcs', p.qtypcs || p.qtyPcs || p['qty(pcs)'] || '0');
+    params.set('p' + i + '_qtyPacks', p.qtypacks || p.qtyPacks || p['qty(packs)'] || '0');
+    params.set('p' + i + '_pricePer', p.priceper || p.pricePer || p['price/pc'] || '0');
+    params.set('p' + i + '_pricePack', p.pricepack || p.pricePack || p['price/pack'] || '0');
+  });
+  const url = GAS_URL + '?' + params.toString();
+  const res = await fetch(url, { method: 'GET', redirect: 'follow' });
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch(e) { throw new Error('Invalid response: ' + text.substring(0, 80)); }
 }
 
 async function confirmImport() {
@@ -2747,7 +2680,7 @@ async function loadExpenses() {
         <tbody>${data.map(e => `<tr>
           <td>${e.description}</td>
           <td class="text-red fw-700">₱${parseFloat(e.amount||0).toFixed(2)}</td>
-          <td class="text-muted">${safeFormatDateOnly(e.date)}</td>
+          <td class="text-muted">${e.date ? new Date(e.date).toLocaleDateString('en-PH') : ''}</td>
  <td><button class="btn btn-danger btn-sm" onclick="deleteExpense('${e.id}')">️</button></td>
         </tr>`).join('')}</tbody>
       </table></div>`;
@@ -2808,7 +2741,7 @@ async function loadAllowance() {
         <tbody>${data.map(e => `<tr>
           <td>${e.forPerson || e.for || ''}</td>
           <td class="text-green fw-700">₱${parseFloat(e.amount||0).toFixed(2)}</td>
-          <td class="text-muted">${safeFormatDateOnly(e.date)}</td>
+          <td class="text-muted">${e.date ? new Date(e.date).toLocaleDateString('en-PH') : ''}</td>
  <td><button class="btn btn-danger btn-sm" onclick="deleteAllowance('${e.id}')">️</button></td>
         </tr>`).join('')}</tbody>
       </table></div>`;
@@ -2882,11 +2815,11 @@ function openAddCashierModal() {
   openModal(`
 <div class="modal-title">Add New User</div>
 <div class="input-row">
- <div class="field"><label for="c_name">Full Name *</label><input id="c_name" placeholder="Full name"></div>
- <div class="field"><label for="c_username">Username *</label><input id="c_username" placeholder="Login username"></div>
+ <div class="field"><label>Full Name *</label><input id="c_name" placeholder="Full name"></div>
+ <div class="field"><label>Username *</label><input id="c_username" placeholder="Login username"></div>
     </div>
 <div class="input-row">
- <div class="field"><label for="c_password">Password *</label><input id="c_password" type="password" placeholder="Password"></div>
+ <div class="field"><label>Password *</label><input id="c_password" type="password" placeholder="Password"></div>
  <div class="field"><label for="c_role">Role *</label>
         <select id="c_role" name="c_role">
           <option value="cashier">Cashier</option>
@@ -2910,7 +2843,7 @@ function openEditCashierModal(id) {
       </div>
 <div class="input-row">
  <div class="field"><label for="c_password">New Password (leave blank to keep)</label><input id="c_password" name="c_password" type="password" placeholder="New password"></div>
- <div class="field"><label for="c_role">Role</label>
+ <div class="field"><label>Role</label>
           <select id="c_role">
             <option value="cashier" ${c.role==='cashier'?'selected':''}>Cashier</option>
             <option value="clerk" ${c.role==='clerk'?'selected':''}>Inventory Clerk</option>
@@ -2983,7 +2916,7 @@ function showLocalReceipts(btn) {
             <td style="font-family:var(--font-mono);font-size:0.78rem">${r.txId}</td>
             <td>${r.cashier}</td>
             <td class="text-green fw-700">₱${parseFloat(r.total||0).toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
-            <td style="font-size:0.78rem">${safeFormatDateTime(r.date)}</td>
+            <td style="font-size:0.78rem">${new Date(r.date).toLocaleString('en-PH',{dateStyle:'medium',timeStyle:'short'})}</td>
             <td>${hasFullData
               ? `<button class="btn btn-primary btn-sm" onclick="reprintReceipt('${r.txId}')">View / Print</button>`
               : `<span style="color:var(--text3);font-size:0.78rem">No data</span>`}
@@ -3020,7 +2953,7 @@ async function showGASReceipts(btn) {
               <td style="font-family:var(--font-mono);font-size:0.78rem">${s.transactionId||''}</td>
               <td>${s.cashierName||''}</td>
               <td class="text-green fw-700">₱${parseFloat(s.total||0).toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
-              <td style="font-size:0.78rem">${safeFormatDateTime(s.date)}</td>
+              <td style="font-size:0.78rem">${s.date ? new Date(s.date).toLocaleString('en-PH',{dateStyle:'short',timeStyle:'short'}) : ''}</td>
               <td>${hasLocal
                 ? `<button class="btn btn-primary btn-sm" onclick="reprintReceipt('${s.transactionId}')">View / Print</button>`
                 : `<button class="btn btn-ghost btn-sm" onclick="reprintFromSheets('${s.transactionId}')">Reprint</button>`}
@@ -3038,10 +2971,9 @@ function reprintReceipt(txId) {
   const fullData = lsGet('ae_receipt_full', {});
   const data = fullData[txId];
   if (!data) { toast('Receipt data not available on this device.', 'warning'); return; }
-  const reprintDate = parseDate(data.date) || new Date();
   generateAndShowReceipt({
     txId: data.txId, siNum: data.siNum, cashier: data.cashier,
-    date: reprintDate, items: data.items,
+    date: new Date(data.date), items: data.items,
     total: data.total, cash: data.cash, change: data.change
   });
 }
@@ -3053,11 +2985,9 @@ async function reprintFromSheets(txId) {
     const sale = (res.data || []).find(s => s.transactionId === txId);
     if (!sale) { toast('Receipt not found.', 'error'); return; }
     const items = JSON.parse(sale.items || '[]');
-    // Use parseDate() with TX fallback — safe against corrupted date values
-    const saleDate = parseDate(sale.date, sale.transactionId || sale.siNumber) || new Date();
     generateAndShowReceipt({
       txId: sale.transactionId, siNum: sale.siNumber || '',
-      cashier: sale.cashierName, date: saleDate,
+      cashier: sale.cashierName, date: new Date(sale.date),
       items, total: parseFloat(sale.total||0),
       cash: parseFloat(sale.cash||0), change: parseFloat(sale.change||0)
     });
@@ -3142,7 +3072,7 @@ async function loadSummary(period, btn) {
     let   lastReset = null;
     try { lastReset = localStorage.getItem(resetKey); } catch(e) {}
     const lastResetStr = lastReset
-      ? 'Last reset: ' + safeFormatDateTime(lastReset)
+      ? 'Last reset: ' + new Date(lastReset).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' })
       : 'Not yet reset today';
 
     el.innerHTML = `
@@ -3210,7 +3140,7 @@ async function loadSummary(period, btn) {
                 <td style="font-family:var(--font-mono);font-size:0.78rem">${t.transactionId || ''}${isVoid ? ' <span style="background:#ef4444;color:white;padding:1px 6px;border-radius:4px;font-size:0.65rem;font-weight:700">VOID</span>' : ''}</td>
                 <td>${t.cashierName || ''}</td>
                 <td class="${isVoid ? 'text-red' : 'text-green fw-700'}" style="${isVoid ? 'text-decoration:line-through' : ''}">${formatPHP(t.total)}</td>
-                <td style="font-size:0.78rem">${safeFormatDateTime(t.date)}</td>
+                <td style="font-size:0.78rem">${t.date ? new Date(t.date).toLocaleString('en-PH', { dateStyle: 'short', timeStyle: 'short' }) : ''}</td>
               </tr>`;
             }).join('')}</tbody>
           </table>
@@ -3381,7 +3311,7 @@ async function downloadSummaryExcel(period, exportData) {
       t.transactionId || '', t.siNumber || '',
       t.cashierName   || '', parseFloat(t.total  || 0),
       parseFloat(t.cash   || 0), parseFloat(t.change || 0),
-      safeFormatDateTime(t.date, ''),
+      t.date ? new Date(t.date).toLocaleString('en-PH') : '',
       t.status || 'ACTIVE'
     ]);
     const txSheet = XLSX.utils.aoa_to_sheet([txHeader, ...txRows]);
@@ -3565,7 +3495,183 @@ async function renderLogs() {
 }
 
 
+// ═══════════════════════════════════════════════
+// VOID TRANSACTIONS
+// ═══════════════════════════════════════════════
+async function renderVoidTransactions() {
+  document.getElementById('pageContent').innerHTML = `
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">Void a Transaction</div>
+      <p style="color:var(--text3);font-size:0.82rem;margin-bottom:14px">
+        Search for a transaction to void. Stock will be automatically restored.
+        Only Admin and Clerk can void transactions.
+      </p>
+      <div class="search-wrap" style="max-width:400px">
+        <span class="search-icon">⌕</span>
+        <input type="text" id="voidSearch" placeholder="Search TX# or SI#..." oninput="searchVoidTransaction(this.value)">
+      </div>
+      <div id="voidSearchResults" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Voided Transactions</div>
+      <div id="voidedList"><div class="loading-spinner"><div class="spinner"></div></div></div>
+    </div>`;
+  loadVoidedList();
+}
 
+async function searchVoidTransaction(query) {
+  const el = document.getElementById('voidSearchResults');
+  if (!el) return;
+  if (!query || query.length < 2) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  try {
+    const res = await gasRequest({ action: 'getSales' });
+    const all = res.data || [];
+    const q = query.toLowerCase();
+    const matches = all.filter(t =>
+      t.status !== 'VOID' && (
+        (t.transactionId || '').toLowerCase().includes(q) ||
+        (t.siNumber || '').toLowerCase().includes(q) ||
+        (t.cashierName || '').toLowerCase().includes(q)
+      )
+    ).slice(0, 5);
+
+    if (!matches.length) {
+      el.innerHTML = '<p style="color:var(--text3);font-size:0.85rem">No transactions found.</p>';
+      return;
+    }
+
+    el.innerHTML = `<div class="tbl-wrap"><table>
+      <thead><tr><th>TX#</th><th>SI#</th><th>Cashier</th><th>Total</th><th>Date</th><th>Action</th></tr></thead>
+      <tbody>${matches.map(t => `<tr>
+        <td style="font-family:var(--font-mono);font-size:0.78rem">${t.transactionId}</td>
+        <td style="font-family:var(--font-mono);font-size:0.78rem">${t.siNumber||'—'}</td>
+        <td>${t.cashierName}</td>
+        <td class="text-green fw-700">₱${parseFloat(t.total||0).toFixed(2)}</td>
+        <td style="font-size:0.78rem">${new Date(t.date).toLocaleString('en-PH',{dateStyle:'short',timeStyle:'short'})}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="openVoidModal('${t.transactionId}')">Void</button></td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  } catch(e) {
+    el.innerHTML = '<p style="color:#ef4444">Failed to search.</p>';
+  }
+}
+
+async function loadVoidedList() {
+  const el = document.getElementById('voidedList');
+  if (!el) return;
+  try {
+    const res = await gasRequest({ action: 'getSales' });
+    const voided = (res.data || []).filter(t => t.status === 'VOID').reverse();
+    if (!voided.length) {
+      el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div>No voided transactions.</div></div>';
+      return;
+    }
+    el.innerHTML = `<div class="tbl-wrap"><table>
+      <thead><tr><th>TX#</th><th>SI#</th><th>Cashier</th><th>Total</th><th>Voided By</th><th>Reason</th><th>Date Voided</th></tr></thead>
+      <tbody>${voided.map(t => `<tr style="opacity:0.7">
+        <td style="font-family:var(--font-mono);font-size:0.78rem">${t.transactionId} <span style="background:#ef4444;color:white;padding:1px 6px;border-radius:4px;font-size:0.65rem;font-weight:700">VOID</span></td>
+        <td style="font-family:var(--font-mono);font-size:0.78rem">${t.siNumber||'—'}</td>
+        <td>${t.cashierName}</td>
+        <td class="text-red" style="text-decoration:line-through">₱${parseFloat(t.total||0).toFixed(2)}</td>
+        <td>${t.voidedBy||'—'}</td>
+        <td style="font-size:0.78rem">${t.voidReason||'—'}</td>
+        <td style="font-size:0.78rem">${t.voidDate ? new Date(t.voidDate).toLocaleString('en-PH',{dateStyle:'short',timeStyle:'short'}) : '—'}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+  } catch(e) {
+    el.innerHTML = '<div class="no-data">Failed to load voided transactions.</div>';
+  }
+}
+
+async function openVoidModal(txId) {
+  try {
+    const res = await gasRequest({ action: 'getSales' });
+    const tx = (res.data || []).find(t => t.transactionId === txId);
+    if (!tx) { toast('Transaction not found.', 'error'); return; }
+    const items = JSON.parse(tx.items || '[]');
+
+    openModal(`
+      <div class="modal-title" style="color:#ef4444">Void Transaction</div>
+      <div style="background:#fff5f5;border:1px solid #fecaca;border-radius:10px;padding:14px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+          <span style="font-weight:700;font-family:var(--font-mono);font-size:0.85rem">${tx.transactionId}</span>
+          <span style="font-weight:800;color:#ef4444">₱${parseFloat(tx.total||0).toLocaleString('en-PH',{minimumFractionDigits:2})}</span>
+        </div>
+        <div style="font-size:0.82rem;color:var(--text2);margin-bottom:6px">Cashier: ${tx.cashierName} | ${new Date(tx.date).toLocaleString('en-PH',{dateStyle:'medium',timeStyle:'short'})}</div>
+        <div style="border-top:1px dashed var(--border);padding-top:8px;margin-top:8px">
+          ${items.map(it => `<div style="display:flex;justify-content:space-between;font-size:0.82rem;padding:2px 0">
+            <span>${it.name} (${it.unit}) x${it.qty}</span>
+            <span>₱${parseFloat(it.total||0).toFixed(2)}</span>
+          </div>`).join('')}
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:12px">
+        <label>Reason for Void *</label>
+        <select id="voidReasonSelect" name="voidReasonSelect" onchange="toggleOtherReason(this.value)">
+          <option value="">-- Select reason --</option>
+          <option value="Wrong item scanned">Wrong item scanned</option>
+          <option value="Wrong price">Wrong price</option>
+          <option value="Customer cancelled">Customer cancelled</option>
+          <option value="Duplicate transaction">Duplicate transaction</option>
+          <option value="Others">Others (specify below)</option>
+        </select>
+      </div>
+      <div class="field" id="otherReasonField" style="display:none;margin-bottom:12px">
+        <label>Specify Reason *</label>
+        <input type="text" id="voidReasonOther" name="voidReasonOther" placeholder="Enter reason...">
+      </div>
+      <div style="background:#fff7e0;border:1px solid #fde68a;border-radius:8px;padding:10px;margin-bottom:16px;font-size:0.82rem">
+        <b>⚠️ Warning:</b> This will mark the transaction as VOID and restore stock. This cannot be undone.
+      </div>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-ghost" style="flex:1" onclick="closeModalDirect()">Cancel</button>
+        <button class="btn btn-danger" style="flex:2" onclick="confirmVoid('${txId}')">Confirm Void</button>
+      </div>`);
+  } catch(e) {
+    toast('Failed to load transaction.', 'error');
+  }
+}
+
+function toggleOtherReason(val) {
+  const f = document.getElementById('otherReasonField');
+  if (f) f.style.display = val === 'Others' ? 'flex' : 'none';
+}
+
+async function confirmVoid(txId) {
+  const reasonSelect = document.getElementById('voidReasonSelect')?.value;
+  const reasonOther = document.getElementById('voidReasonOther')?.value.trim();
+  const reason = reasonSelect === 'Others' ? (reasonOther || '') : reasonSelect;
+
+  if (!reason) { toast('Please select a reason for void.', 'error'); return; }
+
+  const btn = document.querySelector('#modalBox .btn-danger');
+  if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
+
+  showLoading('Voiding transaction...');
+  try {
+    const res = await gasPost({
+      action: 'voidTransaction',
+      transactionId: txId,
+      voidedBy: currentUser.name,
+      voidReason: reason,
+      voidDate: new Date().toISOString()
+    });
+    hideLoading();
+    if (res.success) {
+      toast('Transaction voided! Stock restored.', 'success');
+      closeModalDirect();
+      renderVoidTransactions();
+    } else {
+      toast(res.message || 'Failed to void.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Confirm Void'; }
+    }
+  } catch(e) {
+    hideLoading();
+    toast('Network error.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Confirm Void'; }
+  }
+}
 
 
 // ═══════════════════════════════════════════════
@@ -3602,11 +3708,7 @@ async function renderSalesExport() {
       '<div id="seTable"><div class="loading-spinner"><div class="spinner"></div></div></div>' +
     '</div>';
 
-  loadSalesExport().catch(e => {
-    console.error('[POS] renderSalesExport error:', e);
-    const el = document.getElementById('seTable');
-    if (el) el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div>Failed to load export data.</div></div>';
-  });
+  loadSalesExport();
 }
 
 function setSEPeriod(period) {
@@ -3818,347 +3920,3 @@ function exportSalesCSV(rows, label) {
 
 
 // Enter key for login handled in the global keydown listener above
-
-// ═══════════════════════════════════════════════
-// WHOLESALERS INFORMATION MODULE
-// Permissions: Admin=full, Cashier=view+add, Clerk=view+search
-// ═══════════════════════════════════════════════
-
-let _wholesalersCache = []; // in-memory cache for search
-let _wsSearchTimeout  = null;
-
-// ── RENDER PAGE ───────────────────────────────
-async function renderWholesalers() {
-  const role    = currentUser.role;
-  const canAdd  = ['admin', 'cashier'].includes(role);
-  const canEdit = role === 'admin';
-  const canDel  = role === 'admin';
-
-  document.getElementById('pageContent').innerHTML =
-    '<div class="inv-toolbar" style="flex-wrap:wrap;gap:10px;margin-bottom:16px">' +
-      '<div class="search-wrap" style="flex:1;min-width:220px;margin-bottom:0">' +
-        '<span class="search-icon">🔍</span>' +
-        '<input type="text" id="wsSearch" placeholder="Search by name, store, contact, category..." ' +
-               'oninput="onWsSearch(this.value)" autocomplete="off">' +
-      '</div>' +
-      (canAdd ? '<button class="btn btn-primary" onclick="openAddWholesalerModal()">+ Add Wholesaler</button>' : '') +
-    '</div>' +
-    '<div class="card">' +
-      '<div id="wholesalerTable"><div class="loading-spinner"><div class="spinner"></div> Loading...</div></div>' +
-    '</div>';
-
-  await loadWholesalers();
-}
-
-// ── LOAD & RENDER TABLE ───────────────────────
-async function loadWholesalers() {
-  try {
-    const res = await gasRequest({ action: 'getWholesalers' });
-    _wholesalersCache = res.data || [];
-    renderWholesalerTable(_wholesalersCache);
-  } catch(e) {
-    const el = document.getElementById('wholesalerTable');
-    if (el) el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div>Failed to load wholesalers. Check connection.</div></div>';
-    toast('Could not load wholesalers.', 'error');
-  }
-}
-
-function renderWholesalerTable(data) {
-  const el = document.getElementById('wholesalerTable');
-  if (!el) return;
-
-  const role    = currentUser.role;
-  const canEdit = role === 'admin';
-  const canDel  = role === 'admin';
-  const showAct = canEdit || canDel;
-
-  if (!data.length) {
-    el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No wholesalers found.<br><span style="font-size:0.8rem;color:var(--text3)">Add your first wholesaler to get started.</span></div></div>';
-    return;
-  }
-
-  const rows = data.map(w => {
-    const phone    = (w.contact_number || '').replace(/[^0-9+]/g, '');
-    const phoneNum = w.contact_number || '—';
-    const createdAt = safeFormatDateTime(w.created_at, '—');
-
-    const phoneCell =
-      '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
-        '<span style="font-family:var(--font-mono);font-size:0.82rem">' + phoneNum + '</span>' +
-        (phone ? (
-          '<a href="tel:' + phone + '" class="ws-call-btn" title="Call" aria-label="Call ' + phoneNum + '">📞</a>' +
-          '<button class="ws-copy-btn" onclick="wsClipboard(\'' + (w.contact_number||'').replace(/'/g,"\\'") + '\')" title="Copy number">Copy</button>'
-        ) : '') +
-      '</div>';
-
-    const actCell = showAct
-      ? '<td><div style="display:flex;gap:5px;flex-wrap:wrap">' +
-          (canEdit ? '<button class="inv-btn inv-btn-edit" onclick="openEditWholesalerModal(\'' + w.id + '\')">Edit</button>' : '') +
-          (canDel  ? '<button class="inv-btn inv-btn-del"  onclick="deleteWholesaler(\'' + w.id + '\')">Del</button>' : '') +
-        '</div></td>'
-      : '';
-
-    return '<tr>' +
-      '<td><b>' + esc(w.wholesaler_name || '') + '</b></td>' +
-      '<td>' + esc(w.store_name || '—') + '</td>' +
-      '<td>' + esc(w.contact_person || '—') + '</td>' +
-      '<td>' + (w.product_category ? '<span class="badge-in-stock" style="font-size:0.72rem">' + esc(w.product_category) + '</span>' : '—') + '</td>' +
-      '<td style="font-size:0.8rem;max-width:160px">' + esc(w.address || '—') + '</td>' +
-      '<td>' + phoneCell + '</td>' +
-      '<td style="font-size:0.78rem;color:var(--text3)">' + esc(w.created_by || '—') + '</td>' +
-      '<td style="font-size:0.78rem;color:var(--text3)">' + createdAt + '</td>' +
-      actCell +
-    '</tr>';
-  }).join('');
-
-  const actHeader = showAct ? '<th>Actions</th>' : '';
-  el.innerHTML =
-    '<div class="tbl-wrap"><table>' +
-      '<thead><tr>' +
-        '<th>Wholesaler Name</th><th>Store Name</th><th>Contact Person</th>' +
-        '<th>Category</th><th>Address</th><th>Contact Number</th>' +
-        '<th>Created By</th><th>Date Created</th>' + actHeader +
-      '</tr></thead>' +
-      '<tbody>' + rows + '</tbody>' +
-    '</table></div>';
-}
-
-// ── SEARCH ────────────────────────────────────
-function onWsSearch(val) {
-  clearTimeout(_wsSearchTimeout);
-  _wsSearchTimeout = setTimeout(() => {
-    const q = (val || '').toLowerCase().trim();
-    if (!q) { renderWholesalerTable(_wholesalersCache); return; }
-    const filtered = _wholesalersCache.filter(w =>
-      (w.wholesaler_name  || '').toLowerCase().includes(q) ||
-      (w.store_name       || '').toLowerCase().includes(q) ||
-      (w.contact_number   || '').toLowerCase().includes(q) ||
-      (w.contact_person   || '').toLowerCase().includes(q) ||
-      (w.product_category || '').toLowerCase().includes(q)
-    );
-    renderWholesalerTable(filtered);
-  }, 200);
-}
-
-// ── UTILITY ───────────────────────────────────
-function esc(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function wsClipboard(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text)
-      .then(() => toast('Number copied!', 'success'))
-      .catch(() => wsFallbackCopy(text));
-  } else {
-    wsFallbackCopy(text);
-  }
-}
-function wsFallbackCopy(text) {
-  const ta = document.createElement('textarea');
-  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-  document.body.appendChild(ta); ta.select();
-  try { document.execCommand('copy'); toast('Number copied!', 'success'); }
-  catch(e) { toast('Could not copy.', 'warning'); }
-  document.body.removeChild(ta);
-}
-
-// ── ADD MODAL ─────────────────────────────────
-function openAddWholesalerModal() {
-  openModal(
-    '<div class="modal-title">Add Wholesaler</div>' +
-    '<div class="input-row">' +
-      '<div class="field" style="grid-column:1/-1">' +
-        '<label for="ws_name">Wholesaler Name *</label>' +
-        '<input id="ws_name" name="ws_name" placeholder="e.g. Juan Santos Trading">' +
-      '</div>' +
-    '</div>' +
-    '<div class="input-row">' +
-      '<div class="field">' +
-        '<label for="ws_store">Store Name *</label>' +
-        '<input id="ws_store" name="ws_store" placeholder="e.g. Santos General Merchandise">' +
-      '</div>' +
-      '<div class="field">' +
-        '<label for="ws_contact">Contact Number *</label>' +
-        '<input id="ws_contact" name="ws_contact" type="tel" placeholder="e.g. 09171234567">' +
-      '</div>' +
-    '</div>' +
-    '<div class="input-row">' +
-      '<div class="field">' +
-        '<label for="ws_person">Contact Person</label>' +
-        '<input id="ws_person" name="ws_person" placeholder="e.g. Juan Santos">' +
-      '</div>' +
-      '<div class="field">' +
-        '<label for="ws_category">Product Category</label>' +
-        '<input id="ws_category" name="ws_category" placeholder="e.g. Beverages, Snacks">' +
-      '</div>' +
-    '</div>' +
-    '<div class="input-row">' +
-      '<div class="field" style="grid-column:1/-1">' +
-        '<label for="ws_address">Complete Address</label>' +
-        '<input id="ws_address" name="ws_address" placeholder="e.g. 123 Rizal St., Brgy. 1, Vigan City">' +
-      '</div>' +
-    '</div>' +
-    '<button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="saveWholesaler()">Save Wholesaler</button>'
-  );
-  setTimeout(() => document.getElementById('ws_name')?.focus(), 200);
-}
-
-// ── EDIT MODAL ────────────────────────────────
-function openEditWholesalerModal(id) {
-  const w = _wholesalersCache.find(x => x.id === id);
-  if (!w) { toast('Wholesaler not found.', 'error'); return; }
-  openModal(
-    '<div class="modal-title">Edit Wholesaler</div>' +
-    '<div class="input-row">' +
-      '<div class="field" style="grid-column:1/-1">' +
-        '<label for="ws_name">Wholesaler Name *</label>' +
-        '<input id="ws_name" name="ws_name" value="' + esc(w.wholesaler_name) + '">' +
-      '</div>' +
-    '</div>' +
-    '<div class="input-row">' +
-      '<div class="field">' +
-        '<label for="ws_store">Store Name *</label>' +
-        '<input id="ws_store" name="ws_store" value="' + esc(w.store_name) + '">' +
-      '</div>' +
-      '<div class="field">' +
-        '<label for="ws_contact">Contact Number *</label>' +
-        '<input id="ws_contact" name="ws_contact" type="tel" value="' + esc(w.contact_number) + '">' +
-      '</div>' +
-    '</div>' +
-    '<div class="input-row">' +
-      '<div class="field">' +
-        '<label for="ws_person">Contact Person</label>' +
-        '<input id="ws_person" name="ws_person" value="' + esc(w.contact_person) + '">' +
-      '</div>' +
-      '<div class="field">' +
-        '<label for="ws_category">Product Category</label>' +
-        '<input id="ws_category" name="ws_category" value="' + esc(w.product_category) + '">' +
-      '</div>' +
-    '</div>' +
-    '<div class="input-row">' +
-      '<div class="field" style="grid-column:1/-1">' +
-        '<label for="ws_address">Complete Address</label>' +
-        '<input id="ws_address" name="ws_address" value="' + esc(w.address) + '">' +
-      '</div>' +
-    '</div>' +
-    '<button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="saveWholesaler(\'' + id + '\')">Update Wholesaler</button>'
-  );
-}
-
-// ── SAVE (ADD / EDIT) ─────────────────────────
-// ── Contact number validator ──────────────────
-function wsValidateContact(val) {
-  if (!val) return { ok: false, msg: 'Contact Number is required.' };
-  // Allow: digits, spaces, +, -, (, )
-  if (/[^0-9\s+\-()]/.test(val)) {
-    return { ok: false, msg: 'Contact Number contains invalid characters. Only digits, spaces, +, -, and () are allowed.' };
-  }
-  const digits = val.replace(/\D/g, '');
-  if (digits.length < 7) {
-    return { ok: false, msg: 'Contact Number must have at least 7 digits.' };
-  }
-  return { ok: true };
-}
-
-// ── Normalize spaces in a string ──────────────
-function wsNormalize(str) {
-  return (str || '').trim().replace(/\s{2,}/g, ' ');
-}
-
-async function saveWholesaler(id = null) {
-  // ── Sanitize inputs ──────────────────────────
-  const name    = wsNormalize(document.getElementById('ws_name')?.value);
-  const store   = wsNormalize(document.getElementById('ws_store')?.value);
-  const contact = wsNormalize(document.getElementById('ws_contact')?.value);
-  const person  = wsNormalize(document.getElementById('ws_person')?.value);
-  const cat     = wsNormalize(document.getElementById('ws_category')?.value);
-  const addr    = wsNormalize(document.getElementById('ws_address')?.value);
-
-  // ── Required field validation ──────────────────
-  if (!name) {
-    toast('Wholesaler Name is required.', 'error');
-    document.getElementById('ws_name')?.focus(); return;
-  }
-  if (!store) {
-    toast('Store Name is required.', 'error');
-    document.getElementById('ws_store')?.focus(); return;
-  }
-
-  // ── Contact number validation ──────────────────
-  const contactCheck = wsValidateContact(contact);
-  if (!contactCheck.ok) {
-    toast(contactCheck.msg, 'error');
-    document.getElementById('ws_contact')?.focus(); return;
-  }
-
-  // ── Duplicate prevention (store name + contact number) ──
-  if (!id) {
-    const storeLower   = store.toLowerCase();
-    const contactDigits = contact.replace(/\D/g, '');
-    const duplicate = _wholesalersCache.find(w =>
-      w.store_name.toLowerCase() === storeLower &&
-      w.contact_number.replace(/\D/g, '') === contactDigits
-    );
-    if (duplicate) {
-      toast(
-        'Duplicate record: "' + duplicate.store_name + '" with this contact number already exists.',
-        'error', 5000
-      );
-      return;
-    }
-  }
-
-  // ── Build payload with full audit trail ────────
-  const now = new Date().toISOString();
-  const payload = {
-    action:           id ? 'updateWholesaler' : 'addWholesaler',
-    id,
-    wholesaler_name:  name,
-    store_name:       store,
-    contact_number:   contact,
-    contact_person:   person,
-    product_category: cat,
-    address:          addr,
-    caller_role:      currentUser.role,
-    created_by:       currentUser.name || currentUser.username,
-    updated_at:       now,
-  };
-  if (!id) payload.created_at = now;
-
-  // ── Disable button to prevent double submit ────
-  const btn = document.querySelector('#modalBox .btn-primary');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
-
-  try {
-    const res = await gasPost(payload);
-    if (res.success) {
-      toast(id ? 'Wholesaler updated!' : 'Wholesaler added!', 'success');
-      closeModalDirect();
-      await loadWholesalers();
-    } else {
-      toast(res.message || 'Error saving wholesaler.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = id ? 'Update Wholesaler' : 'Save Wholesaler'; }
-    }
-  } catch(e) {
-    toast('Network error. Please try again.', 'error');
-    if (btn) { btn.disabled = false; btn.textContent = id ? 'Update Wholesaler' : 'Save Wholesaler'; }
-  }
-}
-
-// ── DELETE ────────────────────────────────────
-async function deleteWholesaler(id) {
-  const w = _wholesalersCache.find(x => x.id === id);
-  const name = w ? w.wholesaler_name : 'this wholesaler';
-  if (!confirm('Delete "' + name + '"?\nThis cannot be undone.')) return;
-  try {
-    const res = await gasPost({ action: 'deleteWholesaler', id, caller_role: currentUser.role });
-    if (res.success) { toast('Wholesaler deleted.', 'success'); await loadWholesalers(); }
-    else toast(res.message || 'Error deleting.', 'error');
-  } catch(e) { toast('Network error.', 'error'); }
-}
