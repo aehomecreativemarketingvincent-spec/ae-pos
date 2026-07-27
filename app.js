@@ -1430,6 +1430,10 @@ async function processCheckout(total) {
   // Validate cash for cash payments
   if (!isNonCash && (!cash || cash < total)) {
     toast('Cash received is insufficient!', 'error');
+    // BUG FIX: this early return never reset _checkoutInProgress, which
+    // permanently blocked every future click on Confirm (no toast, no
+    // modal close, nothing) until the page was reloaded.
+    _checkoutInProgress = false;
     if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
     return;
   }
@@ -1443,7 +1447,14 @@ async function processCheckout(total) {
     const eff = getCartItemEffective(c);
     return { ...c, price: eff.price, total: eff.total };
   });
-  if (!cartSnapshot.length) { toast('Cart is empty!', 'warning'); return; }
+  if (!cartSnapshot.length) {
+    toast('Cart is empty!', 'warning');
+    // BUG FIX: same issue as above — reset the guard so checkout isn't
+    // permanently stuck if this path is ever hit.
+    _checkoutInProgress = false;
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
+    return;
+  }
 
   const txId  = 'TX' + Date.now();
   const siNum = 'SI' + Date.now();
