@@ -1726,6 +1726,52 @@ async function downloadReceipt() {
   }
 }
 
+// ─── BLUETOOTH RECEIPT PRINTING ───────────────
+// Browsers cannot talk directly to most cheap Bluetooth thermal printers
+// (they use Classic Bluetooth SPP, which Web Bluetooth does not support).
+// The reliable workaround: render the receipt as an image, then hand it to
+// the phone's native Share sheet — the cashier picks a bridge app there
+// (e.g. "RawBT Print Service", free on Play Store) which actually talks to
+// the printer over Bluetooth. This also works with any other print app the
+// cashier may already have, not just RawBT.
+async function printReceiptBluetooth() {
+  if (!currentReceiptData) return;
+  try {
+    const el = document.getElementById('receiptContent');
+    if (typeof html2canvas === 'undefined') {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+    }
+    const canvas = await html2canvas(el, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
+
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) { toast('Could not prepare receipt image.', 'error'); return; }
+
+    const file = new File([blob], `receipt_${currentReceiptData.txId}.png`, { type: 'image/png' });
+
+    // Web Share API with files — supported on Chrome for Android.
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({
+        files: [file],
+        title: 'Receipt ' + currentReceiptData.txId,
+      });
+      return;
+    }
+
+    // Fallback: browser/device doesn't support sharing files (e.g. desktop
+    // Chrome, or older Android WebView). Download the image instead and
+    // tell the cashier how to print it manually.
+    const link = document.createElement('a');
+    link.download = `receipt_${currentReceiptData.txId}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    toast('Bluetooth print sharing isn\'t supported on this device — receipt image downloaded instead. Open it and share/print from your gallery app.', 'warning');
+  } catch(e) {
+    // User cancelling the share sheet also throws — don't show an error toast for that.
+    if (e && e.name === 'AbortError') return;
+ toast('Print failed. Try again.', 'error');
+  }
+}
+
 function loadScript(src) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
