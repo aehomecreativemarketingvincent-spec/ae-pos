@@ -60,12 +60,14 @@ const ROLE_NAV = {
     { id: 'logs',        icon: '', label: 'Analytics' },
     { id: 'salesExport', icon: '', label: 'Sales Export' },
     { id: 'wholesalers', icon: '', label: 'Wholesalers' },
+    { id: 'purchaseOrders', icon: '', label: 'Purchase Orders' },
   ],
   cashier: [
     { id: 'pos',         icon: '', label: 'Point of Sale' },
     { id: 'summary',     icon: '', label: 'Sales Summary' },
     { id: 'receipts',    icon: '', label: 'Receipts' },
     { id: 'wholesalers', icon: '', label: 'Wholesalers' },
+    { id: 'purchaseOrders', icon: '', label: 'Purchase Orders' },
   ],
   clerk: [
     { id: 'inventory',   icon: '', label: 'Inventory' },
@@ -458,6 +460,7 @@ function navigateTo(page) {
     summary: 'Sales Summary', logs: 'Analytics & Insights',
     salesExport: 'Sales Export',
     wholesalers: 'Wholesalers Information'
+    , purchaseOrders: 'Purchase Orders (Wholesaler)'
   };
  document.getElementById('topbarTitle').textContent = titles[page] || page;
   // render
@@ -496,6 +499,7 @@ function renderPage(page) {
     logs: renderLogs,
     salesExport: renderSalesExport,
     wholesalers: renderWholesalers,
+    purchaseOrders: renderPurchaseOrders,
   };
   if (pages[page]) pages[page]();
   else {
@@ -4253,4 +4257,629 @@ async function deleteWholesaler(id) {
     if (res.success) { toast('Wholesaler deleted.', 'success'); await loadWholesalers(); }
     else toast(res.message || 'Error deleting.', 'error');
   } catch(e) { toast('Network error.', 'error'); }
+}
+
+// ═══════════════════════════════════════════════
+// PURCHASE ORDERS (Wholesaler) — new isolated module
+// Workflow: Dashboard → New Order → History → Reports
+// Reuses existing CSS classes only (.card, .kpi-grid, .tbl-wrap table,
+// .btn, .inv-btn, .search-wrap, openModal/toast/esc) — no new styling.
+// ═══════════════════════════════════════════════
+let poTab = 'dashboard';
+let poCache = [];
+let poNewItems = [];
+let poHistoryFiltered = null;
+
+async function renderPurchaseOrders() {
+  document.getElementById('pageContent').innerHTML = `
+    <div class="po-subnav" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+      ${[
+        ['dashboard', 'Dashboard'],
+        ['new', '+ New Order'],
+        ['history', 'History'],
+        ['reports', 'Reports'],
+      ].map(([id, label]) => `
+        <button class="btn ${poTab === id ? 'btn-primary' : 'btn-ghost'} btn-sm" data-po-tab="${id}" onclick="poSwitchTab('${id}')">${label}</button>
+      `).join('')}
+    </div>
+    <div id="poTabContent"><div class="loading-spinner"><div class="spinner"></div> Loading...</div></div>
+  `;
+  await poRenderTab(poTab);
+}
+
+function poSwitchTab(tab) {
+  poTab = tab;
+  document.querySelectorAll('[data-po-tab]').forEach(b => {
+    b.classList.toggle('btn-primary', b.dataset.poTab === tab);
+    b.classList.toggle('btn-ghost', b.dataset.poTab !== tab);
+  });
+  poRenderTab(tab);
+}
+
+async function poRenderTab(tab) {
+  const el = document.getElementById('poTabContent');
+  if (!el) return;
+  el.innerHTML = `<div class="loading-spinner"><div class="spinner"></div> Loading...</div>`;
+  if (tab === 'dashboard') return poRenderDashboardTab();
+  if (tab === 'new')       return poRenderNewOrderTab();
+  if (tab === 'history')   return poRenderHistoryTab();
+  if (tab === 'reports')   return poRenderReportsTab();
+}
+
+// ── Shared: load PO data ──────────────────────
+async function poLoadOrders() {
+  try {
+    const res = await gasRequest({ action: 'getPurchaseOrders' });
+    poCache = res.data || [];
+    return poCache;
+  } catch(e) {
+    toast('Could not load purchase orders.', 'error');
+    return [];
+  }
+}
+
+function poDayRangeToday() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const end   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+  return { start, end };
+}
+
+// ═══ TAB 1: DASHBOARD ═══
+async function poRenderDashboardTab() {
+  const el = document.getElementById('poTabContent');
+  const orders = await poLoadOrders();
+
+  const { start: todayStart, end: todayEnd } = poDayRangeToday();
+  const total     = orders.length;
+  const pending   = orders.filter(o => o.status === 'Pending').length;
+  const completed = orders.filter(o => o.status === 'Completed').length;
+  const cancelled = orders.filter(o => o.status === 'Cancelled').length;
+  const todayCount = orders.filter(o => {
+    const d = parseDate(o.createdAt);
+    return d && d >= todayStart && d <= todayEnd;
+  }).length;
+
+  const recent = [...orders].reverse().slice(0, 8);
+
+  if (!el) return;
+  el.innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi-card kpi-blue"><div class="kpi-label">Total Records</div><div class="kpi-value">${total}</div></div>
+      <div class="kpi-card kpi-orange"><div class="kpi-label">Pending</div><div class="kpi-value">${pending}</div></div>
+      <div class="kpi-card kpi-green"><div class="kpi-label">Completed</div><div class="kpi-value">${completed}</div></div>
+      <div class="kpi-card kpi-grad"><div class="kpi-label">Cancelled</div><div class="kpi-value">${cancelled}</div></div>
+      <div class="kpi-card kpi-blue"><div class="kpi-label">Today's Transactions</div><div class="kpi-value">${todayCount}</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Recent Purchase Orders</div>
+      ${recent.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>PO #</th><th>Wholesaler</th><th>Grand Total</th><th>Status</th><th>Date</th></tr></thead>
+        <tbody>${recent.map(o => `<tr>
+          <td><span style="font-family:var(--font-mono);font-size:0.8rem">${esc(o.poNumber||'')}</span></td>
+          <td>${esc(o.wholesalerName||'')}</td>
+          <td class="text-green fw-700">₱${parseFloat(o.grandTotal||0).toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
+          <td>${poStatusBadge(o.status)}</td>
+          <td class="text-muted" style="font-size:0.8rem">${safeFormatDateOnly(o.createdAt)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No purchase orders yet.</div></div>'}
+    </div>
+  `;
+}
+
+function poStatusBadge(status) {
+  const map = {
+    Pending:   '<span class="badge-low">Pending</span>',
+    Completed: '<span class="badge-in-stock">Completed</span>',
+    Cancelled: '<span class="badge-out">Cancelled</span>',
+  };
+  return map[status] || esc(status || '');
+}
+
+// ═══ TAB 2: NEW ORDER ═══
+async function poRenderNewOrderTab() {
+  const el = document.getElementById('poTabContent');
+  if (!allProducts.length) await loadProducts();
+  if (typeof _wholesalersCache === 'undefined' || !_wholesalersCache || !_wholesalersCache.length) await loadWholesalers();
+
+  if (!el) return;
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-title"> Customer Information</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="field">
+          <label>Select Existing Wholesaler (optional)</label>
+          <select id="po_wholesalerPick" onchange="poPickWholesaler(this.value)">
+            <option value="">— Type new / manual entry —</option>
+            ${(_wholesalersCache||[]).map(w => `<option value="${esc(w.id)}">${esc(w.wholesaler_name)} (${esc(w.store_name)})</option>`).join('')}
+          </select>
+        </div>
+        <div></div>
+        <div class="field">
+          <label>Customer / Wholesaler Name *</label>
+          <input id="po_wholesalerName" type="text" placeholder="e.g. Juan Dela Cruz">
+        </div>
+        <div class="field">
+          <label>Store Name</label>
+          <input id="po_storeName" type="text" placeholder="e.g. JD Trading">
+        </div>
+        <div class="field">
+          <label>Contact Number</label>
+          <input id="po_contactNumber" type="text" placeholder="09xxxxxxxxx">
+        </div>
+        <div class="field">
+          <label>Delivery Address</label>
+          <input id="po_deliveryAddress" type="text" placeholder="Optional">
+        </div>
+        <div class="field">
+          <label>Pickup/Delivery Date *</label>
+          <input id="po_pickupDate" type="date">
+        </div>
+        <div class="field">
+          <label>Payment Terms</label>
+          <input id="po_paymentTerms" type="text" placeholder="e.g. COD, 30 days">
+        </div>
+        <div class="field" style="grid-column:1/-1">
+          <label>Remarks</label>
+          <input id="po_remarks" type="text" placeholder="Optional notes">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="card-title" style="margin:0"> Order Items</div>
+        <button class="btn btn-primary btn-sm" onclick="poOpenAddItemModal()">+ Add Item</button>
+      </div>
+      <div id="poItemsTable"></div>
+    </div>
+
+    <div class="card" style="background:var(--bg2)">
+      <div class="card-title">Order Summary</div>
+      <div id="poOrderSummary"></div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button class="btn btn-primary" id="poSaveBtn" onclick="poSaveOrder()"> Save Order</button>
+      <button class="btn btn-ghost" onclick="poCancelNewOrder()">Cancel</button>
+    </div>
+  `;
+  poRenderItemsTable();
+}
+
+function poPickWholesaler(id) {
+  if (!id) return;
+  const w = (_wholesalersCache||[]).find(x => x.id === id);
+  if (!w) return;
+  document.getElementById('po_wholesalerName').value = w.wholesaler_name || '';
+  document.getElementById('po_storeName').value      = w.store_name || '';
+  document.getElementById('po_contactNumber').value  = w.contact_number || '';
+  document.getElementById('po_deliveryAddress').value= w.address || '';
+}
+
+function poOpenAddItemModal() {
+  openModal(`
+    <div class="modal-title">Add Item</div>
+    <div class="search-wrap" style="margin-bottom:10px">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="poItemSearch" placeholder="Search product name or barcode..." oninput="poFilterItemPicker(this.value)" autocomplete="off">
+    </div>
+    <div id="poItemPickerList" style="max-height:340px;overflow-y:auto"></div>
+  `);
+  poFilterItemPicker('');
+}
+
+function poFilterItemPicker(q) {
+  const listEl = document.getElementById('poItemPickerList');
+  if (!listEl) return;
+  q = (q || '').toLowerCase().trim();
+  const matches = allProducts.filter(p =>
+    !q || (p.name||'').toLowerCase().includes(q) || (p.barcode||'').toLowerCase().includes(q)
+  ).slice(0, 30);
+
+  listEl.innerHTML = matches.length ? matches.map(p => {
+    const hasPack = parseFloat(p.pricePack||0) > 0;
+    return `<div class="cart-item" style="cursor:pointer" onclick="poAddItemToOrder('${p.id}','piece')">
+      <div class="ci-info">
+        <div class="ci-name">${esc(p.name)}</div>
+        <div class="ci-price">₱${parseFloat(p.pricePer||0).toFixed(2)} / piece${hasPack ? ` · ₱${parseFloat(p.pricePack||0).toFixed(2)} / pack` : ''}</div>
+      </div>
+      ${hasPack ? `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();poAddItemToOrder('${p.id}','pack')">+ Pack</button>` : ''}
+    </div>`;
+  }).join('') : '<div class="no-data"><div class="no-data-text">No matching products.</div></div>';
+}
+
+function poAddItemToOrder(productId, unit) {
+  const p = allProducts.find(x => x.id === productId);
+  if (!p) return;
+  // Default price for wholesaler PO: use Wholesale Price if set, else fall back to Retail
+  const wPrice = unit === 'pack' ? parseFloat(p.wholesalePricePack||0) : parseFloat(p.wholesalePricePer||0);
+  const rPrice = unit === 'pack' ? parseFloat(p.pricePack||0) : parseFloat(p.pricePer||0);
+  const price  = wPrice > 0 ? wPrice : rPrice;
+
+  poNewItems.push({
+    productId: p.id, name: p.name, unit, qty: 1, price, disc: 0,
+  });
+  closeModalDirect();
+  poRenderItemsTable();
+}
+
+function poRenderItemsTable() {
+  const el = document.getElementById('poItemsTable');
+  if (!el) return;
+
+  if (!poNewItems.length) {
+    el.innerHTML = '<div class="no-data"><div class="no-data-text">No items added yet.</div></div>';
+    poUpdateOrderSummary();
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>#</th><th>Item</th><th>Unit</th><th>Qty</th><th>Price</th><th>Disc</th><th>Total</th><th></th></tr></thead>
+      <tbody>${poNewItems.map((it, idx) => `<tr>
+        <td>${idx+1}</td>
+        <td>${esc(it.name)}</td>
+        <td>${it.unit}</td>
+        <td><input type="number" min="1" value="${it.qty}" style="width:60px" onchange="poUpdateItem(${idx},'qty',this.value)"></td>
+        <td><input type="number" min="0" step="0.01" value="${it.price}" style="width:80px" onchange="poUpdateItem(${idx},'price',this.value)"></td>
+        <td><input type="number" min="0" step="0.01" value="${it.disc}" style="width:70px" onchange="poUpdateItem(${idx},'disc',this.value)"></td>
+        <td class="fw-700">₱${poItemTotal(it).toFixed(2)}</td>
+        <td><button class="ci-remove" onclick="poRemoveItem(${idx})">✕</button></td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  `;
+  poUpdateOrderSummary();
+}
+
+function poItemTotal(it) {
+  return Math.max(0, (parseFloat(it.qty||0) * parseFloat(it.price||0)) - parseFloat(it.disc||0));
+}
+
+function poUpdateItem(idx, field, val) {
+  if (!poNewItems[idx]) return;
+  poNewItems[idx][field] = field === 'qty' ? (parseInt(val)||1) : (parseFloat(val)||0);
+  poRenderItemsTable();
+}
+
+function poRemoveItem(idx) {
+  poNewItems.splice(idx, 1);
+  poRenderItemsTable();
+}
+
+function poUpdateOrderSummary() {
+  const el = document.getElementById('poOrderSummary');
+  if (!el) return;
+  const items = poNewItems.length;
+  const qty   = poNewItems.reduce((s,i) => s + (parseFloat(i.qty)||0), 0);
+  const subtotal = poNewItems.reduce((s,i) => s + (parseFloat(i.qty||0)*parseFloat(i.price||0)), 0);
+  const discount = poNewItems.reduce((s,i) => s + (parseFloat(i.disc)||0), 0);
+  const grandTotal = Math.max(0, subtotal - discount);
+
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 20px">
+      <div>Items: <b>${items}</b></div>
+      <div>Qty: <b>${qty}</b></div>
+      <div>Subtotal: <b>₱${subtotal.toFixed(2)}</b></div>
+      <div>Discount: <b class="text-red">₱${discount.toFixed(2)}</b></div>
+    </div>
+    <div style="text-align:right;margin-top:10px;font-size:1.1rem" class="fw-700">Grand Total: <span class="text-green">₱${grandTotal.toFixed(2)}</span></div>
+  `;
+}
+
+function poCancelNewOrder() {
+  poNewItems = [];
+  poSwitchTab('dashboard');
+}
+
+async function poSaveOrder() {
+  const wholesalerName = document.getElementById('po_wholesalerName')?.value.trim();
+  const pickupDate     = document.getElementById('po_pickupDate')?.value;
+  if (!wholesalerName) { toast('Customer/Wholesaler Name is required.', 'error'); return; }
+  if (!pickupDate)      { toast('Pickup/Delivery Date is required.', 'error'); return; }
+  if (!poNewItems.length) { toast('Add at least one item.', 'warning'); return; }
+
+  const subtotal   = poNewItems.reduce((s,i) => s + (parseFloat(i.qty||0)*parseFloat(i.price||0)), 0);
+  const discount   = poNewItems.reduce((s,i) => s + (parseFloat(i.disc)||0), 0);
+  const grandTotal = Math.max(0, subtotal - discount);
+
+  const btn = document.getElementById('poSaveBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+
+  try {
+    const res = await gasPost({
+      action: 'addPurchaseOrder',
+      caller_role: currentUser.role,
+      poNumber: 'PO' + Date.now(),
+      wholesalerId: document.getElementById('po_wholesalerPick')?.value || '',
+      wholesalerName,
+      storeName: document.getElementById('po_storeName')?.value || '',
+      contactNumber: document.getElementById('po_contactNumber')?.value || '',
+      deliveryAddress: document.getElementById('po_deliveryAddress')?.value || '',
+      pickupDeliveryDate: pickupDate,
+      paymentTerms: document.getElementById('po_paymentTerms')?.value || '',
+      remarks: document.getElementById('po_remarks')?.value || '',
+      items: JSON.stringify(poNewItems),
+      subtotal, discount, grandTotal,
+      createdBy: currentUser.name || currentUser.username || '',
+    });
+    if (res.success) {
+      toast('Purchase order saved!', 'success');
+      poNewItems = [];
+      poSwitchTab('history');
+    } else {
+      toast(res.message || 'Error saving order.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
+    }
+  } catch(e) {
+    toast('Network error. Please try again.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
+  }
+}
+
+// ═══ TAB 3: HISTORY ═══
+async function poRenderHistoryTab() {
+  const el = document.getElementById('poTabContent');
+  const orders = await poLoadOrders();
+  poHistoryFiltered = null;
+
+  if (!el) return;
+  el.innerHTML = `
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto auto;gap:10px;align-items:end">
+        <div class="field" style="margin:0">
+          <label>Search</label>
+          <input type="text" id="poHistSearch" placeholder="Order # or Customer">
+        </div>
+        <div class="field" style="margin:0">
+          <label>Status</label>
+          <select id="poHistStatus">
+            <option value="">All</option>
+            <option value="Pending">Pending</option>
+            <option value="Completed">Completed</option>
+            <option value="Cancelled">Cancelled</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0"><label>From</label><input type="date" id="poHistFrom"></div>
+        <div class="field" style="margin:0"><label>To</label><input type="date" id="poHistTo"></div>
+        <button class="btn btn-primary btn-sm" onclick="poApplyHistoryFilter()">Filter</button>
+        <button class="btn btn-ghost btn-sm" onclick="poClearHistoryFilter()">Clear</button>
+      </div>
+    </div>
+    <div class="card"><div id="poHistoryTable"></div></div>
+  `;
+  poRenderHistoryTable(orders);
+}
+
+function poApplyHistoryFilter() {
+  const q      = (document.getElementById('poHistSearch')?.value || '').toLowerCase().trim();
+  const status = document.getElementById('poHistStatus')?.value || '';
+  const from   = document.getElementById('poHistFrom')?.value ? new Date(document.getElementById('poHistFrom').value) : null;
+  const to     = document.getElementById('poHistTo')?.value   ? new Date(document.getElementById('poHistTo').value)   : null;
+
+  const filtered = poCache.filter(o => {
+    if (q && !((o.poNumber||'').toLowerCase().includes(q) || (o.wholesalerName||'').toLowerCase().includes(q))) return false;
+    if (status && o.status !== status) return false;
+    const d = parseDate(o.createdAt);
+    if (from && d && d < from) return false;
+    if (to   && d && d > new Date(to.getTime() + 86399999)) return false;
+    return true;
+  });
+  poHistoryFiltered = filtered;
+  poRenderHistoryTable(filtered);
+}
+
+function poClearHistoryFilter() {
+  document.getElementById('poHistSearch').value = '';
+  document.getElementById('poHistStatus').value = '';
+  document.getElementById('poHistFrom').value = '';
+  document.getElementById('poHistTo').value = '';
+  poHistoryFiltered = null;
+  poRenderHistoryTable(poCache);
+}
+
+function poRenderHistoryTable(data) {
+  const el = document.getElementById('poHistoryTable');
+  if (!el) return;
+  const role = currentUser.role;
+  const canManage = role === 'admin'; // Complete / Cancel / Delete — admin-only (stock-affecting actions)
+
+  if (!data.length) {
+    el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No orders found.</div></div>';
+    return;
+  }
+
+  const rows = [...data].reverse().map(o => {
+    const actions = [
+      `<button class="inv-btn" onclick="poViewOrder('${o.id}')">View</button>`,
+      canManage && o.status === 'Pending' ? `<button class="inv-btn inv-btn-edit" onclick="poCompleteOrder('${o.id}')">Complete</button>` : '',
+      canManage && o.status === 'Pending' ? `<button class="inv-btn" onclick="poCancelOrder('${o.id}')">Cancel</button>` : '',
+      canManage && o.status !== 'Completed' ? `<button class="inv-btn inv-btn-del" onclick="poDeleteOrder('${o.id}')">Del</button>` : '',
+    ].filter(Boolean).join('');
+
+    return `<tr>
+      <td><span style="font-family:var(--font-mono);font-size:0.8rem">${esc(o.poNumber||'')}</span></td>
+      <td>${esc(o.wholesalerName||'')}</td>
+      <td class="text-muted" style="font-size:0.8rem">${safeFormatDateOnly(o.createdAt)}</td>
+      <td class="text-muted" style="font-size:0.8rem">${esc(o.pickupDeliveryDate||'—')}</td>
+      <td class="fw-700">₱${parseFloat(o.grandTotal||0).toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
+      <td>${poStatusBadge(o.status)}</td>
+      <td><div style="display:flex;gap:5px;flex-wrap:wrap">${actions}</div></td>
+    </tr>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Order #</th><th>Customer</th><th>Created</th><th>Pickup/Delivery</th><th>Grand Total</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  `;
+}
+
+function poViewOrder(id) {
+  const o = poCache.find(x => x.id === id);
+  if (!o) return;
+  let items = [];
+  try { items = JSON.parse(o.items || '[]'); } catch(e) {}
+
+  openModal(`
+    <div class="modal-title">Order ${esc(o.poNumber||'')}</div>
+    <div style="margin-bottom:10px">${poStatusBadge(o.status)}</div>
+    <div style="font-size:0.88rem;line-height:1.7">
+      <div><b>Customer:</b> ${esc(o.wholesalerName||'')} ${o.storeName ? '(' + esc(o.storeName) + ')' : ''}</div>
+      <div><b>Contact:</b> ${esc(o.contactNumber||'—')}</div>
+      <div><b>Delivery Address:</b> ${esc(o.deliveryAddress||'—')}</div>
+      <div><b>Pickup/Delivery Date:</b> ${esc(o.pickupDeliveryDate||'—')}</div>
+      <div><b>Payment Terms:</b> ${esc(o.paymentTerms||'—')}</div>
+      <div><b>Remarks:</b> ${esc(o.remarks||'—')}</div>
+      <div><b>Created By:</b> ${esc(o.createdBy||'—')} on ${safeFormatDateTime(o.createdAt,'—')}</div>
+      ${o.status === 'Completed' ? `<div><b>Completed By:</b> ${esc(o.completedBy||'—')} on ${safeFormatDateTime(o.completedAt,'—')}</div>` : ''}
+    </div>
+    <div class="tbl-wrap" style="margin-top:12px"><table>
+      <thead><tr><th>Item</th><th>Unit</th><th>Qty</th><th>Price</th><th>Disc</th><th>Total</th></tr></thead>
+      <tbody>${items.map(it => `<tr>
+        <td>${esc(it.name)}</td><td>${it.unit}</td><td>${it.qty}</td>
+        <td>₱${parseFloat(it.price||0).toFixed(2)}</td><td>₱${parseFloat(it.disc||0).toFixed(2)}</td>
+        <td class="fw-700">₱${poItemTotal(it).toFixed(2)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+    <div style="text-align:right;margin-top:10px" class="fw-700">Grand Total: <span class="text-green">₱${parseFloat(o.grandTotal||0).toFixed(2)}</span></div>
+  `);
+}
+
+async function poCompleteOrder(id) {
+  const o = poCache.find(x => x.id === id);
+  if (!confirm(`Mark order "${o?.poNumber||''}" as Completed?\nThis will deduct stock from Inventory.`)) return;
+  try {
+    const res = await gasPost({ action: 'completePurchaseOrder', id, caller_role: currentUser.role, completedBy: currentUser.name || currentUser.username || '' });
+    if (res.success) { toast('Order completed. Stock deducted.', 'success'); await poRenderHistoryTab(); }
+    else toast(res.message || 'Error completing order.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function poCancelOrder(id) {
+  const o = poCache.find(x => x.id === id);
+  if (!confirm(`Cancel order "${o?.poNumber||''}"?`)) return;
+  try {
+    const res = await gasPost({ action: 'cancelPurchaseOrder', id, caller_role: currentUser.role });
+    if (res.success) { toast('Order cancelled.', 'success'); await poRenderHistoryTab(); }
+    else toast(res.message || 'Error cancelling order.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function poDeleteOrder(id) {
+  const o = poCache.find(x => x.id === id);
+  if (!confirm(`Delete order "${o?.poNumber||''}"?\nThis cannot be undone.`)) return;
+  try {
+    const res = await gasPost({ action: 'deletePurchaseOrder', id, caller_role: currentUser.role });
+    if (res.success) { toast('Order deleted.', 'success'); await poRenderHistoryTab(); }
+    else toast(res.message || 'Error deleting order.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+// ═══ TAB 4: REPORTS ═══
+async function poRenderReportsTab() {
+  const el = document.getElementById('poTabContent');
+  const orders = await poLoadOrders();
+  const now = new Date();
+  const monthAgo = new Date(now - 30 * 86400000);
+
+  const total     = orders.length;
+  const thisMonth = orders.filter(o => { const d = parseDate(o.createdAt); return d && d >= monthAgo; }).length;
+  const completed = orders.filter(o => o.status === 'Completed').length;
+  const pending   = orders.filter(o => o.status === 'Pending').length;
+  const cancelled = orders.filter(o => o.status === 'Cancelled').length;
+  const totalValue = orders.filter(o => o.status !== 'Cancelled').reduce((s,o) => s + parseFloat(o.grandTotal||0), 0);
+
+  // Sales by Wholesaler
+  const byWholesaler = {};
+  orders.filter(o => o.status !== 'Cancelled').forEach(o => {
+    const key = o.wholesalerName || 'Unknown';
+    if (!byWholesaler[key]) byWholesaler[key] = { orders: 0, value: 0 };
+    byWholesaler[key].orders++;
+    byWholesaler[key].value += parseFloat(o.grandTotal||0);
+  });
+  const wholesalerRows = Object.entries(byWholesaler).sort((a,b) => b[1].value - a[1].value);
+
+  if (!el) return;
+  el.innerHTML = `
+    <div class="kpi-grid">
+      <div class="kpi-card kpi-blue"><div class="kpi-label">Total Orders</div><div class="kpi-value">${total}</div></div>
+      <div class="kpi-card kpi-grad"><div class="kpi-label">This Month</div><div class="kpi-value">${thisMonth}</div></div>
+      <div class="kpi-card kpi-green"><div class="kpi-label">Completed</div><div class="kpi-value">${completed}</div></div>
+      <div class="kpi-card kpi-orange"><div class="kpi-label">Pending</div><div class="kpi-value">${pending}</div></div>
+      <div class="kpi-card kpi-blue"><div class="kpi-label">Cancelled</div><div class="kpi-value">${cancelled}</div></div>
+      <div class="kpi-card kpi-green"><div class="kpi-label">Total Order Value</div><div class="kpi-value">₱${totalValue.toLocaleString('en-PH',{minimumFractionDigits:2})}</div></div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="card-title" style="margin:0">Sales by Wholesaler</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="poExportExcel()"> Excel</button>
+          <button class="btn btn-ghost btn-sm" onclick="poExportPDF()"> PDF</button>
+        </div>
+      </div>
+      ${wholesalerRows.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Wholesaler</th><th>Orders</th><th>Total Value</th></tr></thead>
+        <tbody>${wholesalerRows.map(([name, v]) => `<tr>
+          <td>${esc(name)}</td><td>${v.orders}</td>
+          <td class="fw-700 text-green">₱${v.value.toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : '<div class="no-data"><div class="no-data-text">No data yet.</div></div>'}
+    </div>
+  `;
+}
+
+async function poExportExcel() {
+  try {
+    if (typeof XLSX === 'undefined') {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+    }
+    const header = ['PO #','Wholesaler','Store','Contact','Pickup/Delivery Date','Subtotal','Discount','Grand Total','Status','Created By','Created At'];
+    const rows = poCache.map(o => [
+      o.poNumber||'', o.wholesalerName||'', o.storeName||'', o.contactNumber||'',
+      o.pickupDeliveryDate||'', parseFloat(o.subtotal||0), parseFloat(o.discount||0),
+      parseFloat(o.grandTotal||0), o.status||'', o.createdBy||'', safeFormatDateTime(o.createdAt,'')
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Purchase Orders');
+    XLSX.writeFile(wb, 'PurchaseOrders_' + Date.now() + '.xlsx');
+  } catch(e) {
+    toast('Excel export failed.', 'error');
+  }
+}
+
+async function poExportPDF() {
+  try {
+    if (typeof window.jspdf === 'undefined') {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+    }
+    if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
+      toast('PDF library failed to load.', 'error');
+      return;
+    }
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    doc.setFontSize(14);
+    doc.text('Purchase Orders (Wholesaler) Report', 14, 16);
+    doc.setFontSize(9);
+    let y = 26;
+    doc.text('PO #', 14, y); doc.text('Wholesaler', 50, y); doc.text('Grand Total', 120, y); doc.text('Status', 160, y);
+    y += 6;
+    poCache.forEach(o => {
+      if (y > 280) { doc.addPage(); y = 16; }
+      doc.text(String(o.poNumber||''), 14, y);
+      doc.text(String(o.wholesalerName||'').substring(0,28), 50, y);
+      doc.text('P' + parseFloat(o.grandTotal||0).toFixed(2), 120, y);
+      doc.text(String(o.status||''), 160, y);
+      y += 6;
+    });
+    doc.save('PurchaseOrders_' + Date.now() + '.pdf');
+  } catch(e) {
+    toast('PDF export failed.', 'error');
+  }
 }
