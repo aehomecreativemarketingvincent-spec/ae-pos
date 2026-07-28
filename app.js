@@ -4389,40 +4389,40 @@ async function poRenderNewOrderTab() {
       <div class="card-title"> Customer Information</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div class="field">
-          <label>Select Existing Wholesaler (optional)</label>
-          <select id="po_wholesalerPick" onchange="poPickWholesaler(this.value)">
+          <label for="po_wholesalerPick">Select Existing Wholesaler (optional)</label>
+          <select id="po_wholesalerPick" name="po_wholesalerPick" onchange="poPickWholesaler(this.value)">
             <option value="">— Type new / manual entry —</option>
             ${(_wholesalersCache||[]).map(w => `<option value="${esc(w.id)}">${esc(w.wholesaler_name)} (${esc(w.store_name)})</option>`).join('')}
           </select>
         </div>
         <div></div>
         <div class="field">
-          <label>Customer / Wholesaler Name *</label>
-          <input id="po_wholesalerName" type="text" placeholder="e.g. Juan Dela Cruz">
+          <label for="po_wholesalerName">Customer / Wholesaler Name *</label>
+          <input id="po_wholesalerName" name="po_wholesalerName" type="text" placeholder="e.g. Juan Dela Cruz">
         </div>
         <div class="field">
-          <label>Store Name</label>
-          <input id="po_storeName" type="text" placeholder="e.g. JD Trading">
+          <label for="po_storeName">Store Name</label>
+          <input id="po_storeName" name="po_storeName" type="text" placeholder="e.g. JD Trading">
         </div>
         <div class="field">
-          <label>Contact Number</label>
-          <input id="po_contactNumber" type="text" placeholder="09xxxxxxxxx">
+          <label for="po_contactNumber">Contact Number</label>
+          <input id="po_contactNumber" name="po_contactNumber" type="text" placeholder="09xxxxxxxxx">
         </div>
         <div class="field">
-          <label>Delivery Address</label>
-          <input id="po_deliveryAddress" type="text" placeholder="Optional">
+          <label for="po_deliveryAddress">Delivery Address</label>
+          <input id="po_deliveryAddress" name="po_deliveryAddress" type="text" placeholder="Optional">
         </div>
         <div class="field">
-          <label>Pickup/Delivery Date *</label>
-          <input id="po_pickupDate" type="date">
+          <label for="po_pickupDate">Pickup/Delivery Date *</label>
+          <input id="po_pickupDate" name="po_pickupDate" type="date">
         </div>
         <div class="field">
-          <label>Payment Terms</label>
-          <input id="po_paymentTerms" type="text" placeholder="e.g. COD, 30 days">
+          <label for="po_paymentTerms">Payment Terms</label>
+          <input id="po_paymentTerms" name="po_paymentTerms" type="text" placeholder="e.g. COD, 30 days">
         </div>
         <div class="field" style="grid-column:1/-1">
-          <label>Remarks</label>
-          <input id="po_remarks" type="text" placeholder="Optional notes">
+          <label for="po_remarks">Remarks</label>
+          <input id="po_remarks" name="po_remarks" type="text" placeholder="Optional notes">
         </div>
       </div>
     </div>
@@ -4463,7 +4463,7 @@ function poOpenAddItemModal() {
     <div class="modal-title">Add Item</div>
     <div class="search-wrap" style="margin-bottom:10px">
       <span class="search-icon">🔍</span>
-      <input type="text" id="poItemSearch" placeholder="Search product name or barcode..." oninput="poFilterItemPicker(this.value)" autocomplete="off">
+      <input type="text" id="poItemSearch" name="poItemSearch" placeholder="Search product name or barcode..." oninput="poFilterItemPicker(this.value)" autocomplete="off">
     </div>
     <div id="poItemPickerList" style="max-height:340px;overflow-y:auto"></div>
   `);
@@ -4522,9 +4522,9 @@ function poRenderItemsTable() {
         <td>${idx+1}</td>
         <td>${esc(it.name)}</td>
         <td>${it.unit}</td>
-        <td><input type="number" min="1" value="${it.qty}" style="width:60px" onchange="poUpdateItem(${idx},'qty',this.value)"></td>
-        <td><input type="number" min="0" step="0.01" value="${it.price}" style="width:80px" onchange="poUpdateItem(${idx},'price',this.value)"></td>
-        <td><input type="number" min="0" step="0.01" value="${it.disc}" style="width:70px" onchange="poUpdateItem(${idx},'disc',this.value)"></td>
+        <td><input type="number" min="1" id="po_item_qty_${idx}" name="po_item_qty_${idx}" aria-label="Quantity for ${esc(it.name)}" value="${it.qty}" style="width:60px" onchange="poUpdateItem(${idx},'qty',this.value)"></td>
+        <td><input type="number" min="0" step="0.01" id="po_item_price_${idx}" name="po_item_price_${idx}" aria-label="Price for ${esc(it.name)}" value="${it.price}" style="width:80px" onchange="poUpdateItem(${idx},'price',this.value)"></td>
+        <td><input type="number" min="0" step="0.01" id="po_item_disc_${idx}" name="po_item_disc_${idx}" aria-label="Discount for ${esc(it.name)}" value="${it.disc}" style="width:70px" onchange="poUpdateItem(${idx},'disc',this.value)"></td>
         <td class="fw-700">₱${poItemTotal(it).toFixed(2)}</td>
         <td><button class="ci-remove" onclick="poRemoveItem(${idx})">✕</button></td>
       </tr>`).join('')}</tbody>
@@ -4629,20 +4629,20 @@ async function poRenderHistoryTab() {
     <div class="card" style="margin-bottom:16px">
       <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto auto;gap:10px;align-items:end">
         <div class="field" style="margin:0">
-          <label>Search</label>
-          <input type="text" id="poHistSearch" placeholder="Order # or Customer">
+          <label for="poHistSearch">Search</label>
+          <input type="text" id="poHistSearch" name="poHistSearch" placeholder="Order # or Customer">
         </div>
         <div class="field" style="margin:0">
-          <label>Status</label>
-          <select id="poHistStatus">
+          <label for="poHistStatus">Status</label>
+          <select id="poHistStatus" name="poHistStatus">
             <option value="">All</option>
             <option value="Pending">Pending</option>
             <option value="Completed">Completed</option>
             <option value="Cancelled">Cancelled</option>
           </select>
         </div>
-        <div class="field" style="margin:0"><label>From</label><input type="date" id="poHistFrom"></div>
-        <div class="field" style="margin:0"><label>To</label><input type="date" id="poHistTo"></div>
+        <div class="field" style="margin:0"><label for="poHistFrom">From</label><input type="date" id="poHistFrom" name="poHistFrom"></div>
+        <div class="field" style="margin:0"><label for="poHistTo">To</label><input type="date" id="poHistTo" name="poHistTo"></div>
         <button class="btn btn-primary btn-sm" onclick="poApplyHistoryFilter()">Filter</button>
         <button class="btn btn-ghost btn-sm" onclick="poClearHistoryFilter()">Clear</button>
       </div>
