@@ -1869,3 +1869,12 @@ tbody tr:last-child td { border-bottom: none; }
   background: #000;
   display: block;
 }
+
+/* ── Daily Inventory Checking: A4 print layout ──
+   Scoped entirely to #diPrintArea, which only exists in the DOM for the
+   instant window.print() is called — never affects on-screen UI. */
+@media print {
+  body * { visibility: hidden; }
+  #diPrintArea, #diPrintArea * { visibility: visible; }
+  #diPrintArea { position: absolute; top: 0; left: 0; width: 100%; }
+}
