@@ -61,6 +61,7 @@ const ROLE_NAV = {
     { id: 'salesExport', icon: '', label: 'Sales Export' },
     { id: 'wholesalers', icon: '', label: 'Wholesalers' },
     { id: 'purchaseOrders', icon: '', label: 'Purchase Orders' },
+    { id: 'dailyInventory', icon: '', label: 'Daily Inventory Checking' },
   ],
   cashier: [
     { id: 'pos',         icon: '', label: 'Point of Sale' },
@@ -76,6 +77,7 @@ const ROLE_NAV = {
     { id: 'logs',        icon: '', label: 'Analytics' },
     { id: 'salesExport', icon: '', label: 'Sales Export' },
     { id: 'wholesalers', icon: '', label: 'Wholesalers' },
+    { id: 'dailyInventory', icon: '', label: 'Daily Inventory Checking' },
   ],
   viewer: [
     { id: 'dashboard', icon: '', label: 'Dashboard' },
@@ -461,6 +463,7 @@ function navigateTo(page) {
     salesExport: 'Sales Export',
     wholesalers: 'Wholesalers Information'
     , purchaseOrders: 'Purchase Orders (Wholesaler)'
+    , dailyInventory: 'Daily Inventory Checking'
   };
  document.getElementById('topbarTitle').textContent = titles[page] || page;
   // render
@@ -500,6 +503,7 @@ function renderPage(page) {
     salesExport: renderSalesExport,
     wholesalers: renderWholesalers,
     purchaseOrders: renderPurchaseOrders,
+    dailyInventory: renderDailyInventory,
   };
   if (pages[page]) pages[page]();
   else {
@@ -4927,5 +4931,692 @@ async function poExportPDF() {
     doc.save('PurchaseOrders_' + Date.now() + '.pdf');
   } catch(e) {
     toast('PDF export failed.', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════
+// DAILY INVENTORY CHECKING — new isolated module
+// Workflow: Opening Inventory → Selling → Closing Inventory → History
+// Pieces and Packs tracked separately throughout (no pack-to-piece
+// conversion — matches how Products/Inventory already work).
+// Reuses existing CSS classes only — no new visual styling except a
+// small print-only stylesheet block (needed for the A4 print layout,
+// scoped so it never affects on-screen UI).
+// ═══════════════════════════════════════════════
+let diTab = 'opening';
+let diCache = [];
+let diTodaySoldQty = {};
+let diDraftOpening = {};   // productId -> {addPcs, addPacks, actualPcs, actualPacks}
+let diDraftClosing = {};   // productId -> {actualPcs, actualPacks}
+let diSearchQ = '';
+let diCategoryFilter = '';
+let diPage = 1;
+const DI_PAGE_SIZE = 50;
+
+function diTodayStr() {
+  const d = new Date();
+  const yyyy = d.getFullYear(), mm = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+function diYesterdayStr() {
+  const d = new Date(); d.setDate(d.getDate() - 1);
+  const yyyy = d.getFullYear(), mm = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+async function renderDailyInventory() {
+  document.getElementById('pageContent').innerHTML = `
+    <div class="po-subnav" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+      ${[
+        ['opening', 'Opening Inventory'],
+        ['closing', 'Closing Inventory'],
+        ['history', 'History'],
+      ].map(([id, label]) => `
+        <button class="btn ${diTab === id ? 'btn-primary' : 'btn-ghost'} btn-sm" data-di-tab="${id}" onclick="diSwitchTab('${id}')">${label}</button>
+      `).join('')}
+    </div>
+    <div id="diTabContent"><div class="loading-spinner"><div class="spinner"></div> Loading...</div></div>
+  `;
+  if (!allProducts.length) await loadProducts();
+  await diLoadRecords();
+  await diRenderTab(diTab);
+}
+
+function diSwitchTab(tab) {
+  diTab = tab;
+  diPage = 1;
+  document.querySelectorAll('[data-di-tab]').forEach(b => {
+    b.classList.toggle('btn-primary', b.dataset.diTab === tab);
+    b.classList.toggle('btn-ghost', b.dataset.diTab !== tab);
+  });
+  diRenderTab(tab);
+}
+
+async function diRenderTab(tab) {
+  const el = document.getElementById('diTabContent');
+  if (!el) return;
+  el.innerHTML = `<div class="loading-spinner"><div class="spinner"></div> Loading...</div>`;
+  if (tab === 'opening') return diRenderOpeningTab();
+  if (tab === 'closing') return diRenderClosingTab();
+  if (tab === 'history') return diRenderHistoryTab();
+}
+
+async function diLoadRecords() {
+  try {
+    const res = await gasRequest({ action: 'getDailyInventory' });
+    diCache = res.data || [];
+    return diCache;
+  } catch(e) {
+    toast('Could not load Daily Inventory records.', 'error');
+    return [];
+  }
+}
+
+function diGetRecordByDate(dateStr) {
+  return diCache.find(r => r.date === dateStr) || null;
+}
+
+// Looks up yesterday's Closing actual counts for a product; falls back to
+// the live Inventory balance if no Closing was recorded (per spec).
+function diGetPosStock(productId) {
+  const y = diGetRecordByDate(diYesterdayStr());
+  if (y && y.closingCompleted === 'true') {
+    try {
+      const items = JSON.parse(y.closingItems || '[]');
+      const found = items.find(it => it.productId === productId);
+      if (found) return { pcs: parseFloat(found.actualPcs)||0, packs: parseFloat(found.actualPacks)||0, source: 'closing' };
+    } catch(e) {}
+  }
+  const p = allProducts.find(x => x.id === productId);
+  return { pcs: parseFloat(p?.qtyPcs||0)||0, packs: parseFloat(p?.qtyPacks||0)||0, source: 'live' };
+}
+
+function diVariance(actual, expected) {
+  if (actual === '' || actual === null || actual === undefined) return null; // not counted
+  return (parseFloat(actual)||0) - (parseFloat(expected)||0);
+}
+function diRemarks(varPcs, varPacks) {
+  if (varPcs === null && varPacks === null) return 'NOT COUNTED';
+  const v1 = varPcs || 0, v2 = varPacks || 0;
+  if (v1 === 0 && v2 === 0) return 'MATCH';
+  if (v1 < 0 || v2 < 0) return 'SHORT';
+  return 'OVER';
+}
+function diRemarksBadge(remarks) {
+  const map = {
+    'MATCH':       '<span class="badge-in-stock">MATCH</span>',
+    'SHORT':       '<span class="badge-out">SHORT</span>',
+    'OVER':        '<span class="badge-low">OVER</span>',
+    'NOT COUNTED': '<span class="text-muted" style="font-size:0.78rem">Not counted</span>',
+  };
+  return map[remarks] || esc(remarks);
+}
+
+function diCategoryOptions() {
+  const cats = [...new Set(allProducts.map(p => p.category).filter(Boolean))].sort();
+  return cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+}
+
+function diFilteredProducts() {
+  const q = diSearchQ.toLowerCase().trim();
+  return allProducts.filter(p => {
+    if (diCategoryFilter && p.category !== diCategoryFilter) return false;
+    if (!q) return true;
+    return (p.name||'').toLowerCase().includes(q) || (p.barcode||'').toLowerCase().includes(q) || (p.id||'').toLowerCase().includes(q);
+  });
+}
+
+function diSummaryCards(items) {
+  const total = items.length;
+  const counted = items.filter(it => it.remarks !== 'NOT COUNTED');
+  const short = items.filter(it => it.remarks === 'SHORT').length;
+  const over  = items.filter(it => it.remarks === 'OVER').length;
+  const withVariance = short + over;
+  const accuracy = counted.length ? (((counted.length - withVariance) / counted.length) * 100).toFixed(1) : 'N/A';
+  return `
+    <div class="kpi-grid">
+      <div class="kpi-card kpi-blue"><div class="kpi-label">Total Items</div><div class="kpi-value">${total}</div></div>
+      <div class="kpi-card kpi-grad"><div class="kpi-label">Items with Variance</div><div class="kpi-value">${withVariance}</div></div>
+      <div class="kpi-card kpi-orange"><div class="kpi-label">Total Short</div><div class="kpi-value">${short}</div></div>
+      <div class="kpi-card kpi-green"><div class="kpi-label">Total Over</div><div class="kpi-value">${over}</div></div>
+      <div class="kpi-card kpi-blue"><div class="kpi-label">Inventory Accuracy</div><div class="kpi-value">${accuracy}${accuracy!=='N/A'?'%':''}</div></div>
+    </div>
+  `;
+}
+
+function diFilterBar(searchId, catId, onFilter) {
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+        <div class="field" style="margin:0">
+          <label for="${searchId}">Search (Item Name, SKU, Barcode)</label>
+          <input type="text" id="${searchId}" name="${searchId}" value="${esc(diSearchQ)}" oninput="${onFilter}" placeholder="Search...">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="${catId}">Category</label>
+          <select id="${catId}" name="${catId}" onchange="${onFilter}">
+            <option value="">Show All</option>
+            ${diCategoryOptions()}
+          </select>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ═══ OPENING INVENTORY ═══
+async function diRenderOpeningTab() {
+  const el = document.getElementById('diTabContent');
+  const today = diGetRecordByDate(diTodayStr());
+
+  if (today && today.openingCompleted === 'true') {
+    let items = [];
+    try { items = JSON.parse(today.openingItems || '[]'); } catch(e) {}
+    if (!el) return;
+    el.innerHTML = `
+      <div class="card" style="background:var(--bg2);margin-bottom:16px">
+        <b>Opening Inventory for ${esc(today.date)} is already recorded</b> by ${esc(today.openingBy||'—')}.
+      </div>
+      ${diSummaryCards(items)}
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div class="card-title" style="margin:0">Opening Inventory — ${esc(today.date)}</div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('opening', ${JSON.stringify(today.date)})"> Print</button>
+            <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(today.date)}, 'opening')"> Excel</button>
+          </div>
+        </div>
+        ${diRenderReadonlyTable(items, 'opening')}
+      </div>
+    `;
+    return;
+  }
+
+  diDraftOpening = diDraftOpening || {};
+  if (!el) return;
+  el.innerHTML = `
+    <div id="diOpeningSummary"></div>
+    ${diFilterBar('diOpenSearch','diOpenCategory','diOpeningApplyFilter()')}
+    <div class="card">
+      <div id="diOpeningTableWrap"></div>
+      <div id="diOpeningPagination" style="margin-top:10px"></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button class="btn btn-primary" id="diOpeningSaveBtn" onclick="diSaveOpening()"> Save Opening Inventory</button>
+    </div>
+  `;
+  diRenderOpeningTable();
+}
+
+function diOpeningApplyFilter() {
+  diSearchQ = document.getElementById('diOpenSearch')?.value || '';
+  diCategoryFilter = document.getElementById('diOpenCategory')?.value || '';
+  diPage = 1;
+  diRenderOpeningTable();
+}
+
+function diOpeningRowData(p) {
+  const pos = diGetPosStock(p.id);
+  const draft = diDraftOpening[p.id] || { addPcs: 0, addPacks: 0, actualPcs: '', actualPacks: '' };
+  const totalPcs = pos.pcs + (parseFloat(draft.addPcs)||0);
+  const totalPacks = pos.packs + (parseFloat(draft.addPacks)||0);
+  const varPcs = diVariance(draft.actualPcs, totalPcs);
+  const varPacks = diVariance(draft.actualPacks, totalPacks);
+  const remarks = diRemarks(varPcs, varPacks);
+  return { productId: p.id, name: p.name, category: p.category||'',
+    posStockPcs: pos.pcs, posStockPacks: pos.packs,
+    addPcs: draft.addPcs, addPacks: draft.addPacks,
+    totalPcs, totalPacks,
+    actualPcs: draft.actualPcs, actualPacks: draft.actualPacks,
+    variancePcs: varPcs, variancePacks: varPacks, remarks, hasPack: parseFloat(p.pricePack||0) > 0 };
+}
+
+function diRenderOpeningTable() {
+  const wrap = document.getElementById('diOpeningTableWrap');
+  const pagEl = document.getElementById('diOpeningPagination');
+  const sumEl = document.getElementById('diOpeningSummary');
+  if (!wrap) return;
+
+  const filtered = diFilteredProducts();
+  const allRows = filtered.map(diOpeningRowData);
+  if (sumEl) sumEl.innerHTML = diSummaryCards(allRows);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / DI_PAGE_SIZE));
+  diPage = Math.min(diPage, totalPages);
+  const pageProducts = filtered.slice((diPage-1)*DI_PAGE_SIZE, diPage*DI_PAGE_SIZE);
+  const pageRows = pageProducts.map(diOpeningRowData);
+
+  if (!pageRows.length) {
+    wrap.innerHTML = '<div class="no-data"><div class="no-data-text">No matching products.</div></div>';
+    if (pagEl) pagEl.innerHTML = '';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Item</th><th>POS Stock</th><th>Additional</th><th>Total Stocks</th><th>Actual Counts</th><th>Variance</th><th>Remarks</th></tr></thead>
+      <tbody>${pageRows.map(r => `<tr>
+        <td>${esc(r.name)}</td>
+        <td class="text-muted" style="font-size:0.82rem">${r.posStockPcs} pcs${r.hasPack ? ` / ${r.posStockPacks} packs` : ''}</td>
+        <td>
+          <input type="number" min="0" id="di_o_addPcs_${r.productId}" name="di_o_addPcs_${r.productId}" aria-label="Additional pieces for ${esc(r.name)}" value="${r.addPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','addPcs',this.value)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_o_addPacks_${r.productId}" name="di_o_addPacks_${r.productId}" aria-label="Additional packs for ${esc(r.name)}" value="${r.addPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','addPacks',this.value)">` : ''}
+        </td>
+        <td class="fw-700">${r.totalPcs} pcs${r.hasPack ? ` / ${r.totalPacks} packs` : ''}</td>
+        <td>
+          <input type="number" min="0" id="di_o_actPcs_${r.productId}" name="di_o_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','actualPcs',this.value)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_o_actPacks_${r.productId}" name="di_o_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','actualPacks',this.value)">` : ''}
+        </td>
+        <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
+        <td>${diRemarksBadge(r.remarks)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  `;
+
+  if (pagEl) {
+    pagEl.innerHTML = `
+      <div style="display:flex;justify-content:center;align-items:center;gap:10px">
+        <button class="btn btn-ghost btn-sm" ${diPage<=1?'disabled':''} onclick="diChangePage(-1)">‹ Prev</button>
+        <span class="text-muted" style="font-size:0.85rem">Page ${diPage} of ${totalPages} (${filtered.length} items)</span>
+        <button class="btn btn-ghost btn-sm" ${diPage>=totalPages?'disabled':''} onclick="diChangePage(1)">Next ›</button>
+      </div>
+    `;
+  }
+}
+
+function diChangePage(delta) {
+  diPage += delta;
+  if (diTab === 'opening') diRenderOpeningTable();
+  else if (diTab === 'closing') diRenderClosingTable();
+}
+
+function diUpdateOpeningDraft(productId, field, val) {
+  if (!diDraftOpening[productId]) diDraftOpening[productId] = { addPcs: 0, addPacks: 0, actualPcs: '', actualPacks: '' };
+  diDraftOpening[productId][field] = val === '' ? '' : (parseFloat(val)||0);
+  diRenderOpeningTable();
+}
+
+async function diSaveOpening() {
+  const allRows = allProducts.map(diOpeningRowData);
+  const btn = document.getElementById('diOpeningSaveBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+  try {
+    const res = await gasPost({
+      action: 'saveOpeningInventory',
+      caller_role: currentUser.role,
+      date: diTodayStr(),
+      items: JSON.stringify(allRows),
+      createdBy: currentUser.name || currentUser.username || '',
+    });
+    if (res.success) {
+      toast('Opening Inventory saved!', 'success');
+      diDraftOpening = {};
+      await diLoadRecords();
+      diRenderOpeningTab();
+    } else {
+      toast(res.message || 'Error saving Opening Inventory.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = ' Save Opening Inventory'; }
+    }
+  } catch(e) {
+    toast('Network error. Please try again.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = ' Save Opening Inventory'; }
+  }
+}
+
+// ═══ CLOSING INVENTORY ═══
+async function diRenderClosingTab() {
+  const el = document.getElementById('diTabContent');
+  const today = diGetRecordByDate(diTodayStr());
+
+  if (!today || today.openingCompleted !== 'true') {
+    if (!el) return;
+    el.innerHTML = `
+      <div class="card" style="background:var(--bg2)">
+        <b>Opening Inventory must be completed first</b> before you can do Closing Inventory for today.
+        <div style="margin-top:10px"><button class="btn btn-primary btn-sm" onclick="diSwitchTab('opening')">Go to Opening Inventory</button></div>
+      </div>
+    `;
+    return;
+  }
+
+  if (today.closingCompleted === 'true') {
+    let items = [];
+    try { items = JSON.parse(today.closingItems || '[]'); } catch(e) {}
+    if (!el) return;
+    el.innerHTML = `
+      <div class="card" style="background:var(--bg2);margin-bottom:16px">
+        <b>Closing Inventory for ${esc(today.date)} is already recorded</b> by ${esc(today.closingBy||'—')}.
+      </div>
+      ${diSummaryCards(items)}
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div class="card-title" style="margin:0">Closing Inventory — ${esc(today.date)}</div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('closing', ${JSON.stringify(today.date)})"> Print</button>
+            <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(today.date)}, 'closing')"> Excel</button>
+          </div>
+        </div>
+        ${diRenderReadonlyTable(items, 'closing')}
+      </div>
+    `;
+    return;
+  }
+
+  if (!el) return;
+  el.innerHTML = `<div class="loading-spinner"><div class="spinner"></div> Loading today's sales...</div>`;
+  try {
+    const res = await gasRequest({ action: 'getTodaySoldQty' });
+    diTodaySoldQty = res.data || {};
+  } catch(e) {
+    diTodaySoldQty = {};
+    toast('Could not load today\'s sales — Sold Today may show as 0.', 'warning');
+  }
+
+  diDraftClosing = diDraftClosing || {};
+  el.innerHTML = `
+    <div id="diClosingSummary"></div>
+    ${diFilterBar('diCloseSearch','diCloseCategory','diClosingApplyFilter()')}
+    <div class="card">
+      <div id="diClosingTableWrap"></div>
+      <div id="diClosingPagination" style="margin-top:10px"></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button class="btn btn-primary" id="diClosingSaveBtn" onclick="diSaveClosing()"> Save Closing Inventory</button>
+    </div>
+  `;
+  diRenderClosingTable();
+}
+
+function diClosingApplyFilter() {
+  diSearchQ = document.getElementById('diCloseSearch')?.value || '';
+  diCategoryFilter = document.getElementById('diCloseCategory')?.value || '';
+  diPage = 1;
+  diRenderClosingTable();
+}
+
+function diClosingOpeningItems() {
+  const today = diGetRecordByDate(diTodayStr());
+  if (!today) return [];
+  try { return JSON.parse(today.openingItems || '[]'); } catch(e) { return []; }
+}
+
+function diClosingRowData(openingItem) {
+  const sold = diTodaySoldQty[openingItem.productId] || { pcs: 0, packs: 0 };
+  const draft = diDraftClosing[openingItem.productId] || { actualPcs: '', actualPacks: '' };
+  const expectedPcs = (parseFloat(openingItem.totalPcs)||0) - (parseFloat(sold.pcs)||0);
+  const expectedPacks = (parseFloat(openingItem.totalPacks)||0) - (parseFloat(sold.packs)||0);
+  const varPcs = diVariance(draft.actualPcs, expectedPcs);
+  const varPacks = diVariance(draft.actualPacks, expectedPacks);
+  const remarks = diRemarks(varPcs, varPacks);
+  return { productId: openingItem.productId, name: openingItem.name, category: openingItem.category||'',
+    openingTotalPcs: openingItem.totalPcs, openingTotalPacks: openingItem.totalPacks,
+    soldPcs: sold.pcs, soldPacks: sold.packs,
+    expectedPcs, expectedPacks,
+    actualPcs: draft.actualPcs, actualPacks: draft.actualPacks,
+    variancePcs: varPcs, variancePacks: varPacks, remarks, hasPack: openingItem.hasPack };
+}
+
+function diRenderClosingTable() {
+  const wrap = document.getElementById('diClosingTableWrap');
+  const pagEl = document.getElementById('diClosingPagination');
+  const sumEl = document.getElementById('diClosingSummary');
+  if (!wrap) return;
+
+  const q = diSearchQ.toLowerCase().trim();
+  const openingItems = diClosingOpeningItems().filter(it => {
+    if (diCategoryFilter && it.category !== diCategoryFilter) return false;
+    if (!q) return true;
+    return (it.name||'').toLowerCase().includes(q);
+  });
+  const allRows = openingItems.map(diClosingRowData);
+  if (sumEl) sumEl.innerHTML = diSummaryCards(allRows);
+
+  const totalPages = Math.max(1, Math.ceil(openingItems.length / DI_PAGE_SIZE));
+  diPage = Math.min(diPage, totalPages);
+  const pageItems = openingItems.slice((diPage-1)*DI_PAGE_SIZE, diPage*DI_PAGE_SIZE);
+  const pageRows = pageItems.map(diClosingRowData);
+
+  if (!pageRows.length) {
+    wrap.innerHTML = '<div class="no-data"><div class="no-data-text">No matching products.</div></div>';
+    if (pagEl) pagEl.innerHTML = '';
+    return;
+  }
+
+  wrap.innerHTML = `
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Item</th><th>Opening Total</th><th>Sold Today</th><th>Expected Remaining</th><th>Actual Counts</th><th>Variance</th><th>Remarks</th></tr></thead>
+      <tbody>${pageRows.map(r => `<tr>
+        <td>${esc(r.name)}</td>
+        <td class="text-muted" style="font-size:0.82rem">${r.openingTotalPcs} pcs${r.hasPack ? ` / ${r.openingTotalPacks} packs` : ''}</td>
+        <td class="text-muted" style="font-size:0.82rem">${r.soldPcs} pcs${r.hasPack ? ` / ${r.soldPacks} packs` : ''}</td>
+        <td class="fw-700">${r.expectedPcs} pcs${r.hasPack ? ` / ${r.expectedPacks} packs` : ''}</td>
+        <td>
+          <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_c_actPacks_${r.productId}" name="di_c_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','actualPacks',this.value)">` : ''}
+        </td>
+        <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
+        <td>${diRemarksBadge(r.remarks)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  `;
+
+  if (pagEl) {
+    pagEl.innerHTML = `
+      <div style="display:flex;justify-content:center;align-items:center;gap:10px">
+        <button class="btn btn-ghost btn-sm" ${diPage<=1?'disabled':''} onclick="diChangePage(-1)">‹ Prev</button>
+        <span class="text-muted" style="font-size:0.85rem">Page ${diPage} of ${totalPages} (${openingItems.length} items)</span>
+        <button class="btn btn-ghost btn-sm" ${diPage>=totalPages?'disabled':''} onclick="diChangePage(1)">Next ›</button>
+      </div>
+    `;
+  }
+}
+
+function diUpdateClosingDraft(productId, field, val) {
+  if (!diDraftClosing[productId]) diDraftClosing[productId] = { actualPcs: '', actualPacks: '' };
+  diDraftClosing[productId][field] = val === '' ? '' : (parseFloat(val)||0);
+  diRenderClosingTable();
+}
+
+async function diSaveClosing() {
+  const allRows = diClosingOpeningItems().map(diClosingRowData);
+  const btn = document.getElementById('diClosingSaveBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+  try {
+    const res = await gasPost({
+      action: 'saveClosingInventory',
+      caller_role: currentUser.role,
+      date: diTodayStr(),
+      items: JSON.stringify(allRows),
+      createdBy: currentUser.name || currentUser.username || '',
+    });
+    if (res.success) {
+      toast('Closing Inventory saved!', 'success');
+      diDraftClosing = {};
+      await diLoadRecords();
+      diRenderClosingTab();
+    } else {
+      toast(res.message || 'Error saving Closing Inventory.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = ' Save Closing Inventory'; }
+    }
+  } catch(e) {
+    toast('Network error. Please try again.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = ' Save Closing Inventory'; }
+  }
+}
+
+// ═══ SHARED: read-only item table (used by History view + already-completed Opening/Closing) ═══
+function diRenderReadonlyTable(items, type) {
+  if (!items.length) return '<div class="no-data"><div class="no-data-text">No items recorded.</div></div>';
+  const isOpening = type === 'opening';
+  return `
+    <div class="tbl-wrap"><table>
+      <thead><tr>
+        <th>Item</th>
+        <th>${isOpening ? 'POS Stock' : 'Opening Total'}</th>
+        <th>${isOpening ? 'Additional' : 'Sold Today'}</th>
+        <th>${isOpening ? 'Total Stocks' : 'Expected Remaining'}</th>
+        <th>Actual Counts</th><th>Variance</th><th>Remarks</th>
+      </tr></thead>
+      <tbody>${items.map(r => `<tr>
+        <td>${esc(r.name)}</td>
+        <td class="text-muted" style="font-size:0.82rem">${isOpening ? `${r.posStockPcs} pcs${r.hasPack?` / ${r.posStockPacks} packs`:''}` : `${r.openingTotalPcs} pcs${r.hasPack?` / ${r.openingTotalPacks} packs`:''}`}</td>
+        <td class="text-muted" style="font-size:0.82rem">${isOpening ? `${r.addPcs} pcs${r.hasPack?` / ${r.addPacks} packs`:''}` : `${r.soldPcs} pcs${r.hasPack?` / ${r.soldPacks} packs`:''}`}</td>
+        <td class="fw-700">${isOpening ? `${r.totalPcs} pcs${r.hasPack?` / ${r.totalPacks} packs`:''}` : `${r.expectedPcs} pcs${r.hasPack?` / ${r.expectedPacks} packs`:''}`}</td>
+        <td>${r.actualPcs===''?'—':r.actualPcs} pcs${r.hasPack?` / ${r.actualPacks===''?'—':r.actualPacks} packs`:''}</td>
+        <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack?` / ${r.variancePacks===null?'—':r.variancePacks}`:''}</td>
+        <td>${diRemarksBadge(r.remarks)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  `;
+}
+
+// ═══ HISTORY ═══
+async function diRenderHistoryTab() {
+  const el = document.getElementById('diTabContent');
+  if (!el) return;
+  const sorted = [...diCache].sort((a,b) => (b.date||'').localeCompare(a.date||''));
+
+  if (!sorted.length) {
+    el.innerHTML = '<div class="card"><div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No Daily Inventory records yet.</div></div></div>';
+    return;
+  }
+
+  const canDelete = currentUser.role === 'admin';
+  el.innerHTML = `
+    <div class="card"><div class="tbl-wrap"><table>
+      <thead><tr><th>Date</th><th>Opening</th><th>Closing</th><th>Opening Summary</th><th>Closing Summary</th><th>Actions</th></tr></thead>
+      <tbody>${sorted.map(r => {
+        let openItems = [], closeItems = [];
+        try { openItems = JSON.parse(r.openingItems||'[]'); } catch(e){}
+        try { closeItems = JSON.parse(r.closingItems||'[]'); } catch(e){}
+        const openSum = r.openingCompleted === 'true' ? `${openItems.filter(i=>i.remarks==='SHORT').length} short, ${openItems.filter(i=>i.remarks==='OVER').length} over` : '—';
+        const closeSum = r.closingCompleted === 'true' ? `${closeItems.filter(i=>i.remarks==='SHORT').length} short, ${closeItems.filter(i=>i.remarks==='OVER').length} over` : '—';
+        return `<tr>
+          <td class="fw-700">${esc(r.date)}</td>
+          <td>${r.openingCompleted === 'true' ? '<span class="badge-in-stock">Done</span>' : '<span class="text-muted">—</span>'}</td>
+          <td>${r.closingCompleted === 'true' ? '<span class="badge-in-stock">Done</span>' : '<span class="text-muted">—</span>'}</td>
+          <td class="text-muted" style="font-size:0.82rem">${openSum}</td>
+          <td class="text-muted" style="font-size:0.82rem">${closeSum}</td>
+          <td>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <button class="inv-btn" onclick="diViewRecord('${r.id}')">View</button>
+              ${canDelete && r.closingCompleted !== 'true' ? `<button class="inv-btn inv-btn-del" onclick="diDeleteRecord('${r.id}')">Del</button>` : ''}
+            </div>
+          </td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div></div>
+  `;
+}
+
+function diViewRecord(id) {
+  const r = diCache.find(x => x.id === id);
+  if (!r) return;
+  let openItems = [], closeItems = [];
+  try { openItems = JSON.parse(r.openingItems||'[]'); } catch(e){}
+  try { closeItems = JSON.parse(r.closingItems||'[]'); } catch(e){}
+
+  openModal(`
+    <div class="modal-title">Daily Inventory — ${esc(r.date)}</div>
+    <div style="display:flex;gap:8px;margin-bottom:14px">
+      <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('opening', ${JSON.stringify(r.date)})"> Print Opening</button>
+      <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('closing', ${JSON.stringify(r.date)})"> Print Closing</button>
+      <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(r.date)}, 'both')"> Excel</button>
+    </div>
+    <div class="card-title">Opening Inventory ${r.openingCompleted==='true' ? '(by '+esc(r.openingBy||'—')+')' : '(not done)'}</div>
+    ${diRenderReadonlyTable(openItems, 'opening')}
+    <div class="card-title" style="margin-top:16px">Closing Inventory ${r.closingCompleted==='true' ? '(by '+esc(r.closingBy||'—')+')' : '(not done)'}</div>
+    ${diRenderReadonlyTable(closeItems, 'closing')}
+  `);
+}
+
+async function diDeleteRecord(id) {
+  const r = diCache.find(x => x.id === id);
+  if (!confirm(`Delete Daily Inventory record for ${r?.date||''}?\nThis cannot be undone.`)) return;
+  try {
+    const res = await gasPost({ action: 'deleteOpeningInventory', id, caller_role: currentUser.role });
+    if (res.success) { toast('Record deleted.', 'success'); await diLoadRecords(); diRenderHistoryTab(); }
+    else toast(res.message || 'Error deleting record.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+// ═══ PRINT (A4) ═══
+function diPrintRecord(type, dateStr) {
+  const r = diGetRecordByDate(dateStr);
+  if (!r) { toast('Record not found.', 'error'); return; }
+  let items = [];
+  try { items = JSON.parse(type === 'opening' ? (r.openingItems||'[]') : (r.closingItems||'[]')); } catch(e) {}
+  if (!items.length) { toast('Nothing to print — no items recorded.', 'warning'); return; }
+
+  const isOpening = type === 'opening';
+  const printWin = document.createElement('div');
+  printWin.id = 'diPrintArea';
+  printWin.innerHTML = `
+    <div style="padding:20px;font-family:Arial,sans-serif;font-size:11px;color:#000">
+      <h2 style="margin:0 0 4px">AE Home Trade Corp. — Daily Inventory Checking</h2>
+      <div>${isOpening ? 'Opening' : 'Closing'} Inventory — Date: ${esc(r.date)}</div>
+      <table style="width:100%;border-collapse:collapse;margin-top:12px" border="1" cellpadding="4">
+        <thead><tr>
+          <th>Item Name</th><th>POS Stock</th><th>Additional</th><th>Total Stocks</th>
+          <th>Actual Counts</th><th>Sold</th><th>Variance</th><th>Remarks</th>
+        </tr></thead>
+        <tbody>${items.map(it => `<tr>
+          <td>${esc(it.name)}</td>
+          <td>${isOpening ? `${it.posStockPcs} pcs${it.hasPack?`/${it.posStockPacks} pk`:''}` : `${it.openingTotalPcs} pcs${it.hasPack?`/${it.openingTotalPacks} pk`:''}`}</td>
+          <td>${isOpening ? `${it.addPcs} pcs${it.hasPack?`/${it.addPacks} pk`:''}` : '—'}</td>
+          <td>${isOpening ? `${it.totalPcs} pcs${it.hasPack?`/${it.totalPacks} pk`:''}` : `${it.expectedPcs} pcs${it.hasPack?`/${it.expectedPacks} pk`:''}`}</td>
+          <td>${it.actualPcs===''?'-':it.actualPcs} pcs${it.hasPack?`/${it.actualPacks===''?'-':it.actualPacks} pk`:''}</td>
+          <td>${isOpening ? '—' : `${it.soldPcs} pcs${it.hasPack?`/${it.soldPacks} pk`:''}`}</td>
+          <td>${it.variancePcs===null?'-':it.variancePcs}${it.hasPack?`/${it.variancePacks===null?'-':it.variancePacks}`:''}</td>
+          <td>${esc(it.remarks)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+      <div style="margin-top:30px;display:flex;justify-content:space-between">
+        <div>Prepared By: _______________________</div>
+        <div>Checked By: _______________________</div>
+        <div>Date: ${esc(r.date)}</div>
+      </div>
+      <div style="margin-top:6px">Store/Branch: AE Home Trade Corp. — Vigan</div>
+    </div>
+  `;
+  document.body.appendChild(printWin);
+  window.print();
+  document.body.removeChild(printWin);
+}
+
+// ═══ EXPORT TO EXCEL ═══
+async function diExportExcel(dateStr, type) {
+  const r = diGetRecordByDate(dateStr);
+  if (!r) { toast('Record not found.', 'error'); return; }
+  try {
+    if (typeof XLSX === 'undefined') {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+    }
+    const wb = XLSX.utils.book_new();
+
+    function addSheet(items, label, isOpening) {
+      if (!items.length) return;
+      const header = ['Item','POS Stock Pcs','POS Stock Packs','Additional Pcs','Additional Packs','Total Stocks Pcs','Total Stocks Packs','Sold Pcs','Sold Packs','Actual Pcs','Actual Packs','Variance Pcs','Variance Packs','Remarks'];
+      const rows = items.map(it => isOpening ? [
+        it.name, it.posStockPcs, it.posStockPacks, it.addPcs, it.addPacks, it.totalPcs, it.totalPacks,
+        '', '', it.actualPcs, it.actualPacks, it.variancePcs, it.variancePacks, it.remarks
+      ] : [
+        it.name, it.openingTotalPcs, it.openingTotalPacks, '', '', it.expectedPcs, it.expectedPacks,
+        it.soldPcs, it.soldPacks, it.actualPcs, it.actualPacks, it.variancePcs, it.variancePacks, it.remarks
+      ]);
+      const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+      XLSX.utils.book_append_sheet(wb, ws, label);
+    }
+
+    let openItems = [], closeItems = [];
+    try { openItems = JSON.parse(r.openingItems||'[]'); } catch(e){}
+    try { closeItems = JSON.parse(r.closingItems||'[]'); } catch(e){}
+
+    if (type === 'opening' || type === 'both') addSheet(openItems, 'Opening', true);
+    if (type === 'closing' || type === 'both') addSheet(closeItems, 'Closing', false);
+
+    XLSX.writeFile(wb, `DailyInventory_${dateStr}.xlsx`);
+  } catch(e) {
+    toast('Excel export failed.', 'error');
   }
 }
