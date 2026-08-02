@@ -5191,13 +5191,13 @@ function diRenderOpeningTable() {
         <td>${esc(r.name)}</td>
         <td class="text-muted" style="font-size:0.82rem">${r.posStockPcs} pcs${r.hasPack ? ` / ${r.posStockPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_o_addPcs_${r.productId}" name="di_o_addPcs_${r.productId}" aria-label="Additional pieces for ${esc(r.name)}" value="${r.addPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','addPcs',this.value)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_o_addPacks_${r.productId}" name="di_o_addPacks_${r.productId}" aria-label="Additional packs for ${esc(r.name)}" value="${r.addPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','addPacks',this.value)">` : ''}
+          <input type="number" min="0" id="di_o_addPcs_${r.productId}" name="di_o_addPcs_${r.productId}" aria-label="Additional pieces for ${esc(r.name)}" value="${r.addPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','addPcs',this.value)" onkeydown="diHandleEnterKey(event)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_o_addPacks_${r.productId}" name="di_o_addPacks_${r.productId}" aria-label="Additional packs for ${esc(r.name)}" value="${r.addPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','addPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
         </td>
         <td class="fw-700">${r.totalPcs} pcs${r.hasPack ? ` / ${r.totalPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_o_actPcs_${r.productId}" name="di_o_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','actualPcs',this.value)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_o_actPacks_${r.productId}" name="di_o_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','actualPacks',this.value)">` : ''}
+          <input type="number" min="0" id="di_o_actPcs_${r.productId}" name="di_o_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','actualPcs',this.value)" onkeydown="diHandleEnterKey(event)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_o_actPacks_${r.productId}" name="di_o_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','actualPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
         </td>
         <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
         <td>${diRemarksBadge(r.remarks)}</td>
@@ -5220,6 +5220,28 @@ function diChangePage(delta) {
   diPage += delta;
   if (diTab === 'opening') diRenderOpeningTable();
   else if (diTab === 'closing') diRenderClosingTable();
+}
+
+// ─── ENTER-TO-NEXT-FIELD (Daily Inventory quick input) ───
+// Pressing Enter in any pcs/packs box jumps to the next input in the same
+// table (in DOM order), so encoders don't have to reach for the mouse/Tab.
+// Works automatically whether or not a product has a "packs" field, since
+// that input simply isn't in the DOM when hasPack is false.
+function diHandleEnterKey(e) {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const wrap = e.target.closest('.tbl-wrap');
+  if (!wrap) return;
+  const inputs = Array.from(wrap.querySelectorAll('input'));
+  const idx = inputs.indexOf(e.target);
+  if (idx === -1) return;
+  const next = inputs[idx + 1];
+  if (next) {
+    next.focus();
+    next.select();
+  } else {
+    e.target.blur(); // last field on the page — nothing more to jump to
+  }
 }
 
 function diUpdateOpeningDraft(productId, field, val) {
@@ -5410,8 +5432,8 @@ function diRenderClosingTable() {
         <td class="text-muted" style="font-size:0.82rem">${r.soldPcs} pcs${r.hasPack ? ` / ${r.soldPacks} packs` : ''}</td>
         <td class="fw-700">${r.expectedPcs} pcs${r.hasPack ? ` / ${r.expectedPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_c_actPacks_${r.productId}" name="di_c_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','actualPacks',this.value)">` : ''}
+          <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)" onkeydown="diHandleEnterKey(event)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_c_actPacks_${r.productId}" name="di_c_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','actualPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
         </td>
         <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
         <td>${diRemarksBadge(r.remarks)}</td>
