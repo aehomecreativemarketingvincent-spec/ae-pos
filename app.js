@@ -531,24 +531,26 @@ async function gasRequest(params, timeoutMs = 30000) {
 }
 
 async function gasPost(payload, timeoutMs = 45000) {
-  // GAS CORS rule: only GET with no custom headers works cross-origin.
-  // POST is blocked by CORS. Solution: GET + base64 payload in URL param.
-  // We check for e.parameter.data (not e.parameter.method) in doGet
-  // so it works even if params survive the redirect.
+  // Real POST with body — Content-Type: text/plain keeps this a CORS "simple
+  // request" (no OPTIONS preflight, which Apps Script doesn't handle and
+  // would otherwise get blocked). The payload goes in the request BODY, not
+  // the URL, so there's no URL-length ceiling to hit — this replaces the old
+  // GET + base64-in-URL workaround, which broke ("Network error" / CORS
+  // error surfaced by the browser) once a batch's encoded payload got long
+  // (e.g. many products with longer names, as with Opening/Closing Inventory).
+  // doPost() on the backend already reads e.postData.contents as JSON, so no
+  // server-side change is needed.
   const json = JSON.stringify(payload);
-  let encoded;
-  try {
-    encoded = btoa(unescape(encodeURIComponent(json)));
-  } catch (e) {
-    const bytes  = new TextEncoder().encode(json);
-    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
-    encoded = btoa(binary);
-  }
-  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    const res = await fetch(GAS_URL, {
+      method: 'POST',
+      redirect: 'follow',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: json,
+      signal: ctrl.signal
+    });
     clearTimeout(timer);
     const text = await res.text();
     if (!text || !text.trim()) return { success: true };
@@ -2715,31 +2717,13 @@ async function gasBulkImport(batch) {
     wholesalePricePack: String(p.wholesalepricepack || p['wholesale/pack'] || p['wholesaleprice/pack'] || p['Wholesale/Pack'] || p['Wholesale Price Pack'] || '0'),
   })).filter(p => p.name);
 
-  // Use GET + base64 payload (same as gasPost) — avoids CORS block
-  const payload = { action: 'bulkAddProducts', products: JSON.stringify(products) };
-  const json    = JSON.stringify(payload);
-  let encoded;
+  // Real POST via gasPost — no more URL-length limit, so no need for the
+  // separate base64-in-URL workaround this used to have.
   try {
-    encoded = btoa(unescape(encodeURIComponent(json)));
-  } catch (e) {
-    const bytes  = new TextEncoder().encode(json);
-    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
-    encoded = btoa(binary);
-  }
-  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
-  const ctrl  = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 60000);
-  try {
-    const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
-    clearTimeout(timer);
-    const text = await res.text();
-    if (!text || !text.trim()) return { success: true, count: products.length };
-    try { return JSON.parse(text); }
-    catch(e) { return { success: true, count: products.length }; }
+    const res = await gasPost({ action: 'bulkAddProducts', products: JSON.stringify(products) }, 60000);
+    return res && res.success !== undefined ? res : { success: true, count: products.length };
   } catch(e) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Import timed out. Try a smaller batch.');
-    throw new Error('Import error: ' + e.message);
+    throw new Error(e.message.includes('timed out') ? 'Import timed out. Try a smaller batch.' : 'Import error: ' + e.message);
   }
 }
 
