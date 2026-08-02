@@ -5723,7 +5723,7 @@ function showLicenseWelcomeScreen() {
 
   const overlay = document.createElement('div');
   overlay.id = 'licWelcomeOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:400;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
   overlay.innerHTML = `
     <div style="max-width:440px;width:100%">
       <div style="background:var(--grad);border-radius:16px;padding:30px 24px;text-align:center;color:white;margin-bottom:20px">
