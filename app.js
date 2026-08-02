@@ -4430,7 +4430,10 @@ function poStatusBadge(status) {
 // ═══ TAB 2: NEW ORDER ═══
 async function poRenderNewOrderTab() {
   const el = document.getElementById('poTabContent');
-  if (!allProducts.length) await loadProducts();
+  // BUG FIX: was `if (!allProducts.length)`, which only loaded products
+  // ONCE per session — any stock/price edit made in Inventory afterward
+  // never showed up here. Always refresh, same as POS already does.
+  await loadProducts();
   if (typeof _wholesalersCache === 'undefined' || !_wholesalersCache || !_wholesalersCache.length) await loadWholesalers();
 
   if (!el) return;
@@ -4977,7 +4980,12 @@ async function renderDailyInventory() {
     </div>
     <div id="diTabContent"><div class="loading-spinner"><div class="spinner"></div> Loading...</div></div>
   `;
-  if (!allProducts.length) await loadProducts();
+  // BUG FIX (root cause of Opening Stock showing outdated values): was
+  // `if (!allProducts.length)`, which only loaded products ONCE per
+  // session — any Inventory edit made after that was invisible here.
+  // Always refresh so POS Stock always reflects the latest Current Stock
+  // from Inventory, same as the POS page already does.
+  await loadProducts();
   await diLoadRecords();
   await diRenderTab(diTab);
 }
@@ -5236,30 +5244,57 @@ function diUpdateOpeningDraft(productId, field, val) {
   diRenderOpeningTable();
 }
 
+// Shared batch-sender for Opening/Closing saves — same batch size already
+// proven safe by the existing bulk product import (avoids exceeding the URL
+// length limit of the GAS GET+base64 request, which is what was causing the
+// "Network Error" on stores with more than a handful of products).
+const DI_SAVE_BATCH_SIZE = 15;
+
+async function diSaveInBatches(phase, allRows, btn, defaultLabel) {
+  const batches = [];
+  for (let i = 0; i < allRows.length; i += DI_SAVE_BATCH_SIZE) {
+    batches.push(allRows.slice(i, i + DI_SAVE_BATCH_SIZE));
+  }
+  if (!batches.length) { toast('No items to save.', 'warning'); return false; }
+
+  for (let b = 0; b < batches.length; b++) {
+    if (btn) btn.textContent = `Saving... (${b+1}/${batches.length})`;
+    try {
+      const res = await gasPost({
+        action: phase === 'opening' ? 'saveOpeningInventory' : 'saveClosingInventory',
+        caller_role: currentUser.role,
+        date: diTodayStr(),
+        items: JSON.stringify(batches[b]),
+        isFirstBatch: b === 0,
+        isLastBatch: b === batches.length - 1,
+        createdBy: currentUser.name || currentUser.username || '',
+      });
+      if (!res.success) {
+        toast(res.message || 'Error saving.', 'error');
+        if (btn) { btn.disabled = false; btn.textContent = defaultLabel; }
+        return false;
+      }
+    } catch(e) {
+      toast('Network error. Please try again.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = defaultLabel; }
+      return false;
+    }
+    // Small pause between batches to avoid GAS rate limits (same pattern as bulk import)
+    if (b < batches.length - 1) await new Promise(r => setTimeout(r, 400));
+  }
+  return true;
+}
+
 async function diSaveOpening() {
   const allRows = allProducts.map(diOpeningRowData);
   const btn = document.getElementById('diOpeningSaveBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
-  try {
-    const res = await gasPost({
-      action: 'saveOpeningInventory',
-      caller_role: currentUser.role,
-      date: diTodayStr(),
-      items: JSON.stringify(allRows),
-      createdBy: currentUser.name || currentUser.username || '',
-    });
-    if (res.success) {
-      toast('Opening Inventory saved!', 'success');
-      diDraftOpening = {};
-      await diLoadRecords();
-      diRenderOpeningTab();
-    } else {
-      toast(res.message || 'Error saving Opening Inventory.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = ' Save Opening Inventory'; }
-    }
-  } catch(e) {
-    toast('Network error. Please try again.', 'error');
-    if (btn) { btn.disabled = false; btn.textContent = ' Save Opening Inventory'; }
+  if (btn) { btn.disabled = true; }
+  const ok = await diSaveInBatches('opening', allRows, btn, ' Save Opening Inventory');
+  if (ok) {
+    toast('Opening Inventory saved!', 'success');
+    diDraftOpening = {};
+    await diLoadRecords();
+    diRenderOpeningTab();
   }
 }
 
@@ -5420,27 +5455,13 @@ function diUpdateClosingDraft(productId, field, val) {
 async function diSaveClosing() {
   const allRows = diClosingOpeningItems().map(diClosingRowData);
   const btn = document.getElementById('diClosingSaveBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
-  try {
-    const res = await gasPost({
-      action: 'saveClosingInventory',
-      caller_role: currentUser.role,
-      date: diTodayStr(),
-      items: JSON.stringify(allRows),
-      createdBy: currentUser.name || currentUser.username || '',
-    });
-    if (res.success) {
-      toast('Closing Inventory saved!', 'success');
-      diDraftClosing = {};
-      await diLoadRecords();
-      diRenderClosingTab();
-    } else {
-      toast(res.message || 'Error saving Closing Inventory.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = ' Save Closing Inventory'; }
-    }
-  } catch(e) {
-    toast('Network error. Please try again.', 'error');
-    if (btn) { btn.disabled = false; btn.textContent = ' Save Closing Inventory'; }
+  if (btn) { btn.disabled = true; }
+  const ok = await diSaveInBatches('closing', allRows, btn, ' Save Closing Inventory');
+  if (ok) {
+    toast('Closing Inventory saved!', 'success');
+    diDraftClosing = {};
+    await diLoadRecords();
+    diRenderClosingTab();
   }
 }
 
@@ -5619,4 +5640,193 @@ async function diExportExcel(dateStr, type) {
   } catch(e) {
     toast('Excel export failed.', 'error');
   }
+}
+
+// ═══════════════════════════════════════════════
+// LICENSING & SUBSCRIPTION — MODULE 2: License Manager (frontend)
+// Trial/Activation UI + device token. Fully isolated: does NOT touch the
+// existing login flow yet (that wiring is Module 3). Test it by typing
+// showLicenseWelcomeScreen() in the browser console.
+// ═══════════════════════════════════════════════
+let licenseState = null;
+
+// Device Token — HONEST implementation: this is a random ID stored in this
+// browser's localStorage, NOT a real hardware fingerprint (browsers block
+// JS from reading actual hardware IDs). Clearing browser data or switching
+// browsers generates a new token. Real protection is server-side — see
+// checkLicenseStatus() in backend.gs.
+function getDeviceToken() {
+  let token = localStorage.getItem('ae_pos_device_token');
+  if (!token) {
+    token = 'DEV-' + Math.random().toString(36).substring(2, 10).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
+    localStorage.setItem('ae_pos_device_token', token);
+  }
+  return token;
+}
+
+async function licCheckStatus() {
+  try {
+    const res = await gasRequest({ action: 'checkLicenseStatus', deviceToken: getDeviceToken() });
+    licenseState = res.success ? res.data : { status: 'None' };
+    return licenseState;
+  } catch(e) {
+    licenseState = { status: 'Unknown' }; // couldn't reach server — Module 3 will decide the offline-grace behavior
+    return licenseState;
+  }
+}
+
+async function licStartTrial(storeName, ownerName) {
+  try {
+    const res = await gasPost({
+      action: 'startTrial',
+      deviceToken: getDeviceToken(),
+      storeName: storeName || '',
+      ownerName: ownerName || '',
+    });
+    if (res.success) {
+      toast('Free trial started!', 'success');
+      await licCheckStatus();
+      return true;
+    }
+    toast(res.message || 'Could not start trial.', 'error');
+    return false;
+  } catch(e) {
+    toast('Network error. Please try again.', 'error');
+    return false;
+  }
+}
+
+async function licActivateLicense(licenseKey) {
+  try {
+    const res = await gasPost({
+      action: 'activateLicense',
+      deviceToken: getDeviceToken(),
+      licenseKey: (licenseKey || '').trim().toUpperCase(),
+    });
+    if (res.success) {
+      toast('License activated!', 'success');
+      await licCheckStatus();
+      return true;
+    }
+    toast(res.message || 'Could not activate license.', 'error');
+    return false;
+  } catch(e) {
+    toast('Network error. Please try again.', 'error');
+    return false;
+  }
+}
+
+// ─── WELCOME SCREEN (full-screen overlay, isolated from index.html) ──
+function showLicenseWelcomeScreen() {
+  const existing = document.getElementById('licWelcomeOverlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'licWelcomeOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
+  overlay.innerHTML = `
+    <div style="max-width:440px;width:100%">
+      <div style="background:var(--grad);border-radius:16px;padding:30px 24px;text-align:center;color:white;margin-bottom:20px">
+        <div style="font-size:1.5rem;font-weight:800">AE Home POS</div>
+        <div style="opacity:0.9;margin-top:4px">Welcome! Choose how you'd like to get started.</div>
+      </div>
+      <div class="card" style="display:flex;flex-direction:column;gap:10px">
+        <button class="btn btn-primary" style="width:100%" onclick="licOpenStartTrialModal()"> Start Free Trial (${LICENSE_TRIAL_DAYS_LABEL} days)</button>
+        <button class="btn btn-ghost" style="width:100%" onclick="licOpenActivateModal()"> Activate License</button>
+        <button class="btn btn-ghost" style="width:100%" onclick="licOpenSubscribeModal()"> Subscribe</button>
+      </div>
+      <div id="licWelcomeStatus" style="margin-top:16px;text-align:center;font-size:0.85rem" class="text-muted"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  licRenderWelcomeStatus();
+}
+
+// Trial length is admin-configured server-side (LICENSE_CONFIG.trialDays in
+// backend.gs) — this label is just for display and doesn't enforce anything;
+// the real check always happens on the server.
+const LICENSE_TRIAL_DAYS_LABEL = 7;
+
+function hideLicenseWelcomeScreen() {
+  const el = document.getElementById('licWelcomeOverlay');
+  if (el) el.remove();
+}
+
+async function licRenderWelcomeStatus() {
+  const el = document.getElementById('licWelcomeStatus');
+  if (!el) return;
+  el.textContent = 'Checking license status...';
+  const state = await licCheckStatus();
+  if (!el.isConnected) return; // overlay may have been closed already
+  if (state.status === 'None') {
+    el.textContent = 'No trial or license found on this device yet.';
+  } else if (state.status === 'Unknown') {
+    el.textContent = 'Could not reach the license server — check your connection.';
+  } else {
+    el.innerHTML = `Current status on this device: <b>${esc(state.status)}</b>${state.licenseKey ? ' — ' + esc(state.licenseKey) : ''}`;
+  }
+}
+
+function licOpenStartTrialModal() {
+  openModal(`
+    <div class="modal-title">Start Free Trial</div>
+    <div class="field">
+      <label for="lic_storeName">Store Name</label>
+      <input id="lic_storeName" name="lic_storeName" type="text" placeholder="e.g. AE Home Trade Corp.">
+    </div>
+    <div class="field">
+      <label for="lic_ownerName">Owner Name</label>
+      <input id="lic_ownerName" name="lic_ownerName" type="text" placeholder="e.g. Vhinzzy">
+    </div>
+    <button class="btn btn-primary" style="width:100%;margin-top:10px" id="licTrialBtn" onclick="licConfirmStartTrial()"> Start Free Trial</button>
+  `);
+}
+
+async function licConfirmStartTrial() {
+  const btn = document.getElementById('licTrialBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+  const storeName = document.getElementById('lic_storeName')?.value || '';
+  const ownerName = document.getElementById('lic_ownerName')?.value || '';
+  const ok = await licStartTrial(storeName, ownerName);
+  if (ok) {
+    closeModalDirect();
+    licRenderWelcomeStatus();
+  } else if (btn) {
+    btn.disabled = false; btn.textContent = ' Start Free Trial';
+  }
+}
+
+function licOpenActivateModal() {
+  openModal(`
+    <div class="modal-title">Activate License</div>
+    <div class="field">
+      <label for="lic_key">License Key</label>
+      <input id="lic_key" name="lic_key" type="text" placeholder="AEH-XXXX-XXXX-XXXX-XXXX" style="text-transform:uppercase">
+    </div>
+    <button class="btn btn-primary" style="width:100%;margin-top:10px" id="licActivateBtn" onclick="licConfirmActivate()"> Activate</button>
+  `);
+}
+
+async function licConfirmActivate() {
+  const btn = document.getElementById('licActivateBtn');
+  const key = document.getElementById('lic_key')?.value || '';
+  if (!key.trim()) { toast('Enter a license key.', 'warning'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Activating...'; }
+  const ok = await licActivateLicense(key);
+  if (ok) {
+    closeModalDirect();
+    licRenderWelcomeStatus();
+  } else if (btn) {
+    btn.disabled = false; btn.textContent = ' Activate';
+  }
+}
+
+function licOpenSubscribeModal() {
+  // Real payment submission UI is Module 5 — this is a placeholder so the
+  // button isn't dead, per the phased build plan.
+  openModal(`
+    <div class="modal-title">Subscribe</div>
+    <p>The Payment page (GCash / Maya / Bank Transfer, with admin verification) is coming in the next update.</p>
+    <p>For now, contact AE Home to receive a License Key, then use "Activate License" above.</p>
+  `);
 }
