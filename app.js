@@ -5114,7 +5114,7 @@ async function diRenderOpeningTab() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <div class="card-title" style="margin:0">Opening Inventory — ${esc(today.date)}</div>
           <div style="display:flex;gap:8px">
-            <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('opening', ${JSON.stringify(today.date)})"> Print</button>
+            <button class="btn btn-ghost btn-sm" onclick="diSaveRecordImage('opening', ${JSON.stringify(today.date)})"> Save Image</button>
             <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(today.date)}, 'opening')"> Excel</button>
           </div>
         </div>
@@ -5333,7 +5333,7 @@ async function diRenderClosingTab() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <div class="card-title" style="margin:0">Closing Inventory — ${esc(today.date)}</div>
           <div style="display:flex;gap:8px">
-            <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('closing', ${JSON.stringify(today.date)})"> Print</button>
+            <button class="btn btn-ghost btn-sm" onclick="diSaveRecordImage('closing', ${JSON.stringify(today.date)})"> Save Image</button>
             <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(today.date)}, 'closing')"> Excel</button>
           </div>
         </div>
@@ -5546,8 +5546,8 @@ function diViewRecord(id) {
   openModal(`
     <div class="modal-title">Daily Inventory — ${esc(r.date)}</div>
     <div style="display:flex;gap:8px;margin-bottom:14px">
-      <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('opening', ${JSON.stringify(r.date)})"> Print Opening</button>
-      <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('closing', ${JSON.stringify(r.date)})"> Print Closing</button>
+      <button class="btn btn-ghost btn-sm" onclick="diSaveRecordImage('opening', ${JSON.stringify(r.date)})"> Save Opening Image</button>
+      <button class="btn btn-ghost btn-sm" onclick="diSaveRecordImage('closing', ${JSON.stringify(r.date)})"> Save Closing Image</button>
       <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(r.date)}, 'both')"> Excel</button>
     </div>
     <div class="card-title">Opening Inventory ${r.openingCompleted==='true' ? '(by '+esc(r.openingBy||'—')+')' : '(not done)'}</div>
@@ -5568,18 +5568,24 @@ async function diDeleteRecord(id) {
 }
 
 // ═══ PRINT (A4) ═══
-function diPrintRecord(type, dateStr) {
+// ═══ SAVE AS IMAGE (replaces the old Print button) ═══
+// Builds the same record layout that used to feed window.print(), reused by
+// diSaveRecordImage() below. Kept as its own function in case anything else
+// wants the same printable HTML later.
+function diBuildRecordDiv_(type, dateStr) {
   const r = diGetRecordByDate(dateStr);
-  if (!r) { toast('Record not found.', 'error'); return; }
+  if (!r) { toast('Record not found.', 'error'); return null; }
   let items = [];
   try { items = JSON.parse(type === 'opening' ? (r.openingItems||'[]') : (r.closingItems||'[]')); } catch(e) {}
-  if (!items.length) { toast('Nothing to print — no items recorded.', 'warning'); return; }
+  if (!items.length) { toast('Nothing to save — no items recorded.', 'warning'); return null; }
 
   const isOpening = type === 'opening';
-  const printWin = document.createElement('div');
-  printWin.id = 'diPrintArea';
-  printWin.innerHTML = `
-    <div style="padding:20px;font-family:Arial,sans-serif;font-size:11px;color:#000">
+  const div = document.createElement('div');
+  div.id = 'diImageArea';
+  // Positioned off-screen (not display:none) so html2canvas can still render it.
+  div.style.cssText = 'position:absolute;left:-9999px;top:0;background:#fff';
+  div.innerHTML = `
+    <div style="padding:20px;font-family:Arial,sans-serif;font-size:11px;color:#000;width:900px">
       <h2 style="margin:0 0 4px">AE Home Trade Corp. — Daily Inventory Checking</h2>
       <div>${isOpening ? 'Opening' : 'Closing'} Inventory — Date: ${esc(r.date)}</div>
       <table style="width:100%;border-collapse:collapse;margin-top:12px" border="1" cellpadding="4">
@@ -5606,9 +5612,38 @@ function diPrintRecord(type, dateStr) {
       <div style="margin-top:6px">Store/Branch: AE Home Trade Corp. — Vigan</div>
     </div>
   `;
-  document.body.appendChild(printWin);
-  window.print();
-  document.body.removeChild(printWin);
+  return div;
+}
+
+async function diSaveRecordImage(type, dateStr) {
+  const div = diBuildRecordDiv_(type, dateStr);
+  if (!div) return;
+  document.body.appendChild(div);
+  try {
+    if (typeof html2canvas === 'undefined') {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+    }
+    const canvas = await html2canvas(div, { backgroundColor: '#ffffff', scale: 2 });
+    await new Promise(resolve => {
+      canvas.toBlob(blob => {
+        if (!blob) { toast('Could not generate image.', 'error'); resolve(); return; }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `DailyInventory_${type}_${dateStr}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast('Image saved!', 'success');
+        resolve();
+      }, 'image/png');
+    });
+  } catch(e) {
+    toast('Could not save image. Check your connection.', 'error');
+  } finally {
+    document.body.removeChild(div);
+  }
 }
 
 // ═══ EXPORT TO EXCEL ═══
