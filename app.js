@@ -287,6 +287,7 @@ function finishLogin() {
   initApp();
   // Start session polling — check every 15 seconds if session is still valid
   startSessionPoller();
+  licGateCheck(); // Module 3: check subscription status after login (does not block if it fails to load)
 }
 
 function doLogout(showConfirm = true) {
@@ -531,26 +532,37 @@ async function gasRequest(params, timeoutMs = 30000) {
 }
 
 async function gasPost(payload, timeoutMs = 45000) {
-  // Real POST with body — Content-Type: text/plain keeps this a CORS "simple
-  // request" (no OPTIONS preflight, which Apps Script doesn't handle and
-  // would otherwise get blocked). The payload goes in the request BODY, not
-  // the URL, so there's no URL-length ceiling to hit — this replaces the old
-  // GET + base64-in-URL workaround, which broke ("Network error" / CORS
-  // error surfaced by the browser) once a batch's encoded payload got long
-  // (e.g. many products with longer names, as with Opening/Closing Inventory).
-  // doPost() on the backend already reads e.postData.contents as JSON, so no
-  // server-side change is needed.
+  // LICENSING GATE (Module 3): when the subscription has expired, block every
+  // mutating action app-wide from this single choke point — every save/
+  // checkout/delete already flows through gasPost, so this covers Sales,
+  // Inventory edits, Purchase Orders, Wholesalers, Daily Inventory, etc.
+  // without touching any of those individual functions. Renewal-related
+  // actions stay allowed so the user can actually get out of Viewer Mode.
+  if (typeof licViewerMode !== 'undefined' && licViewerMode) {
+    const LICENSE_ALLOWED_IN_VIEWER_MODE = ['startTrial', 'activateLicense', 'submitPayment', 'registerSession', 'unregisterSession'];
+    if (!LICENSE_ALLOWED_IN_VIEWER_MODE.includes(payload && payload.action)) {
+      toast('Subscription Expired — Renew to continue using AE Home POS.', 'error');
+      return { success: false, message: 'Subscription Expired — Renew to continue using AE Home POS.' };
+    }
+  }
+  // GAS CORS rule: only GET with no custom headers works cross-origin.
+  // POST is blocked by CORS. Solution: GET + base64 payload in URL param.
+  // We check for e.parameter.data (not e.parameter.method) in doGet
+  // so it works even if params survive the redirect.
   const json = JSON.stringify(payload);
+  let encoded;
+  try {
+    encoded = btoa(unescape(encodeURIComponent(json)));
+  } catch (e) {
+    const bytes  = new TextEncoder().encode(json);
+    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
+    encoded = btoa(binary);
+  }
+  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(GAS_URL, {
-      method: 'POST',
-      redirect: 'follow',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: json,
-      signal: ctrl.signal
-    });
+    const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
     clearTimeout(timer);
     const text = await res.text();
     if (!text || !text.trim()) return { success: true };
@@ -2717,13 +2729,31 @@ async function gasBulkImport(batch) {
     wholesalePricePack: String(p.wholesalepricepack || p['wholesale/pack'] || p['wholesaleprice/pack'] || p['Wholesale/Pack'] || p['Wholesale Price Pack'] || '0'),
   })).filter(p => p.name);
 
-  // Real POST via gasPost — no more URL-length limit, so no need for the
-  // separate base64-in-URL workaround this used to have.
+  // Use GET + base64 payload (same as gasPost) — avoids CORS block
+  const payload = { action: 'bulkAddProducts', products: JSON.stringify(products) };
+  const json    = JSON.stringify(payload);
+  let encoded;
   try {
-    const res = await gasPost({ action: 'bulkAddProducts', products: JSON.stringify(products) }, 60000);
-    return res && res.success !== undefined ? res : { success: true, count: products.length };
+    encoded = btoa(unescape(encodeURIComponent(json)));
+  } catch (e) {
+    const bytes  = new TextEncoder().encode(json);
+    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
+    encoded = btoa(binary);
+  }
+  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    clearTimeout(timer);
+    const text = await res.text();
+    if (!text || !text.trim()) return { success: true, count: products.length };
+    try { return JSON.parse(text); }
+    catch(e) { return { success: true, count: products.length }; }
   } catch(e) {
-    throw new Error(e.message.includes('timed out') ? 'Import timed out. Try a smaller batch.' : 'Import error: ' + e.message);
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('Import timed out. Try a smaller batch.');
+    throw new Error('Import error: ' + e.message);
   }
 }
 
@@ -5114,6 +5144,7 @@ async function diRenderOpeningTab() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <div class="card-title" style="margin:0">Opening Inventory — ${esc(today.date)}</div>
           <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('opening', ${JSON.stringify(today.date)})"> Print</button>
             <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(today.date)}, 'opening')"> Excel</button>
           </div>
         </div>
@@ -5190,13 +5221,13 @@ function diRenderOpeningTable() {
         <td>${esc(r.name)}</td>
         <td class="text-muted" style="font-size:0.82rem">${r.posStockPcs} pcs${r.hasPack ? ` / ${r.posStockPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_o_addPcs_${r.productId}" name="di_o_addPcs_${r.productId}" aria-label="Additional pieces for ${esc(r.name)}" value="${r.addPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','addPcs',this.value)" onkeydown="diHandleEnterKey(event)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_o_addPacks_${r.productId}" name="di_o_addPacks_${r.productId}" aria-label="Additional packs for ${esc(r.name)}" value="${r.addPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','addPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
+          <input type="number" min="0" id="di_o_addPcs_${r.productId}" name="di_o_addPcs_${r.productId}" aria-label="Additional pieces for ${esc(r.name)}" value="${r.addPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','addPcs',this.value)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_o_addPacks_${r.productId}" name="di_o_addPacks_${r.productId}" aria-label="Additional packs for ${esc(r.name)}" value="${r.addPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','addPacks',this.value)">` : ''}
         </td>
         <td class="fw-700">${r.totalPcs} pcs${r.hasPack ? ` / ${r.totalPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_o_actPcs_${r.productId}" name="di_o_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','actualPcs',this.value)" onkeydown="diHandleEnterKey(event)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_o_actPacks_${r.productId}" name="di_o_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','actualPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
+          <input type="number" min="0" id="di_o_actPcs_${r.productId}" name="di_o_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','actualPcs',this.value)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_o_actPacks_${r.productId}" name="di_o_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','actualPacks',this.value)">` : ''}
         </td>
         <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
         <td>${diRemarksBadge(r.remarks)}</td>
@@ -5219,28 +5250,6 @@ function diChangePage(delta) {
   diPage += delta;
   if (diTab === 'opening') diRenderOpeningTable();
   else if (diTab === 'closing') diRenderClosingTable();
-}
-
-// ─── ENTER-TO-NEXT-FIELD (Daily Inventory quick input) ───
-// Pressing Enter in any pcs/packs box jumps to the next input in the same
-// table (in DOM order), so encoders don't have to reach for the mouse/Tab.
-// Works automatically whether or not a product has a "packs" field, since
-// that input simply isn't in the DOM when hasPack is false.
-function diHandleEnterKey(e) {
-  if (e.key !== 'Enter') return;
-  e.preventDefault();
-  const wrap = e.target.closest('.tbl-wrap');
-  if (!wrap) return;
-  const inputs = Array.from(wrap.querySelectorAll('input'));
-  const idx = inputs.indexOf(e.target);
-  if (idx === -1) return;
-  const next = inputs[idx + 1];
-  if (next) {
-    next.focus();
-    next.select();
-  } else {
-    e.target.blur(); // last field on the page — nothing more to jump to
-  }
 }
 
 function diUpdateOpeningDraft(productId, field, val) {
@@ -5332,6 +5341,7 @@ async function diRenderClosingTab() {
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
           <div class="card-title" style="margin:0">Closing Inventory — ${esc(today.date)}</div>
           <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('closing', ${JSON.stringify(today.date)})"> Print</button>
             <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(today.date)}, 'closing')"> Excel</button>
           </div>
         </div>
@@ -5430,8 +5440,8 @@ function diRenderClosingTable() {
         <td class="text-muted" style="font-size:0.82rem">${r.soldPcs} pcs${r.hasPack ? ` / ${r.soldPacks} packs` : ''}</td>
         <td class="fw-700">${r.expectedPcs} pcs${r.hasPack ? ` / ${r.expectedPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)" onkeydown="diHandleEnterKey(event)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_c_actPacks_${r.productId}" name="di_c_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','actualPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
+          <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_c_actPacks_${r.productId}" name="di_c_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','actualPacks',this.value)">` : ''}
         </td>
         <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
         <td>${diRemarksBadge(r.remarks)}</td>
@@ -5544,6 +5554,8 @@ function diViewRecord(id) {
   openModal(`
     <div class="modal-title">Daily Inventory — ${esc(r.date)}</div>
     <div style="display:flex;gap:8px;margin-bottom:14px">
+      <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('opening', ${JSON.stringify(r.date)})"> Print Opening</button>
+      <button class="btn btn-ghost btn-sm" onclick="diPrintRecord('closing', ${JSON.stringify(r.date)})"> Print Closing</button>
       <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(r.date)}, 'both')"> Excel</button>
     </div>
     <div class="card-title">Opening Inventory ${r.openingCompleted==='true' ? '(by '+esc(r.openingBy||'—')+')' : '(not done)'}</div>
@@ -5563,6 +5575,49 @@ async function diDeleteRecord(id) {
   } catch(e) { toast('Network error.', 'error'); }
 }
 
+// ═══ PRINT (A4) ═══
+function diPrintRecord(type, dateStr) {
+  const r = diGetRecordByDate(dateStr);
+  if (!r) { toast('Record not found.', 'error'); return; }
+  let items = [];
+  try { items = JSON.parse(type === 'opening' ? (r.openingItems||'[]') : (r.closingItems||'[]')); } catch(e) {}
+  if (!items.length) { toast('Nothing to print — no items recorded.', 'warning'); return; }
+
+  const isOpening = type === 'opening';
+  const printWin = document.createElement('div');
+  printWin.id = 'diPrintArea';
+  printWin.innerHTML = `
+    <div style="padding:20px;font-family:Arial,sans-serif;font-size:11px;color:#000">
+      <h2 style="margin:0 0 4px">AE Home Trade Corp. — Daily Inventory Checking</h2>
+      <div>${isOpening ? 'Opening' : 'Closing'} Inventory — Date: ${esc(r.date)}</div>
+      <table style="width:100%;border-collapse:collapse;margin-top:12px" border="1" cellpadding="4">
+        <thead><tr>
+          <th>Item Name</th><th>POS Stock</th><th>Additional</th><th>Total Stocks</th>
+          <th>Actual Counts</th><th>Sold</th><th>Variance</th><th>Remarks</th>
+        </tr></thead>
+        <tbody>${items.map(it => `<tr>
+          <td>${esc(it.name)}</td>
+          <td>${isOpening ? `${it.posStockPcs} pcs${it.hasPack?`/${it.posStockPacks} pk`:''}` : `${it.openingTotalPcs} pcs${it.hasPack?`/${it.openingTotalPacks} pk`:''}`}</td>
+          <td>${isOpening ? `${it.addPcs} pcs${it.hasPack?`/${it.addPacks} pk`:''}` : '—'}</td>
+          <td>${isOpening ? `${it.totalPcs} pcs${it.hasPack?`/${it.totalPacks} pk`:''}` : `${it.expectedPcs} pcs${it.hasPack?`/${it.expectedPacks} pk`:''}`}</td>
+          <td>${it.actualPcs===''?'-':it.actualPcs} pcs${it.hasPack?`/${it.actualPacks===''?'-':it.actualPacks} pk`:''}</td>
+          <td>${isOpening ? '—' : `${it.soldPcs} pcs${it.hasPack?`/${it.soldPacks} pk`:''}`}</td>
+          <td>${it.variancePcs===null?'-':it.variancePcs}${it.hasPack?`/${it.variancePacks===null?'-':it.variancePacks}`:''}</td>
+          <td>${esc(it.remarks)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+      <div style="margin-top:30px;display:flex;justify-content:space-between">
+        <div>Prepared By: _______________________</div>
+        <div>Checked By: _______________________</div>
+        <div>Date: ${esc(r.date)}</div>
+      </div>
+      <div style="margin-top:6px">Store/Branch: AE Home Trade Corp. — Vigan</div>
+    </div>
+  `;
+  document.body.appendChild(printWin);
+  window.print();
+  document.body.removeChild(printWin);
+}
 
 // ═══ EXPORT TO EXCEL ═══
 async function diExportExcel(dateStr, type) {
@@ -5788,4 +5843,134 @@ function licOpenSubscribeModal() {
     <p>The Payment page (GCash / Maya / Bank Transfer, with admin verification) is coming in the next update.</p>
     <p>For now, contact AE Home to receive a License Key, then use "Activate License" above.</p>
   `);
+}
+
+// ═══════════════════════════════════════════════
+// LICENSING & SUBSCRIPTION — MODULE 3: Validation Service + Viewer Mode gate
+// This is the integration point into the real login flow. Two small edits
+// were made elsewhere for this to work:
+//   1. finishLogin() now calls licGateCheck() after login (one new line).
+//   2. gasPost() now blocks mutating actions when licViewerMode is true
+//      (one guard block at the top — see Module 3 comment there).
+// Everything else here is new, isolated code.
+// ═══════════════════════════════════════════════
+let licViewerMode = false;
+const LICENSE_OFFLINE_GRACE_DAYS = 3; // mirrors LICENSE_CONFIG.offlineGraceDays in backend.gs — keep in sync if you change one
+
+function licCacheGoodStatus(state) {
+  try {
+    localStorage.setItem('ae_pos_license_cache', JSON.stringify({ state, checkedAt: Date.now() }));
+  } catch(e) {}
+}
+function licGetCachedStatus() {
+  try {
+    const raw = localStorage.getItem('ae_pos_license_cache');
+    return raw ? JSON.parse(raw) : null;
+  } catch(e) { return null; }
+}
+
+// Main entry point — called once right after login.
+async function licGateCheck() {
+  const state = await licCheckStatus();
+
+  if (state.status === 'Unknown') {
+    // Couldn't reach the license server — fall back to the last known-good
+    // result, but only within the configured offline grace period.
+    const cached = licGetCachedStatus();
+    const withinGrace = cached && (Date.now() - cached.checkedAt) < (LICENSE_OFFLINE_GRACE_DAYS * 86400000);
+    if (withinGrace) {
+      licApplyStatus(cached.state.status, true);
+    } else {
+      licShowOfflineRequiredScreen();
+    }
+    return;
+  }
+
+  licCacheGoodStatus(state);
+  licApplyStatus(state.status, false);
+}
+
+function licApplyStatus(status, isOffline) {
+  hideLicenseWelcomeScreen();
+  licHideSuspendedLock();
+  licHideOfflineRequiredScreen();
+
+  if (status === 'None') {
+    licViewerMode = false;
+    licHideViewerBanner();
+    showLicenseWelcomeScreen(); // first-time-on-this-device — must start trial or activate
+  } else if (status === 'Suspended') {
+    licViewerMode = false; // suspended is a full lock, not view-only
+    licHideViewerBanner();
+    licShowSuspendedLock();
+  } else if (status === 'Expired') {
+    licViewerMode = true;
+    licShowViewerBanner(isOffline);
+  } else {
+    // Trial or Active
+    licViewerMode = false;
+    licHideViewerBanner();
+  }
+}
+
+// ─── SUSPENDED: full lock, nothing visible underneath ──
+function licShowSuspendedLock() {
+  if (document.getElementById('licSuspendedOverlay')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'licSuspendedOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:400;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML = `
+    <div class="card" style="max-width:420px;text-align:center">
+      <div style="font-size:2rem;margin-bottom:6px">⛔</div>
+      <div style="font-weight:800;font-size:1.15rem;margin-bottom:8px">Account Suspended</div>
+      <p class="text-muted">Your AE Home POS subscription has been suspended. Please contact your administrator or AE Home support to resolve this.</p>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+function licHideSuspendedLock() {
+  const el = document.getElementById('licSuspendedOverlay');
+  if (el) el.remove();
+}
+
+// ─── OFFLINE, GRACE PERIOD EXPIRED: must reconnect to continue ──
+function licShowOfflineRequiredScreen() {
+  if (document.getElementById('licOfflineOverlay')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'licOfflineOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:400;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px';
+  overlay.innerHTML = `
+    <div class="card" style="max-width:420px;text-align:center">
+      <div style="font-size:2rem;margin-bottom:6px">📶</div>
+      <div style="font-weight:800;font-size:1.15rem;margin-bottom:8px">Connect to the Internet</div>
+      <p class="text-muted">AE Home POS needs to verify your subscription. Please connect to the internet and try again.</p>
+      <button class="btn btn-primary" style="margin-top:10px" onclick="licGateCheck()">Retry</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+}
+function licHideOfflineRequiredScreen() {
+  const el = document.getElementById('licOfflineOverlay');
+  if (el) el.remove();
+}
+
+// ─── EXPIRED: Viewer Mode — visible, persistent banner; app itself stays
+// viewable (Dashboard/Products/Inventory/Reports/Sales History), while every
+// mutating action is blocked centrally in gasPost() above. ──
+function licShowViewerBanner(isOffline) {
+  let el = document.getElementById('licViewerBanner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'licViewerBanner';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:300;background:#ef4444;color:white;padding:10px 16px;text-align:center;font-weight:600;font-size:0.88rem;display:flex;justify-content:center;align-items:center;gap:12px;flex-wrap:wrap';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `
+    <span>Subscription Expired — Renew to continue using AE Home POS.${isOffline ? ' (offline)' : ''}</span>
+    <button class="btn" style="background:white;color:#ef4444;padding:4px 12px;font-size:0.82rem" onclick="licOpenActivateModal()">Renew</button>
+  `;
+}
+function licHideViewerBanner() {
+  const el = document.getElementById('licViewerBanner');
+  if (el) el.remove();
 }
