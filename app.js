@@ -62,6 +62,8 @@ const ROLE_NAV = {
     { id: 'wholesalers', icon: '', label: 'Wholesalers' },
     { id: 'purchaseOrders', icon: '', label: 'Purchase Orders' },
     { id: 'dailyInventory', icon: '', label: 'Daily Inventory Checking' },
+    { id: 'subscription', icon: '', label: 'Subscription' },
+    { id: 'licenseAdmin', icon: '', label: 'License Admin' },
   ],
   cashier: [
     { id: 'pos',         icon: '', label: 'Point of Sale' },
@@ -69,6 +71,7 @@ const ROLE_NAV = {
     { id: 'receipts',    icon: '', label: 'Receipts' },
     { id: 'wholesalers', icon: '', label: 'Wholesalers' },
     { id: 'purchaseOrders', icon: '', label: 'Purchase Orders' },
+    { id: 'subscription', icon: '', label: 'Subscription' },
   ],
   clerk: [
     { id: 'inventory',   icon: '', label: 'Inventory' },
@@ -78,10 +81,12 @@ const ROLE_NAV = {
     { id: 'salesExport', icon: '', label: 'Sales Export' },
     { id: 'wholesalers', icon: '', label: 'Wholesalers' },
     { id: 'dailyInventory', icon: '', label: 'Daily Inventory Checking' },
+    { id: 'subscription', icon: '', label: 'Subscription' },
   ],
   viewer: [
     { id: 'dashboard', icon: '', label: 'Dashboard' },
     { id: 'receipts', icon: '', label: 'Receipts' },
+    { id: 'subscription', icon: '', label: 'Subscription' },
   ]
 };
 
@@ -465,6 +470,8 @@ function navigateTo(page) {
     wholesalers: 'Wholesalers Information'
     , purchaseOrders: 'Purchase Orders (Wholesaler)'
     , dailyInventory: 'Daily Inventory Checking'
+    , subscription: 'Subscription'
+    , licenseAdmin: 'License Admin Panel'
   };
  document.getElementById('topbarTitle').textContent = titles[page] || page;
   // render
@@ -505,6 +512,8 @@ function renderPage(page) {
     wholesalers: renderWholesalers,
     purchaseOrders: renderPurchaseOrders,
     dailyInventory: renderDailyInventory,
+    subscription: renderSubscriptionPage,
+    licenseAdmin: renderLicenseAdminPage,
   };
   if (pages[page]) pages[page]();
   else {
@@ -666,6 +675,7 @@ function loadCartFromStorage() {
 // ═══════════════════════════════════════════════
 async function renderDashboard() {
  document.getElementById('pageContent').innerHTML = `
+    <div id="licDashboardWidget"></div>
     ${currentUser.role === 'admin' ? `
     <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
 <button class="btn btn-danger btn-sm" onclick="resetTestData()">️ Reset Test Data</button>
@@ -687,6 +697,7 @@ async function renderDashboard() {
  <div id="lowStockList"><div class="loading-spinner"><div class="spinner"></div></div></div>
       </div>
     </div>`;
+  licRenderDashboardWidget();
 
   try {
     const [salesRes, productsRes] = await Promise.all([
@@ -5836,13 +5847,133 @@ async function licConfirmActivate() {
 }
 
 function licOpenSubscribeModal() {
-  // Real payment submission UI is Module 5 — this is a placeholder so the
-  // button isn't dead, per the phased build plan.
   openModal(`
-    <div class="modal-title">Subscribe</div>
-    <p>The Payment page (GCash / Maya / Bank Transfer, with admin verification) is coming in the next update.</p>
-    <p>For now, contact AE Home to receive a License Key, then use "Activate License" above.</p>
+    <div class="modal-title">Subscribe / Renew</div>
+    <div class="field">
+      <label for="lic_pay_method">Payment Method</label>
+      <select id="lic_pay_method" name="lic_pay_method">
+        <option value="GCash">GCash</option>
+        <option value="Maya">Maya</option>
+        <option value="Bank Transfer">Bank Transfer</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="lic_pay_ref">Reference Number</label>
+      <input id="lic_pay_ref" name="lic_pay_ref" type="text" placeholder="e.g. 1234567890">
+    </div>
+    <div class="field">
+      <label for="lic_pay_amount">Amount (₱)</label>
+      <input id="lic_pay_amount" name="lic_pay_amount" type="number" min="0" step="0.01" placeholder="0.00">
+    </div>
+    <div class="field">
+      <label for="lic_pay_screenshot">Upload Screenshot (optional)</label>
+      <input id="lic_pay_screenshot" name="lic_pay_screenshot" type="file" accept="image/*">
+    </div>
+    <div class="field">
+      <label for="lic_pay_notes">Notes</label>
+      <input id="lic_pay_notes" name="lic_pay_notes" type="text" placeholder="Optional">
+    </div>
+    <div id="licPayProgress" class="text-muted" style="font-size:0.8rem;margin-bottom:8px"></div>
+    <button class="btn btn-primary" style="width:100%" id="licPaySubmitBtn" onclick="licSubmitPayment()"> Submit Payment</button>
   `);
+}
+
+// Resizes + re-encodes an image via canvas before upload, so a multi-MB
+// phone photo doesn't need dozens of extra chunk round-trips. Returns a
+// Promise resolving to { base64 (no data: prefix), mimeType }.
+function licCompressImage(file, maxWidth = 800, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve({ base64: dataUrl.split(',')[1], mimeType: 'image/jpeg' });
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+const LIC_UPLOAD_CHUNK_SIZE = 4000; // characters per chunk — matches the safe request size already proven elsewhere in this app
+
+// Splits base64 image data into small chunks and sends them sequentially,
+// reporting progress via onProgress(current, total). Returns the final
+// screenshotUrl from the backend once Drive has saved the reassembled file.
+async function licUploadScreenshotChunked(base64, mimeType, fileName, onProgress) {
+  const uploadId = 'UP' + Date.now() + Math.random().toString(36).substring(2, 8);
+  const chunks = [];
+  for (let i = 0; i < base64.length; i += LIC_UPLOAD_CHUNK_SIZE) {
+    chunks.push(base64.slice(i, i + LIC_UPLOAD_CHUNK_SIZE));
+  }
+  let lastRes = null;
+  for (let i = 0; i < chunks.length; i++) {
+    if (onProgress) onProgress(i + 1, chunks.length);
+    lastRes = await gasPost({
+      action: 'uploadScreenshotChunk',
+      uploadId, chunkIndex: i, data: chunks[i],
+      isLastChunk: i === chunks.length - 1,
+      mimeType, fileName,
+    });
+    if (!lastRes.success) throw new Error(lastRes.message || 'Upload failed.');
+  }
+  return lastRes.screenshotUrl;
+}
+
+async function licSubmitPayment() {
+  const btn = document.getElementById('licPaySubmitBtn');
+  const progressEl = document.getElementById('licPayProgress');
+  const method = document.getElementById('lic_pay_method')?.value || '';
+  const ref = document.getElementById('lic_pay_ref')?.value || '';
+  const amount = document.getElementById('lic_pay_amount')?.value || '';
+  const notes = document.getElementById('lic_pay_notes')?.value || '';
+  const fileInput = document.getElementById('lic_pay_screenshot');
+  const file = fileInput && fileInput.files && fileInput.files[0];
+
+  if (!ref.trim()) { toast('Reference number is required.', 'warning'); return; }
+  if (!amount) { toast('Amount is required.', 'warning'); return; }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
+
+  try {
+    let screenshotUrl = '';
+    if (file) {
+      if (progressEl) progressEl.textContent = 'Compressing image...';
+      const { base64, mimeType } = await licCompressImage(file);
+      screenshotUrl = await licUploadScreenshotChunked(base64, mimeType, file.name, (cur, total) => {
+        if (progressEl) progressEl.textContent = `Uploading screenshot... (${cur}/${total})`;
+      });
+    }
+
+    if (progressEl) progressEl.textContent = 'Saving payment record...';
+    const state = licenseState || await licCheckStatus();
+    const res = await gasPost({
+      action: 'submitPayment',
+      licenseId: state.id,
+      referenceNumber: ref, amount, method, screenshotUrl, notes,
+    });
+
+    if (res.success) {
+      toast('Payment submitted! Pending verification.', 'success');
+      closeModalDirect();
+      renderSubscriptionPage();
+    } else {
+      toast(res.message || 'Error submitting payment.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = ' Submit Payment'; }
+    }
+  } catch(e) {
+    toast(e.message || 'Upload failed. Please try again.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = ' Submit Payment'; }
+  }
 }
 
 // ═══════════════════════════════════════════════
@@ -5973,4 +6104,294 @@ function licShowViewerBanner(isOffline) {
 function licHideViewerBanner() {
   const el = document.getElementById('licViewerBanner');
   if (el) el.remove();
+}
+
+// ═══════════════════════════════════════════════
+// LICENSING & SUBSCRIPTION — MODULE 4: Subscription Page + Dashboard Widget
+// Two small additive insertions were made to renderDashboard() for the
+// widget container — the rest of that function is untouched. Everything
+// else here is new, isolated code.
+// ═══════════════════════════════════════════════
+
+function licRemainingDays(expirationDate) {
+  if (!expirationDate) return null;
+  const exp = new Date(expirationDate);
+  const now = new Date();
+  return Math.max(0, Math.ceil((exp - now) / 86400000));
+}
+
+function licFormatDate(d) {
+  if (!d) return '—';
+  try { return new Date(d).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' }); }
+  catch(e) { return '—'; }
+}
+
+// ─── DASHBOARD WIDGET ──────────────────────────
+async function licRenderDashboardWidget() {
+  const el = document.getElementById('licDashboardWidget');
+  if (!el) return;
+  const state = await licCheckStatus();
+
+  if (!state || state.status === 'None' || state.status === 'Unknown') {
+    el.innerHTML = ''; // gate screens already handle None/Unknown/Suspended — nothing extra needed on the dashboard itself
+    return;
+  }
+
+  const remaining = licRemainingDays(state.expirationDate);
+  const statusColor = state.status === 'Expired' ? '#ef4444' : (remaining !== null && remaining <= 3) ? '#f59e0b' : '#22c55e';
+
+  el.innerHTML = `
+    <div style="background:var(--grad);border-radius:14px;padding:18px 20px;margin-bottom:16px;color:white;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;transition:transform 0.2s" onmouseover="this.style.transform='translateY(-2px)'" onmouseout="this.style.transform='translateY(0)'">
+      <div>
+        <div style="font-size:0.78rem;opacity:0.85;text-transform:uppercase;letter-spacing:0.5px">Subscription</div>
+        <div style="font-size:1.3rem;font-weight:800;margin-top:2px">${esc(state.plan || 'Trial')} Plan</div>
+        <div style="font-size:0.85rem;margin-top:4px;display:flex;align-items:center;gap:6px">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${statusColor}"></span>
+          ${esc(state.status)} ${remaining !== null ? `— ${remaining} day${remaining===1?'':'s'} remaining` : ''}
+        </div>
+      </div>
+      <button class="btn" style="background:white;color:var(--blue);font-weight:700" onclick="navigateTo('subscription')">View Details</button>
+    </div>
+  `;
+}
+
+// ─── FULL SUBSCRIPTION PAGE ────────────────────
+async function renderSubscriptionPage() {
+  document.getElementById('pageContent').innerHTML = `<div class="loading-spinner"><div class="spinner"></div> Loading...</div>`;
+
+  const state = await licCheckStatus();
+  let payments = [];
+  try {
+    const res = await gasRequest({ action: 'getPayments' });
+    payments = (res.data || []).filter(p => p.licenseId === state.id);
+  } catch(e) {}
+
+  const el = document.getElementById('pageContent');
+  if (!el) return;
+
+  if (!state || state.status === 'None') {
+    el.innerHTML = `
+      <div class="card" style="text-align:center">
+        <div class="card-title">No Subscription Found</div>
+        <p class="text-muted">This device doesn't have a trial or license yet.</p>
+        <button class="btn btn-primary" onclick="showLicenseWelcomeScreen()">Get Started</button>
+      </div>
+    `;
+    return;
+  }
+
+  const remaining = licRemainingDays(state.expirationDate);
+
+  el.innerHTML = `
+    <div style="background:var(--grad);border-radius:16px;padding:24px;color:white;margin-bottom:20px">
+      <div style="font-size:0.8rem;opacity:0.85;text-transform:uppercase;letter-spacing:0.5px">Current Plan</div>
+      <div style="font-size:1.6rem;font-weight:800;margin-top:2px">${esc(state.plan || 'Trial')}</div>
+      <div style="margin-top:6px">${esc(state.status)} ${remaining !== null ? `— ${remaining} day${remaining===1?'':'s'} remaining` : ''}</div>
+      <button class="btn" style="background:white;color:var(--blue);font-weight:700;margin-top:14px" onclick="licOpenActivateModal()">Renew / Activate Another Key</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Subscription Details</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:0.9rem">
+        <div><span class="text-muted">Store Name</span><br><b>${esc(state.storeName || '—')}</b></div>
+        <div><span class="text-muted">Owner Name</span><br><b>${esc(state.ownerName || '—')}</b></div>
+        <div><span class="text-muted">License Key</span><br><b style="font-family:var(--font-mono)">${esc(state.licenseKey || '—')}</b></div>
+        <div><span class="text-muted">Device ID</span><br><b style="font-family:var(--font-mono);font-size:0.78rem">${esc(state.deviceToken || '—')}</b></div>
+        <div><span class="text-muted">Activation Date</span><br><b>${licFormatDate(state.activationDate)}</b></div>
+        <div><span class="text-muted">Expiration Date</span><br><b>${licFormatDate(state.expirationDate)}</b></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Payment History</div>
+      ${payments.length ? `
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Date</th><th>Reference #</th><th>Method</th><th>Amount</th><th>Status</th></tr></thead>
+        <tbody>${payments.map(p => `<tr>
+          <td class="text-muted" style="font-size:0.82rem">${licFormatDate(p.submittedAt)}</td>
+          <td>${esc(p.referenceNumber||'')}</td>
+          <td>${esc(p.method||'')}</td>
+          <td>₱${parseFloat(p.amount||0).toFixed(2)}</td>
+          <td>${p.status === 'Approved' ? '<span class="badge-in-stock">Approved</span>' : p.status === 'Rejected' ? '<span class="badge-out">Rejected</span>' : '<span class="badge-low">Pending</span>'}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : '<div class="no-data"><div class="no-data-text">No payments submitted yet.</div></div>'}
+    </div>
+  `;
+}
+
+// ═══════════════════════════════════════════════
+// LICENSING & SUBSCRIPTION — MODULE 5b: Admin Approval Panel
+// Admin-only. Reuses the same admin-gate pattern already used elsewhere
+// (Purchase Orders Complete/Cancel, Daily Inventory Delete) — no new
+// permission concept introduced.
+// ═══════════════════════════════════════════════
+let licAdminTab = 'payments';
+
+async function renderLicenseAdminPage() {
+  document.getElementById('pageContent').innerHTML = `
+    <div class="po-subnav" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+      ${[['payments','Payments'],['licenses','Licenses']].map(([id,label]) => `
+        <button class="btn ${licAdminTab === id ? 'btn-primary' : 'btn-ghost'} btn-sm" data-lic-admin-tab="${id}" onclick="licAdminSwitchTab('${id}')">${label}</button>
+      `).join('')}
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="licAdminGenerateKey()">+ Generate New License Key</button>
+    </div>
+    <div id="licAdminTabContent"><div class="loading-spinner"><div class="spinner"></div> Loading...</div></div>
+  `;
+  await licAdminRenderTab(licAdminTab);
+}
+
+function licAdminSwitchTab(tab) {
+  licAdminTab = tab;
+  document.querySelectorAll('[data-lic-admin-tab]').forEach(b => {
+    b.classList.toggle('btn-primary', b.dataset.licAdminTab === tab);
+    b.classList.toggle('btn-ghost', b.dataset.licAdminTab !== tab);
+  });
+  licAdminRenderTab(tab);
+}
+
+async function licAdminRenderTab(tab) {
+  if (tab === 'payments') return licAdminRenderPayments();
+  return licAdminRenderLicenses();
+}
+
+async function licAdminRenderPayments() {
+  const el = document.getElementById('licAdminTabContent');
+  let payments = [], licenses = [];
+  try {
+    const [payRes, licRes] = await Promise.all([
+      gasRequest({ action: 'getPayments' }),
+      gasRequest({ action: 'getLicenses' }),
+    ]);
+    payments = payRes.data || [];
+    licenses = licRes.data || [];
+  } catch(e) { toast('Could not load payments.', 'error'); }
+
+  if (!el) return;
+  const sorted = [...payments].reverse();
+  if (!sorted.length) {
+    el.innerHTML = '<div class="card"><div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No payments submitted yet.</div></div></div>';
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="card"><div class="tbl-wrap"><table>
+      <thead><tr><th>Date</th><th>Store</th><th>Reference #</th><th>Method</th><th>Amount</th><th>Screenshot</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${sorted.map(p => {
+        const lic = licenses.find(l => l.id === p.licenseId);
+        return `<tr>
+          <td class="text-muted" style="font-size:0.82rem">${licFormatDate(p.submittedAt)}</td>
+          <td>${esc(lic?.storeName || '—')}</td>
+          <td>${esc(p.referenceNumber||'')}</td>
+          <td>${esc(p.method||'')}</td>
+          <td class="fw-700">₱${parseFloat(p.amount||0).toFixed(2)}</td>
+          <td>${p.screenshotUrl ? `<a href="${esc(p.screenshotUrl)}" target="_blank" rel="noopener">View</a>` : '—'}</td>
+          <td>${p.status === 'Approved' ? '<span class="badge-in-stock">Approved</span>' : p.status === 'Rejected' ? '<span class="badge-out">Rejected</span>' : '<span class="badge-low">Pending</span>'}</td>
+          <td>
+            ${p.status === 'Pending' ? `
+              <div style="display:flex;gap:5px">
+                <button class="inv-btn inv-btn-edit" onclick="licAdminApprovePayment('${p.id}')">Approve</button>
+                <button class="inv-btn inv-btn-del" onclick="licAdminRejectPayment('${p.id}')">Reject</button>
+              </div>` : '—'}
+          </td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div></div>
+  `;
+}
+
+async function licAdminApprovePayment(id) {
+  if (!confirm('Approve this payment? This will extend the license automatically.')) return;
+  try {
+    const res = await gasPost({ action: 'approvePayment', id, caller_role: currentUser.role, verifiedBy: currentUser.name || currentUser.username || '' });
+    if (res.success) { toast('Payment approved. License extended.', 'success'); licAdminRenderPayments(); }
+    else toast(res.message || 'Error approving payment.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function licAdminRejectPayment(id) {
+  if (!confirm('Reject this payment?')) return;
+  try {
+    const res = await gasPost({ action: 'rejectPayment', id, caller_role: currentUser.role, verifiedBy: currentUser.name || currentUser.username || '' });
+    if (res.success) { toast('Payment rejected.', 'success'); licAdminRenderPayments(); }
+    else toast(res.message || 'Error rejecting payment.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function licAdminRenderLicenses() {
+  const el = document.getElementById('licAdminTabContent');
+  let licenses = [];
+  try {
+    const res = await gasRequest({ action: 'getLicenses' });
+    licenses = res.data || [];
+  } catch(e) { toast('Could not load licenses.', 'error'); }
+
+  if (!el) return;
+  const sorted = [...licenses].reverse();
+  if (!sorted.length) {
+    el.innerHTML = '<div class="card"><div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No licenses yet.</div></div></div>';
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="card"><div class="tbl-wrap"><table>
+      <thead><tr><th>License Key</th><th>Store</th><th>Plan</th><th>Status</th><th>Device</th><th>Expires</th><th>Actions</th></tr></thead>
+      <tbody>${sorted.map(l => `<tr>
+        <td style="font-family:var(--font-mono);font-size:0.78rem">${esc(l.licenseKey||'')}</td>
+        <td>${esc(l.storeName||'—')}</td>
+        <td>${esc(l.plan||'—')}</td>
+        <td>${l.status === 'Suspended' ? '<span class="badge-out">Suspended</span>' : l.status === 'Expired' ? '<span class="badge-out">Expired</span>' : '<span class="badge-in-stock">'+esc(l.status)+'</span>'}</td>
+        <td class="text-muted" style="font-size:0.75rem">${l.deviceToken ? esc(l.deviceToken).substring(0,16)+'…' : '—'}</td>
+        <td class="text-muted" style="font-size:0.82rem">${licFormatDate(l.expirationDate)}</td>
+        <td>
+          <div style="display:flex;gap:5px;flex-wrap:wrap">
+            <button class="inv-btn" onclick="licAdminExtend('${l.id}')">Extend</button>
+            ${l.status !== 'Suspended' ? `<button class="inv-btn inv-btn-del" onclick="licAdminSuspend('${l.id}')">Suspend</button>` : ''}
+            ${l.deviceToken ? `<button class="inv-btn" onclick="licAdminResetDevice('${l.id}')">Reset Device</button>` : ''}
+          </div>
+        </td>
+      </tr>`).join('')}</tbody>
+    </table></div></div>
+  `;
+}
+
+async function licAdminExtend(id) {
+  const days = prompt('Extend by how many days?', '30');
+  if (!days || isNaN(parseInt(days))) return;
+  try {
+    const res = await gasPost({ action: 'extendLicense', id, days: parseInt(days), caller_role: currentUser.role });
+    if (res.success) { toast('License extended.', 'success'); licAdminRenderLicenses(); }
+    else toast(res.message || 'Error extending license.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function licAdminSuspend(id) {
+  if (!confirm('Suspend this license? The device will be fully locked out.')) return;
+  try {
+    const res = await gasPost({ action: 'suspendLicense', id, caller_role: currentUser.role });
+    if (res.success) { toast('License suspended.', 'success'); licAdminRenderLicenses(); }
+    else toast(res.message || 'Error suspending license.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function licAdminResetDevice(id) {
+  if (!confirm('Reset device binding? This lets the license be activated on a different device.')) return;
+  try {
+    const res = await gasPost({ action: 'resetDeviceToken', id, caller_role: currentUser.role });
+    if (res.success) { toast('Device reset.', 'success'); licAdminRenderLicenses(); }
+    else toast(res.message || 'Error resetting device.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function licAdminGenerateKey() {
+  const storeName = prompt('Store name for this license (optional):', '');
+  if (storeName === null) return;
+  try {
+    const res = await gasPost({ action: 'generateNewLicenseKey', caller_role: currentUser.role, storeName, plan: 'Monthly' });
+    if (res.success) {
+      alert('New license key generated:\n\n' + res.licenseKey);
+      if (licAdminTab === 'licenses') licAdminRenderLicenses();
+    } else {
+      toast(res.message || 'Error generating key.', 'error');
+    }
+  } catch(e) { toast('Network error.', 'error'); }
 }
