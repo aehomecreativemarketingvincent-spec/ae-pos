@@ -749,7 +749,7 @@ async function renderDashboard() {
  <div class="tbl-wrap"><table>
         <thead><tr><th>Product</th><th>Qty</th></tr></thead>
         <tbody>${lowStock.map(p => `<tr>
-          <td>${p.name}</td>
+          <td>${esc(p.name)}</td>
           <td><span class="${parseInt(p.qtyPcs||0)===0?'badge-out':'badge-low'}">${p.qtyPcs} pcs</span></td>
         </tr>`).join('')}</tbody>
  </table></div>` : '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">All items well-stocked.</div></div>';
@@ -852,7 +852,7 @@ function renderProductGrid(products) {
     return `
 <div class="product-card ${oos ? 'out-of-stock' : ''}">
 ${pcImg ? `<img src="${pcImg}" class="pc-img">` : ''}
-<div class="pc-name">${p.name}</div>
+<div class="pc-name">${esc(p.name)}</div>
  ${p.barcode ? `<div class="pc-barcode">${p.barcode}</div>` : ''}
 <div class="pc-stock ${oos ? 'text-red' : qty<= 5 ? 'text-orange' : 'text-muted'}" style="margin-bottom:6px">
         ${oos ? '❌ Out of stock' : `📦 ${qty} pcs${qtyPk ? ' | '+qtyPk+' pks':''}`}
@@ -1118,7 +1118,7 @@ function showScanConfirm(val) {
     if (match) {
       confirmDiv.innerHTML = `
         <div style="background:rgba(0,200,83,0.15);border:1px solid var(--green);border-radius:8px;padding:10px;margin:8px 16px;text-align:center">
-          <div style="color:white;font-weight:700;font-size:0.9rem">${match.name}</div>
+          <div style="color:white;font-weight:700;font-size:0.9rem">${esc(match.name)}</div>
           <div style="color:rgba(255,255,255,0.7);font-size:0.78rem">₱${parseFloat(match.pricePer||0).toFixed(2)} • ${match.qtyPcs||0} pcs</div>
           <div style="display:flex;gap:8px;margin-top:8px;justify-content:center">
             <button class="btn btn-success btn-sm" onclick="confirmScan('${val}')"> Add to Cart</button>
@@ -1228,7 +1228,7 @@ function onPosSearch(val) {
         const hasPack = parseFloat(p.pricePack||0) > 0 && parseInt(p.qtyPacks||0) > 0;
  return `<div class="search-item">
           <div style="flex:1">
-<div class="search-item-name">${p.name}</div>
+<div class="search-item-name">${esc(p.name)}</div>
 <div class="search-item-stock">${p.qtyPcs||0} pcs${p.qtyPacks ? ' | '+p.qtyPacks+' pks' : ''}</div>
           </div>
           <div style="display:flex;gap:6px;align-items:center">
@@ -1335,7 +1335,7 @@ function renderCart() {
       return `
 <div class="cart-item">
 <div class="ci-info">
-<div class="ci-name">${item.name}</div>
+<div class="ci-name">${esc(item.name)}</div>
 <div class="ci-price">${priceLabel}</div>
  ${hasPack ? `<div class="ci-unit-toggle">
             <button class="${item.unit==='piece'?'active-piece':''}" onclick="switchCartUnit(${idx},'piece')">Piece ₱${parseFloat(prod.pricePer||0).toFixed(2)}</button>
@@ -1414,7 +1414,7 @@ function openCheckout() {
  ${cart.map(c => {
    const eff = getCartItemEffective(c);
    const discNote = eff.isWholesale ? ` (Wholesale)` : '';
-   return `<div class="checkout-item-line"><span>${c.name} (${c.unit}) x${c.qty}${discNote}</span><span>₱${eff.total.toFixed(2)}</span></div>`;
+   return `<div class="checkout-item-line"><span>${esc(c.name)} (${c.unit}) x${c.qty}${discNote}</span><span>₱${eff.total.toFixed(2)}</span></div>`;
  }).join('')}
  <div class="checkout-total-line"><span>TOTAL</span><span>₱${total.toFixed(2)}</span></div>
       </div>
@@ -1639,7 +1639,21 @@ function saveSalesExportLocal(data) {
 async function pushSalesExportToGAS(data) {
   try {
     const rows = buildExportRows(data);
-    return await gasPost({ action: 'saveSalesExport', rows: JSON.stringify(rows) });
+    // AUDIT FIX (H-3): same URL-length risk class as Purchase Orders/Daily
+    // Inventory, but bounded by a single cart's size — only batch when it's
+    // actually large enough to matter, to avoid extra round-trips on the
+    // common (small) case.
+    const SALES_EXPORT_BATCH_SIZE = 15;
+    if (rows.length <= SALES_EXPORT_BATCH_SIZE) {
+      return await gasPost({ action: 'saveSalesExport', rows: JSON.stringify(rows) });
+    }
+    let lastRes = { success: true };
+    for (let i = 0; i < rows.length; i += SALES_EXPORT_BATCH_SIZE) {
+      const batch = rows.slice(i, i + SALES_EXPORT_BATCH_SIZE);
+      lastRes = await gasPost({ action: 'saveSalesExport', rows: JSON.stringify(batch) });
+      if (!lastRes.success) return lastRes;
+    }
+    return lastRes;
   } catch(e) {
     console.warn('[POS] Sales export push failed (non-critical):', e.message);
     return { success: false };
@@ -2002,7 +2016,7 @@ function renderInventoryTable(products) {
     const badge = qty === 0 ? '<span class="badge-out">Out</span>' : qty <= 5 ? '<span class="badge-low">Low</span>' : '<span class="badge-in-stock">In Stock</span>';
     const chk = canDelete ? `<td><input type="checkbox" class="row-select" name="row_select_${p.id}" value="${p.id}" onchange="updateBulkBar()"></td>` : '';
     const img = getProductImage(p.id);
-    const thumb = img ? `<img src="${img}" class="prod-thumb" onclick="viewProductImage('${p.id}','${p.name}')">` : `<div class="prod-thumb-empty" onclick="openImageUpload('${p.id}','${p.name}')">+</div>`;
+    const thumb = img ? `<img src="${esc(img)}" class="prod-thumb" onclick="viewProductImage('${escJsAttr(p.id)}','${escJsAttr(p.name)}')">` : `<div class="prod-thumb-empty" onclick="openImageUpload('${escJsAttr(p.id)}','${escJsAttr(p.name)}')">+</div>`;
     const acts = canEdit ? `<td><div class="inv-btn-group">
       <button class="inv-btn inv-btn-edit" onclick="openEditProductModal('${p.id}')" title="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit</button>
       <button class="inv-btn inv-btn-in" onclick="openStockModal('${p.id}','in')" title="Stock In"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg> In</button>
@@ -2012,7 +2026,7 @@ function renderInventoryTable(products) {
     return `<tr>${chk}
       <td>${thumb}</td>
       <td style="font-family:var(--font-mono);font-size:0.8rem">${p.barcode||'—'}</td>
-      <td><b>${p.name}</b></td>
+      <td><b>${esc(p.name)}</b></td>
       <td>${p.qtyPcs||0}</td><td>${p.qtyPacks||0}</td>
       <td>₱${parseFloat(p.pricePer||0).toFixed(2)}</td>
       <td>₱${parseFloat(p.pricePack||0).toFixed(2)}</td>
@@ -3035,7 +3049,7 @@ async function loadCashiers() {
  el.innerHTML = `<div class="tbl-wrap"><table>
       <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>${data.map(c => `<tr>
-        <td><b>${c.name}</b></td>
+        <td><b>${esc(c.name)}</b></td>
         <td><span style="font-family:var(--font-mono);font-size:0.85rem">${c.username}</span></td>
         <td><span class="role-badge role-${c.role}">${c.role}</span></td>
         <td><span class="${c.active !== 'false' ? 'badge-in-stock' : 'badge-out'}">${c.active !== 'false' ? 'Active' : 'Inactive'}</span></td>
@@ -3077,9 +3091,9 @@ function openEditCashierModal(id) {
     const c = (res.data || []).find(x => x.id === id);
     if (!c) return;
     openModal(`
-<div class="modal-title">️ Edit User — ${c.name}</div>
+<div class="modal-title">️ Edit User — ${esc(c.name)}</div>
 <div class="input-row">
- <div class="field"><label for="c_name">Full Name</label><input id="c_name" name="c_name" value="${c.name}"></div>
+ <div class="field"><label for="c_name">Full Name</label><input id="c_name" name="c_name" value="${esc(c.name)}"></div>
  <div class="field"><label for="c_username">Username</label><input id="c_username" name="c_username" value="${c.username}"></div>
       </div>
 <div class="input-row">
@@ -4124,6 +4138,20 @@ function esc(str) {
     .replace(/'/g, '&#39;');
 }
 
+// AUDIT FIX (H-1): esc() alone is not enough for values embedded inside an
+// onclick="fn('...')" attribute — the browser HTML-decodes the attribute
+// value before compiling it as JS, so an HTML-escaped quote (&#39;) still
+// becomes a real quote by the time it reaches the JS parser and can break
+// out of the string. This escapes for BOTH layers: JS-string-safe first,
+// then HTML-attribute-safe, in the correct order.
+function escJsAttr(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;');
+}
+
 function wsClipboard(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text)
@@ -4654,6 +4682,9 @@ function poCancelNewOrder() {
   poSwitchTab('dashboard');
 }
 
+// Same batch size already proven safe by bulk import / Daily Inventory saves.
+const PO_SAVE_BATCH_SIZE = 15;
+
 async function poSaveOrder() {
   const wholesalerName = document.getElementById('po_wholesalerName')?.value.trim();
   const pickupDate     = document.getElementById('po_pickupDate')?.value;
@@ -4664,35 +4695,50 @@ async function poSaveOrder() {
   const subtotal   = poNewItems.reduce((s,i) => s + (parseFloat(i.qty||0)*parseFloat(i.price||0)), 0);
   const discount   = poNewItems.reduce((s,i) => s + (parseFloat(i.disc)||0), 0);
   const grandTotal = Math.max(0, subtotal - discount);
+  const poNumber   = 'PO' + Date.now();
 
   const btn = document.getElementById('poSaveBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+  if (btn) { btn.disabled = true; }
+
+  const baseFields = {
+    action: 'addPurchaseOrder',
+    caller_role: currentUser.role,
+    poNumber,
+    wholesalerId: document.getElementById('po_wholesalerPick')?.value || '',
+    wholesalerName,
+    storeName: document.getElementById('po_storeName')?.value || '',
+    contactNumber: document.getElementById('po_contactNumber')?.value || '',
+    deliveryAddress: document.getElementById('po_deliveryAddress')?.value || '',
+    pickupDeliveryDate: pickupDate,
+    paymentTerms: document.getElementById('po_paymentTerms')?.value || '',
+    remarks: document.getElementById('po_remarks')?.value || '',
+    createdBy: currentUser.name || currentUser.username || '',
+  };
+
+  const batches = [];
+  for (let i = 0; i < poNewItems.length; i += PO_SAVE_BATCH_SIZE) {
+    batches.push(poNewItems.slice(i, i + PO_SAVE_BATCH_SIZE));
+  }
 
   try {
-    const res = await gasPost({
-      action: 'addPurchaseOrder',
-      caller_role: currentUser.role,
-      poNumber: 'PO' + Date.now(),
-      wholesalerId: document.getElementById('po_wholesalerPick')?.value || '',
-      wholesalerName,
-      storeName: document.getElementById('po_storeName')?.value || '',
-      contactNumber: document.getElementById('po_contactNumber')?.value || '',
-      deliveryAddress: document.getElementById('po_deliveryAddress')?.value || '',
-      pickupDeliveryDate: pickupDate,
-      paymentTerms: document.getElementById('po_paymentTerms')?.value || '',
-      remarks: document.getElementById('po_remarks')?.value || '',
-      items: JSON.stringify(poNewItems),
-      subtotal, discount, grandTotal,
-      createdBy: currentUser.name || currentUser.username || '',
-    });
-    if (res.success) {
-      toast('Purchase order saved!', 'success');
-      poNewItems = [];
-      poSwitchTab('history');
-    } else {
-      toast(res.message || 'Error saving order.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
+    for (let b = 0; b < batches.length; b++) {
+      if (btn) btn.textContent = `Saving... (${b+1}/${batches.length})`;
+      const res = await gasPost(Object.assign({}, baseFields, {
+        items: JSON.stringify(batches[b]),
+        isFirstBatch: b === 0,
+        isLastBatch: b === batches.length - 1,
+        subtotal, discount, grandTotal,
+      }));
+      if (!res.success) {
+        toast(res.message || 'Error saving order.', 'error');
+        if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
+        return;
+      }
+      if (b < batches.length - 1) await new Promise(r => setTimeout(r, 300));
     }
+    toast('Purchase order saved!', 'success');
+    poNewItems = [];
+    poSwitchTab('history');
   } catch(e) {
     toast('Network error. Please try again.', 'error');
     if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
