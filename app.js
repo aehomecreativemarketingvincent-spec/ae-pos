@@ -547,7 +547,10 @@ async function gasPost(payload, timeoutMs = 45000) {
   // Inventory edits, Purchase Orders, Wholesalers, Daily Inventory, etc.
   // without touching any of those individual functions. Renewal-related
   // actions stay allowed so the user can actually get out of Viewer Mode.
-  if (typeof licViewerMode !== 'undefined' && licViewerMode) {
+  // Admin is exempt entirely (defense-in-depth — licGateCheck already never
+  // sets licViewerMode for Admin, this just guarantees it either way).
+  const isAdmin = typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin';
+  if (!isAdmin && typeof licViewerMode !== 'undefined' && licViewerMode) {
     const LICENSE_ALLOWED_IN_VIEWER_MODE = ['startTrial', 'activateLicense', 'submitPayment', 'registerSession', 'unregisterSession'];
     if (!LICENSE_ALLOWED_IN_VIEWER_MODE.includes(payload && payload.action)) {
       toast('Subscription Expired — Renew to continue using AE Home POS.', 'error');
@@ -6002,6 +6005,18 @@ function licGetCachedStatus() {
 
 // Main entry point — called once right after login.
 async function licGateCheck() {
+  // Admin is the business owner running their own system, not a subscriber
+  // being metered — fully exempt from Welcome/Trial/Expired/Suspended
+  // screens. Cashier/Clerk still go through the normal check below.
+  if (currentUser && currentUser.role === 'admin') {
+    licViewerMode = false;
+    hideLicenseWelcomeScreen();
+    licHideSuspendedLock();
+    licHideOfflineRequiredScreen();
+    licHideViewerBanner();
+    return;
+  }
+
   const state = await licCheckStatus();
 
   if (state.status === 'Unknown') {
