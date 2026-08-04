@@ -5895,11 +5895,9 @@ async function licRenderDashboardWidget() {
 async function renderSubscriptionPage() {
   document.getElementById('pageContent').innerHTML = `<div class="loading-spinner"><div class="spinner"></div> Loading...</div>`;
 
-  const [state, settingsRes, paymentsRes] = await Promise.all([
-    licCheckStatus(),
-    gasRequest({ action: 'getSubscriptionSettings' }),
-    gasRequest({ action: 'getPayments' }),
-  ]);
+  const state = await licCheckStatus();
+  const settingsRes = await gasRequest({ action: 'getSubscriptionSettings' });
+  const paymentsRes = await gasRequest({ action: 'getPayments' });
   const settings = settingsRes.data || {};
   const myPayments = (paymentsRes.data || []).filter(p => p.userId === currentUser.id);
   const pending = myPayments.find(p => p.status === 'Pending');
@@ -6108,10 +6106,8 @@ async function subMgmtRenderTab(tab) {
 // ── TAB: DASHBOARD ──
 async function subMgmtRenderDashboard() {
   const el = document.getElementById('subMgmtTabContent');
-  const [payRes, licRes] = await Promise.all([
-    gasRequest({ action: 'getPayments' }),
-    gasRequest({ action: 'getLicenses' }),
-  ]);
+  const payRes = await gasRequest({ action: 'getPayments' });
+  const licRes = await gasRequest({ action: 'getLicenses' });
   const payments = payRes.data || [];
   const licenses = licRes.data || [];
 
