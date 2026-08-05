@@ -4719,16 +4719,30 @@ async function poSaveOrder() {
   }
 
   try {
+    const MAX_ATTEMPTS = 3;
     for (let b = 0; b < batches.length; b++) {
-      if (btn) btn.textContent = `Saving... (${b+1}/${batches.length})`;
-      const res = await gasPost(Object.assign({}, baseFields, {
-        items: JSON.stringify(batches[b]),
-        isFirstBatch: b === 0,
-        isLastBatch: b === batches.length - 1,
-        subtotal, discount, grandTotal,
-      }));
-      if (!res.success) {
-        toast(res.message || 'Error saving order.', 'error');
+      let succeeded = false;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (btn) btn.textContent = attempt === 1
+          ? `Saving... (${b+1}/${batches.length})`
+          : `Saving... (${b+1}/${batches.length}, retry ${attempt-1})`;
+        try {
+          const res = await gasPost(Object.assign({}, baseFields, {
+            items: JSON.stringify(batches[b]),
+            isFirstBatch: b === 0,
+            isLastBatch: b === batches.length - 1,
+            subtotal, discount, grandTotal,
+          }));
+          if (res.success) { succeeded = true; break; }
+          toast(res.message || 'Error saving order.', 'error');
+          if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
+          return;
+        } catch(e) {
+          if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, attempt * 1500));
+        }
+      }
+      if (!succeeded) {
+        toast('Network error after ' + MAX_ATTEMPTS + ' attempts. Please check your connection and try again.', 'error');
         if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
         return;
       }
@@ -5329,28 +5343,46 @@ async function diSaveInBatches(phase, allRows, btn, defaultLabel) {
   }
   if (!batches.length) { toast('No items to save.', 'warning'); return false; }
 
+  const MAX_ATTEMPTS = 3;
+
   for (let b = 0; b < batches.length; b++) {
-    if (btn) btn.textContent = `Saving... (${b+1}/${batches.length})`;
-    try {
-      const res = await gasPost({
-        action: phase === 'opening' ? 'saveOpeningInventory' : 'saveClosingInventory',
-        caller_role: currentUser.role,
-        date: diTodayStr(),
-        items: JSON.stringify(batches[b]),
-        isFirstBatch: b === 0,
-        isLastBatch: b === batches.length - 1,
-        createdBy: currentUser.name || currentUser.username || '',
-      });
-      if (!res.success) {
+    let lastError = null;
+    let succeeded = false;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (btn) btn.textContent = attempt === 1
+        ? `Saving... (${b+1}/${batches.length})`
+        : `Saving... (${b+1}/${batches.length}, retry ${attempt-1})`;
+      try {
+        const res = await gasPost({
+          action: phase === 'opening' ? 'saveOpeningInventory' : 'saveClosingInventory',
+          caller_role: currentUser.role,
+          date: diTodayStr(),
+          items: JSON.stringify(batches[b]),
+          isFirstBatch: b === 0,
+          isLastBatch: b === batches.length - 1,
+          createdBy: currentUser.name || currentUser.username || '',
+        });
+        if (res.success) { succeeded = true; break; }
+        // A real validation error from the server (not a network hiccup) —
+        // retrying won't help, so stop immediately.
         toast(res.message || 'Error saving.', 'error');
         if (btn) { btn.disabled = false; btn.textContent = defaultLabel; }
         return false;
+      } catch(e) {
+        lastError = e;
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, attempt * 1500)); // 1.5s, then 3s
+        }
       }
-    } catch(e) {
-      toast('Network error. Please try again.', 'error');
+    }
+
+    if (!succeeded) {
+      toast('Network error after ' + MAX_ATTEMPTS + ' attempts. Please check your connection and try again.', 'error');
       if (btn) { btn.disabled = false; btn.textContent = defaultLabel; }
       return false;
     }
+
     // Small pause between batches to avoid GAS rate limits (same pattern as bulk import)
     if (b < batches.length - 1) await new Promise(r => setTimeout(r, 400));
   }
