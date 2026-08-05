@@ -5334,7 +5334,11 @@ function diUpdateOpeningDraft(productId, field, val) {
 // proven safe by the existing bulk product import (avoids exceeding the URL
 // length limit of the GAS GET+base64 request, which is what was causing the
 // "Network Error" on stores with more than a handful of products).
-const DI_SAVE_BATCH_SIZE = 15;
+// Smaller than the bulk-import batch size (15) on purpose: each Daily
+// Inventory item carries ~15 fields (POS Stock, Additional, Total, Actual,
+// Variance for both Pcs and Packs, plus name/category) vs bulk-import's 6 —
+// the same item count that's safe there is too large a URL payload here.
+const DI_SAVE_BATCH_SIZE = 5;
 
 async function diSaveInBatches(phase, allRows, btn, defaultLabel) {
   const batches = [];
