@@ -5458,18 +5458,24 @@ function diClosingOpeningItems() {
 }
 
 function diClosingRowData(openingItem) {
-  const sold = diTodaySoldQty[openingItem.productId] || { pcs: 0, packs: 0 };
-  const draft = diDraftClosing[openingItem.productId] || { actualPcs: '', actualPacks: '' };
-  const expectedPcs = (parseFloat(openingItem.totalPcs)||0) - (parseFloat(sold.pcs)||0);
-  const expectedPacks = (parseFloat(openingItem.totalPacks)||0) - (parseFloat(sold.packs)||0);
-  const varPcs = diVariance(draft.actualPcs, expectedPcs);
-  const varPacks = diVariance(draft.actualPacks, expectedPacks);
+  const autoSold = diTodaySoldQty[openingItem.productId] || { pcs: 0, packs: 0 };
+  const draft = diDraftClosing[openingItem.productId] || {};
+  // Sold is editable: defaults to the real auto-computed sales figure, but
+  // the clerk can manually override it (e.g. breakage, miscount correction).
+  const soldPcs = draft.soldPcs !== undefined ? draft.soldPcs : autoSold.pcs;
+  const soldPacks = draft.soldPacks !== undefined ? draft.soldPacks : autoSold.packs;
+  const actualPcs = draft.actualPcs !== undefined ? draft.actualPcs : '';
+  const actualPacks = draft.actualPacks !== undefined ? draft.actualPacks : '';
+  const expectedPcs = (parseFloat(openingItem.totalPcs)||0) - (parseFloat(soldPcs)||0);
+  const expectedPacks = (parseFloat(openingItem.totalPacks)||0) - (parseFloat(soldPacks)||0);
+  const varPcs = diVariance(actualPcs, expectedPcs);
+  const varPacks = diVariance(actualPacks, expectedPacks);
   const remarks = diRemarks(varPcs, varPacks);
   return { productId: openingItem.productId, name: openingItem.name, category: openingItem.category||'',
     openingTotalPcs: openingItem.totalPcs, openingTotalPacks: openingItem.totalPacks,
-    soldPcs: sold.pcs, soldPacks: sold.packs,
+    soldPcs, soldPacks,
     expectedPcs, expectedPacks,
-    actualPcs: draft.actualPcs, actualPacks: draft.actualPacks,
+    actualPcs, actualPacks,
     variancePcs: varPcs, variancePacks: varPacks, remarks, hasPack: openingItem.hasPack };
 }
 
@@ -5505,7 +5511,10 @@ function diRenderClosingTable() {
       <tbody>${pageRows.map(r => `<tr>
         <td>${esc(r.name)}</td>
         <td class="text-muted" style="font-size:0.82rem">${r.openingTotalPcs} pcs${r.hasPack ? ` / ${r.openingTotalPacks} packs` : ''}</td>
-        <td class="text-muted" style="font-size:0.82rem">${r.soldPcs} pcs${r.hasPack ? ` / ${r.soldPacks} packs` : ''}</td>
+        <td>
+          <input type="number" min="0" id="di_c_soldPcs_${r.productId}" name="di_c_soldPcs_${r.productId}" aria-label="Sold pieces for ${esc(r.name)}" value="${r.soldPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','soldPcs',this.value)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_c_soldPacks_${r.productId}" name="di_c_soldPacks_${r.productId}" aria-label="Sold packs for ${esc(r.name)}" value="${r.soldPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','soldPacks',this.value)">` : ''}
+        </td>
         <td class="fw-700">${r.expectedPcs} pcs${r.hasPack ? ` / ${r.expectedPacks} packs` : ''}</td>
         <td>
           <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)">
