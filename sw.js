@@ -60,8 +60,8 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       fetch(req, { cache: 'no-cache' })
         .catch(() =>
-          caches.match(SW_BASE + '/index.html') ||
-          caches.match(SW_BASE + '/')
+          caches.match(SW_BASE + '/index.html')
+            .then(cached => cached || caches.match(SW_BASE + '/'))
         )
     );
     return;
