@@ -531,24 +531,26 @@ async function gasRequest(params, timeoutMs = 30000) {
 }
 
 async function gasPost(payload, timeoutMs = 45000) {
-  // GAS CORS rule: only GET with no custom headers works cross-origin.
-  // POST is blocked by CORS. Solution: GET + base64 payload in URL param.
-  // We check for e.parameter.data (not e.parameter.method) in doGet
-  // so it works even if params survive the redirect.
+  // Real POST with body — Content-Type: text/plain keeps this a CORS "simple
+  // request" (no OPTIONS preflight, which Apps Script doesn't handle and
+  // would otherwise get blocked). The payload goes in the request BODY, not
+  // the URL, so there's no URL-length ceiling to hit — this replaces the old
+  // GET + base64-in-URL workaround, which broke ("Network error" / CORS
+  // error surfaced by the browser) once a batch's encoded payload got long
+  // (e.g. many products with longer names, as with Opening/Closing Inventory).
+  // doPost() on the backend already reads e.postData.contents as JSON, so no
+  // server-side change is needed.
   const json = JSON.stringify(payload);
-  let encoded;
-  try {
-    encoded = btoa(unescape(encodeURIComponent(json)));
-  } catch (e) {
-    const bytes  = new TextEncoder().encode(json);
-    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
-    encoded = btoa(binary);
-  }
-  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    const res = await fetch(GAS_URL, {
+      method: 'POST',
+      redirect: 'follow',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: json,
+      signal: ctrl.signal
+    });
     clearTimeout(timer);
     const text = await res.text();
     if (!text || !text.trim()) return { success: true };
@@ -721,7 +723,7 @@ async function renderDashboard() {
  <div class="tbl-wrap"><table>
         <thead><tr><th>Product</th><th>Qty</th></tr></thead>
         <tbody>${lowStock.map(p => `<tr>
-          <td>${esc(p.name)}</td>
+          <td>${p.name}</td>
           <td><span class="${parseInt(p.qtyPcs||0)===0?'badge-out':'badge-low'}">${p.qtyPcs} pcs</span></td>
         </tr>`).join('')}</tbody>
  </table></div>` : '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">All items well-stocked.</div></div>';
@@ -824,7 +826,7 @@ function renderProductGrid(products) {
     return `
 <div class="product-card ${oos ? 'out-of-stock' : ''}">
 ${pcImg ? `<img src="${pcImg}" class="pc-img">` : ''}
-<div class="pc-name">${esc(p.name)}</div>
+<div class="pc-name">${p.name}</div>
  ${p.barcode ? `<div class="pc-barcode">${p.barcode}</div>` : ''}
 <div class="pc-stock ${oos ? 'text-red' : qty<= 5 ? 'text-orange' : 'text-muted'}" style="margin-bottom:6px">
         ${oos ? '❌ Out of stock' : `📦 ${qty} pcs${qtyPk ? ' | '+qtyPk+' pks':''}`}
@@ -1090,7 +1092,7 @@ function showScanConfirm(val) {
     if (match) {
       confirmDiv.innerHTML = `
         <div style="background:rgba(0,200,83,0.15);border:1px solid var(--green);border-radius:8px;padding:10px;margin:8px 16px;text-align:center">
-          <div style="color:white;font-weight:700;font-size:0.9rem">${esc(match.name)}</div>
+          <div style="color:white;font-weight:700;font-size:0.9rem">${match.name}</div>
           <div style="color:rgba(255,255,255,0.7);font-size:0.78rem">₱${parseFloat(match.pricePer||0).toFixed(2)} • ${match.qtyPcs||0} pcs</div>
           <div style="display:flex;gap:8px;margin-top:8px;justify-content:center">
             <button class="btn btn-success btn-sm" onclick="confirmScan('${val}')"> Add to Cart</button>
@@ -1200,7 +1202,7 @@ function onPosSearch(val) {
         const hasPack = parseFloat(p.pricePack||0) > 0 && parseInt(p.qtyPacks||0) > 0;
  return `<div class="search-item">
           <div style="flex:1">
-<div class="search-item-name">${esc(p.name)}</div>
+<div class="search-item-name">${p.name}</div>
 <div class="search-item-stock">${p.qtyPcs||0} pcs${p.qtyPacks ? ' | '+p.qtyPacks+' pks' : ''}</div>
           </div>
           <div style="display:flex;gap:6px;align-items:center">
@@ -1307,7 +1309,7 @@ function renderCart() {
       return `
 <div class="cart-item">
 <div class="ci-info">
-<div class="ci-name">${esc(item.name)}</div>
+<div class="ci-name">${item.name}</div>
 <div class="ci-price">${priceLabel}</div>
  ${hasPack ? `<div class="ci-unit-toggle">
             <button class="${item.unit==='piece'?'active-piece':''}" onclick="switchCartUnit(${idx},'piece')">Piece ₱${parseFloat(prod.pricePer||0).toFixed(2)}</button>
@@ -1386,7 +1388,7 @@ function openCheckout() {
  ${cart.map(c => {
    const eff = getCartItemEffective(c);
    const discNote = eff.isWholesale ? ` (Wholesale)` : '';
-   return `<div class="checkout-item-line"><span>${esc(c.name)} (${c.unit}) x${c.qty}${discNote}</span><span>₱${eff.total.toFixed(2)}</span></div>`;
+   return `<div class="checkout-item-line"><span>${c.name} (${c.unit}) x${c.qty}${discNote}</span><span>₱${eff.total.toFixed(2)}</span></div>`;
  }).join('')}
  <div class="checkout-total-line"><span>TOTAL</span><span>₱${total.toFixed(2)}</span></div>
       </div>
@@ -1611,21 +1613,7 @@ function saveSalesExportLocal(data) {
 async function pushSalesExportToGAS(data) {
   try {
     const rows = buildExportRows(data);
-    // AUDIT FIX (H-3): same URL-length risk class as Purchase Orders/Daily
-    // Inventory, but bounded by a single cart's size — only batch when it's
-    // actually large enough to matter, to avoid extra round-trips on the
-    // common (small) case.
-    const SALES_EXPORT_BATCH_SIZE = 15;
-    if (rows.length <= SALES_EXPORT_BATCH_SIZE) {
-      return await gasPost({ action: 'saveSalesExport', rows: JSON.stringify(rows) });
-    }
-    let lastRes = { success: true };
-    for (let i = 0; i < rows.length; i += SALES_EXPORT_BATCH_SIZE) {
-      const batch = rows.slice(i, i + SALES_EXPORT_BATCH_SIZE);
-      lastRes = await gasPost({ action: 'saveSalesExport', rows: JSON.stringify(batch) });
-      if (!lastRes.success) return lastRes;
-    }
-    return lastRes;
+    return await gasPost({ action: 'saveSalesExport', rows: JSON.stringify(rows) });
   } catch(e) {
     console.warn('[POS] Sales export push failed (non-critical):', e.message);
     return { success: false };
@@ -1988,7 +1976,7 @@ function renderInventoryTable(products) {
     const badge = qty === 0 ? '<span class="badge-out">Out</span>' : qty <= 5 ? '<span class="badge-low">Low</span>' : '<span class="badge-in-stock">In Stock</span>';
     const chk = canDelete ? `<td><input type="checkbox" class="row-select" name="row_select_${p.id}" value="${p.id}" onchange="updateBulkBar()"></td>` : '';
     const img = getProductImage(p.id);
-    const thumb = img ? `<img src="${esc(img)}" class="prod-thumb" onclick="viewProductImage('${escJsAttr(p.id)}','${escJsAttr(p.name)}')">` : `<div class="prod-thumb-empty" onclick="openImageUpload('${escJsAttr(p.id)}','${escJsAttr(p.name)}')">+</div>`;
+    const thumb = img ? `<img src="${img}" class="prod-thumb" onclick="viewProductImage('${p.id}','${p.name}')">` : `<div class="prod-thumb-empty" onclick="openImageUpload('${p.id}','${p.name}')">+</div>`;
     const acts = canEdit ? `<td><div class="inv-btn-group">
       <button class="inv-btn inv-btn-edit" onclick="openEditProductModal('${p.id}')" title="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit</button>
       <button class="inv-btn inv-btn-in" onclick="openStockModal('${p.id}','in')" title="Stock In"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg> In</button>
@@ -1998,7 +1986,7 @@ function renderInventoryTable(products) {
     return `<tr>${chk}
       <td>${thumb}</td>
       <td style="font-family:var(--font-mono);font-size:0.8rem">${p.barcode||'—'}</td>
-      <td><b>${esc(p.name)}</b></td>
+      <td><b>${p.name}</b></td>
       <td>${p.qtyPcs||0}</td><td>${p.qtyPacks||0}</td>
       <td>₱${parseFloat(p.pricePer||0).toFixed(2)}</td>
       <td>₱${parseFloat(p.pricePack||0).toFixed(2)}</td>
@@ -2729,31 +2717,13 @@ async function gasBulkImport(batch) {
     wholesalePricePack: String(p.wholesalepricepack || p['wholesale/pack'] || p['wholesaleprice/pack'] || p['Wholesale/Pack'] || p['Wholesale Price Pack'] || '0'),
   })).filter(p => p.name);
 
-  // Use GET + base64 payload (same as gasPost) — avoids CORS block
-  const payload = { action: 'bulkAddProducts', products: JSON.stringify(products) };
-  const json    = JSON.stringify(payload);
-  let encoded;
+  // Real POST via gasPost — no more URL-length limit, so no need for the
+  // separate base64-in-URL workaround this used to have.
   try {
-    encoded = btoa(unescape(encodeURIComponent(json)));
-  } catch (e) {
-    const bytes  = new TextEncoder().encode(json);
-    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
-    encoded = btoa(binary);
-  }
-  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
-  const ctrl  = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 60000);
-  try {
-    const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
-    clearTimeout(timer);
-    const text = await res.text();
-    if (!text || !text.trim()) return { success: true, count: products.length };
-    try { return JSON.parse(text); }
-    catch(e) { return { success: true, count: products.length }; }
+    const res = await gasPost({ action: 'bulkAddProducts', products: JSON.stringify(products) }, 60000);
+    return res && res.success !== undefined ? res : { success: true, count: products.length };
   } catch(e) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Import timed out. Try a smaller batch.');
-    throw new Error('Import error: ' + e.message);
+    throw new Error(e.message.includes('timed out') ? 'Import timed out. Try a smaller batch.' : 'Import error: ' + e.message);
   }
 }
 
@@ -3021,7 +2991,7 @@ async function loadCashiers() {
  el.innerHTML = `<div class="tbl-wrap"><table>
       <thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>${data.map(c => `<tr>
-        <td><b>${esc(c.name)}</b></td>
+        <td><b>${c.name}</b></td>
         <td><span style="font-family:var(--font-mono);font-size:0.85rem">${c.username}</span></td>
         <td><span class="role-badge role-${c.role}">${c.role}</span></td>
         <td><span class="${c.active !== 'false' ? 'badge-in-stock' : 'badge-out'}">${c.active !== 'false' ? 'Active' : 'Inactive'}</span></td>
@@ -3063,9 +3033,9 @@ function openEditCashierModal(id) {
     const c = (res.data || []).find(x => x.id === id);
     if (!c) return;
     openModal(`
-<div class="modal-title">️ Edit User — ${esc(c.name)}</div>
+<div class="modal-title">️ Edit User — ${c.name}</div>
 <div class="input-row">
- <div class="field"><label for="c_name">Full Name</label><input id="c_name" name="c_name" value="${esc(c.name)}"></div>
+ <div class="field"><label for="c_name">Full Name</label><input id="c_name" name="c_name" value="${c.name}"></div>
  <div class="field"><label for="c_username">Username</label><input id="c_username" name="c_username" value="${c.username}"></div>
       </div>
 <div class="input-row">
@@ -4110,20 +4080,6 @@ function esc(str) {
     .replace(/'/g, '&#39;');
 }
 
-// AUDIT FIX (H-1): esc() alone is not enough for values embedded inside an
-// onclick="fn('...')" attribute — the browser HTML-decodes the attribute
-// value before compiling it as JS, so an HTML-escaped quote (&#39;) still
-// becomes a real quote by the time it reaches the JS parser and can break
-// out of the string. This escapes for BOTH layers: JS-string-safe first,
-// then HTML-attribute-safe, in the correct order.
-function escJsAttr(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/"/g, '&quot;');
-}
-
 function wsClipboard(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text)
@@ -4654,9 +4610,6 @@ function poCancelNewOrder() {
   poSwitchTab('dashboard');
 }
 
-// Same batch size already proven safe by bulk import / Daily Inventory saves.
-const PO_SAVE_BATCH_SIZE = 15;
-
 async function poSaveOrder() {
   const wholesalerName = document.getElementById('po_wholesalerName')?.value.trim();
   const pickupDate     = document.getElementById('po_pickupDate')?.value;
@@ -4667,64 +4620,35 @@ async function poSaveOrder() {
   const subtotal   = poNewItems.reduce((s,i) => s + (parseFloat(i.qty||0)*parseFloat(i.price||0)), 0);
   const discount   = poNewItems.reduce((s,i) => s + (parseFloat(i.disc)||0), 0);
   const grandTotal = Math.max(0, subtotal - discount);
-  const poNumber   = 'PO' + Date.now();
 
   const btn = document.getElementById('poSaveBtn');
-  if (btn) { btn.disabled = true; }
-
-  const baseFields = {
-    action: 'addPurchaseOrder',
-    caller_role: currentUser.role,
-    poNumber,
-    wholesalerId: document.getElementById('po_wholesalerPick')?.value || '',
-    wholesalerName,
-    storeName: document.getElementById('po_storeName')?.value || '',
-    contactNumber: document.getElementById('po_contactNumber')?.value || '',
-    deliveryAddress: document.getElementById('po_deliveryAddress')?.value || '',
-    pickupDeliveryDate: pickupDate,
-    paymentTerms: document.getElementById('po_paymentTerms')?.value || '',
-    remarks: document.getElementById('po_remarks')?.value || '',
-    createdBy: currentUser.name || currentUser.username || '',
-  };
-
-  const batches = [];
-  for (let i = 0; i < poNewItems.length; i += PO_SAVE_BATCH_SIZE) {
-    batches.push(poNewItems.slice(i, i + PO_SAVE_BATCH_SIZE));
-  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
 
   try {
-    const MAX_ATTEMPTS = 3;
-    for (let b = 0; b < batches.length; b++) {
-      let succeeded = false;
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        if (btn) btn.textContent = attempt === 1
-          ? `Saving... (${b+1}/${batches.length})`
-          : `Saving... (${b+1}/${batches.length}, retry ${attempt-1})`;
-        try {
-          const res = await gasPost(Object.assign({}, baseFields, {
-            items: JSON.stringify(batches[b]),
-            isFirstBatch: b === 0,
-            isLastBatch: b === batches.length - 1,
-            subtotal, discount, grandTotal,
-          }));
-          if (res.success) { succeeded = true; break; }
-          toast(res.message || 'Error saving order.', 'error');
-          if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
-          return;
-        } catch(e) {
-          if (attempt < MAX_ATTEMPTS) await new Promise(r => setTimeout(r, attempt * 1500));
-        }
-      }
-      if (!succeeded) {
-        toast('Network error after ' + MAX_ATTEMPTS + ' attempts. Please check your connection and try again.', 'error');
-        if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
-        return;
-      }
-      if (b < batches.length - 1) await new Promise(r => setTimeout(r, 300));
+    const res = await gasPost({
+      action: 'addPurchaseOrder',
+      caller_role: currentUser.role,
+      poNumber: 'PO' + Date.now(),
+      wholesalerId: document.getElementById('po_wholesalerPick')?.value || '',
+      wholesalerName,
+      storeName: document.getElementById('po_storeName')?.value || '',
+      contactNumber: document.getElementById('po_contactNumber')?.value || '',
+      deliveryAddress: document.getElementById('po_deliveryAddress')?.value || '',
+      pickupDeliveryDate: pickupDate,
+      paymentTerms: document.getElementById('po_paymentTerms')?.value || '',
+      remarks: document.getElementById('po_remarks')?.value || '',
+      items: JSON.stringify(poNewItems),
+      subtotal, discount, grandTotal,
+      createdBy: currentUser.name || currentUser.username || '',
+    });
+    if (res.success) {
+      toast('Purchase order saved!', 'success');
+      poNewItems = [];
+      poSwitchTab('history');
+    } else {
+      toast(res.message || 'Error saving order.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
     }
-    toast('Purchase order saved!', 'success');
-    poNewItems = [];
-    poSwitchTab('history');
   } catch(e) {
     toast('Network error. Please try again.', 'error');
     if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
@@ -5267,13 +5191,13 @@ function diRenderOpeningTable() {
         <td>${esc(r.name)}</td>
         <td class="text-muted" style="font-size:0.82rem">${r.posStockPcs} pcs${r.hasPack ? ` / ${r.posStockPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_o_addPcs_${r.productId}" name="di_o_addPcs_${r.productId}" aria-label="Additional pieces for ${esc(r.name)}" value="${r.addPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','addPcs',this.value)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_o_addPacks_${r.productId}" name="di_o_addPacks_${r.productId}" aria-label="Additional packs for ${esc(r.name)}" value="${r.addPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','addPacks',this.value)">` : ''}
+          <input type="number" min="0" id="di_o_addPcs_${r.productId}" name="di_o_addPcs_${r.productId}" aria-label="Additional pieces for ${esc(r.name)}" value="${r.addPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','addPcs',this.value)" onkeydown="diHandleEnterKey(event)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_o_addPacks_${r.productId}" name="di_o_addPacks_${r.productId}" aria-label="Additional packs for ${esc(r.name)}" value="${r.addPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','addPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
         </td>
         <td class="fw-700">${r.totalPcs} pcs${r.hasPack ? ` / ${r.totalPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_o_actPcs_${r.productId}" name="di_o_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','actualPcs',this.value)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_o_actPacks_${r.productId}" name="di_o_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','actualPacks',this.value)">` : ''}
+          <input type="number" min="0" id="di_o_actPcs_${r.productId}" name="di_o_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','actualPcs',this.value)" onkeydown="diHandleEnterKey(event)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_o_actPacks_${r.productId}" name="di_o_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','actualPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
         </td>
         <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
         <td>${diRemarksBadge(r.remarks)}</td>
@@ -5298,6 +5222,28 @@ function diChangePage(delta) {
   else if (diTab === 'closing') diRenderClosingTable();
 }
 
+// ─── ENTER-TO-NEXT-FIELD (Daily Inventory quick input) ───
+// Pressing Enter in any pcs/packs box jumps to the next input in the same
+// table (in DOM order), so encoders don't have to reach for the mouse/Tab.
+// Works automatically whether or not a product has a "packs" field, since
+// that input simply isn't in the DOM when hasPack is false.
+function diHandleEnterKey(e) {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const wrap = e.target.closest('.tbl-wrap');
+  if (!wrap) return;
+  const inputs = Array.from(wrap.querySelectorAll('input'));
+  const idx = inputs.indexOf(e.target);
+  if (idx === -1) return;
+  const next = inputs[idx + 1];
+  if (next) {
+    next.focus();
+    next.select();
+  } else {
+    e.target.blur(); // last field on the page — nothing more to jump to
+  }
+}
+
 function diUpdateOpeningDraft(productId, field, val) {
   if (!diDraftOpening[productId]) diDraftOpening[productId] = { addPcs: 0, addPacks: 0, actualPcs: '', actualPacks: '' };
   diDraftOpening[productId][field] = val === '' ? '' : (parseFloat(val)||0);
@@ -5308,11 +5254,7 @@ function diUpdateOpeningDraft(productId, field, val) {
 // proven safe by the existing bulk product import (avoids exceeding the URL
 // length limit of the GAS GET+base64 request, which is what was causing the
 // "Network Error" on stores with more than a handful of products).
-// Smaller than the bulk-import batch size (15) on purpose: each Daily
-// Inventory item carries ~15 fields (POS Stock, Additional, Total, Actual,
-// Variance for both Pcs and Packs, plus name/category) vs bulk-import's 6 —
-// the same item count that's safe there is too large a URL payload here.
-const DI_SAVE_BATCH_SIZE = 5;
+const DI_SAVE_BATCH_SIZE = 15;
 
 async function diSaveInBatches(phase, allRows, btn, defaultLabel) {
   const batches = [];
@@ -5321,46 +5263,28 @@ async function diSaveInBatches(phase, allRows, btn, defaultLabel) {
   }
   if (!batches.length) { toast('No items to save.', 'warning'); return false; }
 
-  const MAX_ATTEMPTS = 3;
-
   for (let b = 0; b < batches.length; b++) {
-    let lastError = null;
-    let succeeded = false;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      if (btn) btn.textContent = attempt === 1
-        ? `Saving... (${b+1}/${batches.length})`
-        : `Saving... (${b+1}/${batches.length}, retry ${attempt-1})`;
-      try {
-        const res = await gasPost({
-          action: phase === 'opening' ? 'saveOpeningInventory' : 'saveClosingInventory',
-          caller_role: currentUser.role,
-          date: diTodayStr(),
-          items: JSON.stringify(batches[b]),
-          isFirstBatch: b === 0,
-          isLastBatch: b === batches.length - 1,
-          createdBy: currentUser.name || currentUser.username || '',
-        });
-        if (res.success) { succeeded = true; break; }
-        // A real validation error from the server (not a network hiccup) —
-        // retrying won't help, so stop immediately.
+    if (btn) btn.textContent = `Saving... (${b+1}/${batches.length})`;
+    try {
+      const res = await gasPost({
+        action: phase === 'opening' ? 'saveOpeningInventory' : 'saveClosingInventory',
+        caller_role: currentUser.role,
+        date: diTodayStr(),
+        items: JSON.stringify(batches[b]),
+        isFirstBatch: b === 0,
+        isLastBatch: b === batches.length - 1,
+        createdBy: currentUser.name || currentUser.username || '',
+      });
+      if (!res.success) {
         toast(res.message || 'Error saving.', 'error');
         if (btn) { btn.disabled = false; btn.textContent = defaultLabel; }
         return false;
-      } catch(e) {
-        lastError = e;
-        if (attempt < MAX_ATTEMPTS) {
-          await new Promise(r => setTimeout(r, attempt * 1500)); // 1.5s, then 3s
-        }
       }
-    }
-
-    if (!succeeded) {
-      toast('Network error after ' + MAX_ATTEMPTS + ' attempts. Please check your connection and try again.', 'error');
+    } catch(e) {
+      toast('Network error. Please try again.', 'error');
       if (btn) { btn.disabled = false; btn.textContent = defaultLabel; }
       return false;
     }
-
     // Small pause between batches to avoid GAS rate limits (same pattern as bulk import)
     if (b < batches.length - 1) await new Promise(r => setTimeout(r, 400));
   }
@@ -5458,24 +5382,18 @@ function diClosingOpeningItems() {
 }
 
 function diClosingRowData(openingItem) {
-  const autoSold = diTodaySoldQty[openingItem.productId] || { pcs: 0, packs: 0 };
-  const draft = diDraftClosing[openingItem.productId] || {};
-  // Sold is editable: defaults to the real auto-computed sales figure, but
-  // the clerk can manually override it (e.g. breakage, miscount correction).
-  const soldPcs = draft.soldPcs !== undefined ? draft.soldPcs : autoSold.pcs;
-  const soldPacks = draft.soldPacks !== undefined ? draft.soldPacks : autoSold.packs;
-  const actualPcs = draft.actualPcs !== undefined ? draft.actualPcs : '';
-  const actualPacks = draft.actualPacks !== undefined ? draft.actualPacks : '';
-  const expectedPcs = (parseFloat(openingItem.totalPcs)||0) - (parseFloat(soldPcs)||0);
-  const expectedPacks = (parseFloat(openingItem.totalPacks)||0) - (parseFloat(soldPacks)||0);
-  const varPcs = diVariance(actualPcs, expectedPcs);
-  const varPacks = diVariance(actualPacks, expectedPacks);
+  const sold = diTodaySoldQty[openingItem.productId] || { pcs: 0, packs: 0 };
+  const draft = diDraftClosing[openingItem.productId] || { actualPcs: '', actualPacks: '' };
+  const expectedPcs = (parseFloat(openingItem.totalPcs)||0) - (parseFloat(sold.pcs)||0);
+  const expectedPacks = (parseFloat(openingItem.totalPacks)||0) - (parseFloat(sold.packs)||0);
+  const varPcs = diVariance(draft.actualPcs, expectedPcs);
+  const varPacks = diVariance(draft.actualPacks, expectedPacks);
   const remarks = diRemarks(varPcs, varPacks);
   return { productId: openingItem.productId, name: openingItem.name, category: openingItem.category||'',
     openingTotalPcs: openingItem.totalPcs, openingTotalPacks: openingItem.totalPacks,
-    soldPcs, soldPacks,
+    soldPcs: sold.pcs, soldPacks: sold.packs,
     expectedPcs, expectedPacks,
-    actualPcs, actualPacks,
+    actualPcs: draft.actualPcs, actualPacks: draft.actualPacks,
     variancePcs: varPcs, variancePacks: varPacks, remarks, hasPack: openingItem.hasPack };
 }
 
@@ -5511,14 +5429,11 @@ function diRenderClosingTable() {
       <tbody>${pageRows.map(r => `<tr>
         <td>${esc(r.name)}</td>
         <td class="text-muted" style="font-size:0.82rem">${r.openingTotalPcs} pcs${r.hasPack ? ` / ${r.openingTotalPacks} packs` : ''}</td>
-        <td>
-          <input type="number" min="0" id="di_c_soldPcs_${r.productId}" name="di_c_soldPcs_${r.productId}" aria-label="Sold pieces for ${esc(r.name)}" value="${r.soldPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','soldPcs',this.value)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_c_soldPacks_${r.productId}" name="di_c_soldPacks_${r.productId}" aria-label="Sold packs for ${esc(r.name)}" value="${r.soldPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','soldPacks',this.value)">` : ''}
-        </td>
+        <td class="text-muted" style="font-size:0.82rem">${r.soldPcs} pcs${r.hasPack ? ` / ${r.soldPacks} packs` : ''}</td>
         <td class="fw-700">${r.expectedPcs} pcs${r.hasPack ? ` / ${r.expectedPacks} packs` : ''}</td>
         <td>
-          <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_c_actPacks_${r.productId}" name="di_c_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','actualPacks',this.value)">` : ''}
+          <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)" onkeydown="diHandleEnterKey(event)">
+          ${r.hasPack ? `<input type="number" min="0" id="di_c_actPacks_${r.productId}" name="di_c_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','actualPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
         </td>
         <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
         <td>${diRemarksBadge(r.remarks)}</td>
@@ -5652,19 +5567,21 @@ async function diDeleteRecord(id) {
   } catch(e) { toast('Network error.', 'error'); }
 }
 
-// ═══ PRINT (A4) ═══
-async function diSaveRecordImage(type, dateStr) {
+
+// ═══ SAVE AS IMAGE ═══
+function diBuildRecordDiv_(type, dateStr) {
   const r = diGetRecordByDate(dateStr);
-  if (!r) { toast('Record not found.', 'error'); return; }
+  if (!r) { toast('Record not found.', 'error'); return null; }
   let items = [];
   try { items = JSON.parse(type === 'opening' ? (r.openingItems||'[]') : (r.closingItems||'[]')); } catch(e) {}
-  if (!items.length) { toast('Nothing to save — no items recorded.', 'warning'); return; }
+  if (!items.length) { toast('Nothing to save — no items recorded.', 'warning'); return null; }
 
   const isOpening = type === 'opening';
-  const captureArea = document.createElement('div');
-  captureArea.id = 'diCaptureArea';
-  captureArea.style.cssText = 'position:fixed;top:0;left:-99999px;background:#fff';
-  captureArea.innerHTML = `
+  const div = document.createElement('div');
+  div.id = 'diImageArea';
+  // Positioned off-screen (not display:none) so html2canvas can still render it.
+  div.style.cssText = 'position:absolute;left:-9999px;top:0;background:#fff';
+  div.innerHTML = `
     <div style="padding:20px;font-family:Arial,sans-serif;font-size:11px;color:#000;width:900px">
       <h2 style="margin:0 0 4px">AE Home Trade Corp. — Daily Inventory Checking</h2>
       <div>${isOpening ? 'Opening' : 'Closing'} Inventory — Date: ${esc(r.date)}</div>
@@ -5692,23 +5609,40 @@ async function diSaveRecordImage(type, dateStr) {
       <div style="margin-top:6px">Store/Branch: AE Home Trade Corp. — Vigan</div>
     </div>
   `;
-  document.body.appendChild(captureArea);
+  return div;
+}
 
+async function diSaveRecordImage(type, dateStr) {
+  const div = diBuildRecordDiv_(type, dateStr);
+  if (!div) return;
+  document.body.appendChild(div);
   try {
     if (typeof html2canvas === 'undefined') {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
     }
-    const canvas = await html2canvas(captureArea, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
-    const link = document.createElement('a');
-    link.download = `DailyInventory_${type}_${dateStr}.png`;
-    link.href = canvas.toDataURL('image/png');
-    link.click();
+    const canvas = await html2canvas(div, { backgroundColor: '#ffffff', scale: 2 });
+    await new Promise(resolve => {
+      canvas.toBlob(blob => {
+        if (!blob) { toast('Could not generate image.', 'error'); resolve(); return; }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `DailyInventory_${type}_${dateStr}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast('Image saved!', 'success');
+        resolve();
+      }, 'image/png');
+    });
   } catch(e) {
-    toast('Could not save image.', 'error');
+    toast('Could not save image. Check your connection.', 'error');
   } finally {
-    document.body.removeChild(captureArea);
+    document.body.removeChild(div);
   }
 }
+
 
 // ═══ EXPORT TO EXCEL ═══
 async function diExportExcel(dateStr, type) {
@@ -5745,4 +5679,193 @@ async function diExportExcel(dateStr, type) {
   } catch(e) {
     toast('Excel export failed.', 'error');
   }
+}
+
+// ═══════════════════════════════════════════════
+// LICENSING & SUBSCRIPTION — MODULE 2: License Manager (frontend)
+// Trial/Activation UI + device token. Fully isolated: does NOT touch the
+// existing login flow yet (that wiring is Module 3). Test it by typing
+// showLicenseWelcomeScreen() in the browser console.
+// ═══════════════════════════════════════════════
+let licenseState = null;
+
+// Device Token — HONEST implementation: this is a random ID stored in this
+// browser's localStorage, NOT a real hardware fingerprint (browsers block
+// JS from reading actual hardware IDs). Clearing browser data or switching
+// browsers generates a new token. Real protection is server-side — see
+// checkLicenseStatus() in backend.gs.
+function getDeviceToken() {
+  let token = localStorage.getItem('ae_pos_device_token');
+  if (!token) {
+    token = 'DEV-' + Math.random().toString(36).substring(2, 10).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
+    localStorage.setItem('ae_pos_device_token', token);
+  }
+  return token;
+}
+
+async function licCheckStatus() {
+  try {
+    const res = await gasRequest({ action: 'checkLicenseStatus', deviceToken: getDeviceToken() });
+    licenseState = res.success ? res.data : { status: 'None' };
+    return licenseState;
+  } catch(e) {
+    licenseState = { status: 'Unknown' }; // couldn't reach server — Module 3 will decide the offline-grace behavior
+    return licenseState;
+  }
+}
+
+async function licStartTrial(storeName, ownerName) {
+  try {
+    const res = await gasPost({
+      action: 'startTrial',
+      deviceToken: getDeviceToken(),
+      storeName: storeName || '',
+      ownerName: ownerName || '',
+    });
+    if (res.success) {
+      toast('Free trial started!', 'success');
+      await licCheckStatus();
+      return true;
+    }
+    toast(res.message || 'Could not start trial.', 'error');
+    return false;
+  } catch(e) {
+    toast('Network error. Please try again.', 'error');
+    return false;
+  }
+}
+
+async function licActivateLicense(licenseKey) {
+  try {
+    const res = await gasPost({
+      action: 'activateLicense',
+      deviceToken: getDeviceToken(),
+      licenseKey: (licenseKey || '').trim().toUpperCase(),
+    });
+    if (res.success) {
+      toast('License activated!', 'success');
+      await licCheckStatus();
+      return true;
+    }
+    toast(res.message || 'Could not activate license.', 'error');
+    return false;
+  } catch(e) {
+    toast('Network error. Please try again.', 'error');
+    return false;
+  }
+}
+
+// ─── WELCOME SCREEN (full-screen overlay, isolated from index.html) ──
+function showLicenseWelcomeScreen() {
+  const existing = document.getElementById('licWelcomeOverlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'licWelcomeOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:400;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
+  overlay.innerHTML = `
+    <div style="max-width:440px;width:100%">
+      <div style="background:var(--grad);border-radius:16px;padding:30px 24px;text-align:center;color:white;margin-bottom:20px">
+        <div style="font-size:1.5rem;font-weight:800">AE Home POS</div>
+        <div style="opacity:0.9;margin-top:4px">Welcome! Choose how you'd like to get started.</div>
+      </div>
+      <div class="card" style="display:flex;flex-direction:column;gap:10px">
+        <button class="btn btn-primary" style="width:100%" onclick="licOpenStartTrialModal()"> Start Free Trial (${LICENSE_TRIAL_DAYS_LABEL} days)</button>
+        <button class="btn btn-ghost" style="width:100%" onclick="licOpenActivateModal()"> Activate License</button>
+        <button class="btn btn-ghost" style="width:100%" onclick="licOpenSubscribeModal()"> Subscribe</button>
+      </div>
+      <div id="licWelcomeStatus" style="margin-top:16px;text-align:center;font-size:0.85rem" class="text-muted"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  licRenderWelcomeStatus();
+}
+
+// Trial length is admin-configured server-side (LICENSE_CONFIG.trialDays in
+// backend.gs) — this label is just for display and doesn't enforce anything;
+// the real check always happens on the server.
+const LICENSE_TRIAL_DAYS_LABEL = 7;
+
+function hideLicenseWelcomeScreen() {
+  const el = document.getElementById('licWelcomeOverlay');
+  if (el) el.remove();
+}
+
+async function licRenderWelcomeStatus() {
+  const el = document.getElementById('licWelcomeStatus');
+  if (!el) return;
+  el.textContent = 'Checking license status...';
+  const state = await licCheckStatus();
+  if (!el.isConnected) return; // overlay may have been closed already
+  if (state.status === 'None') {
+    el.textContent = 'No trial or license found on this device yet.';
+  } else if (state.status === 'Unknown') {
+    el.textContent = 'Could not reach the license server — check your connection.';
+  } else {
+    el.innerHTML = `Current status on this device: <b>${esc(state.status)}</b>${state.licenseKey ? ' — ' + esc(state.licenseKey) : ''}`;
+  }
+}
+
+function licOpenStartTrialModal() {
+  openModal(`
+    <div class="modal-title">Start Free Trial</div>
+    <div class="field">
+      <label for="lic_storeName">Store Name</label>
+      <input id="lic_storeName" name="lic_storeName" type="text" placeholder="e.g. AE Home Trade Corp.">
+    </div>
+    <div class="field">
+      <label for="lic_ownerName">Owner Name</label>
+      <input id="lic_ownerName" name="lic_ownerName" type="text" placeholder="e.g. Vhinzzy">
+    </div>
+    <button class="btn btn-primary" style="width:100%;margin-top:10px" id="licTrialBtn" onclick="licConfirmStartTrial()"> Start Free Trial</button>
+  `);
+}
+
+async function licConfirmStartTrial() {
+  const btn = document.getElementById('licTrialBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
+  const storeName = document.getElementById('lic_storeName')?.value || '';
+  const ownerName = document.getElementById('lic_ownerName')?.value || '';
+  const ok = await licStartTrial(storeName, ownerName);
+  if (ok) {
+    closeModalDirect();
+    licRenderWelcomeStatus();
+  } else if (btn) {
+    btn.disabled = false; btn.textContent = ' Start Free Trial';
+  }
+}
+
+function licOpenActivateModal() {
+  openModal(`
+    <div class="modal-title">Activate License</div>
+    <div class="field">
+      <label for="lic_key">License Key</label>
+      <input id="lic_key" name="lic_key" type="text" placeholder="AEH-XXXX-XXXX-XXXX-XXXX" style="text-transform:uppercase">
+    </div>
+    <button class="btn btn-primary" style="width:100%;margin-top:10px" id="licActivateBtn" onclick="licConfirmActivate()"> Activate</button>
+  `);
+}
+
+async function licConfirmActivate() {
+  const btn = document.getElementById('licActivateBtn');
+  const key = document.getElementById('lic_key')?.value || '';
+  if (!key.trim()) { toast('Enter a license key.', 'warning'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Activating...'; }
+  const ok = await licActivateLicense(key);
+  if (ok) {
+    closeModalDirect();
+    licRenderWelcomeStatus();
+  } else if (btn) {
+    btn.disabled = false; btn.textContent = ' Activate';
+  }
+}
+
+function licOpenSubscribeModal() {
+  // Real payment submission UI is Module 5 — this is a placeholder so the
+  // button isn't dead, per the phased build plan.
+  openModal(`
+    <div class="modal-title">Subscribe</div>
+    <p>The Payment page (GCash / Maya / Bank Transfer, with admin verification) is coming in the next update.</p>
+    <p>For now, contact AE Home to receive a License Key, then use "Activate License" above.</p>
+  `);
 }
