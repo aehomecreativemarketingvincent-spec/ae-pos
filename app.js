@@ -5028,12 +5028,34 @@ async function inc_loadAgentClaims(date) {
 }
 
 // ── CLAIM MODAL ───────────────────────────────────────────
+function inc_setSaleType(type) {
+  inc_claimState.saleType = type;
+  const btnR = document.getElementById('inc_btn_retail');
+  const btnW = document.getElementById('inc_btn_wholesale');
+  if (btnR && btnW) {
+    if (type === 'retail') {
+      btnR.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:2px solid var(--green);background:var(--green);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
+      btnW.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
+    } else {
+      btnW.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:2px solid var(--amber,#d97706);background:var(--amber,#d97706);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
+      btnR.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
+    }
+  }
+  if (inc_claimState.valid) inc_updateSummary();
+}
+
 function inc_openClaimModal() {
-  inc_claimState = { invoiceNo:'', product:null, qty:1, valid:false };
+  inc_claimState = { invoiceNo:'', product:null, qty:1, saleType:'retail', valid:false };
   openModal(
     '<div class="modal-title">Add Incentive Claim</div>' +
     '<div class="field"><label for="inc_invoice">Sales Invoice Number</label>' +
       '<input id="inc_invoice" name="inc_invoice" placeholder="e.g. SI1782100366396" oninput="inc_invoiceInput()">' +
+    '</div>' +
+    '<div class="field"><label>Sale Type</label>' +
+      '<div style="display:flex;gap:8px;margin-top:4px">' +
+        '<button id="inc_btn_retail" onclick="inc_setSaleType(\'retail\')" style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--green);background:var(--green);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Retail (100%)</button>' +
+        '<button id="inc_btn_wholesale" onclick="inc_setSaleType(\'wholesale\')" style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Wholesale (50%)</button>' +
+      '</div>' +
     '</div>' +
     '<div class="field"><label for="inc_product">Product (Barcode or Description)</label>' +
       '<input id="inc_product" name="inc_product" placeholder="Type barcode or product name..." oninput="inc_productSearch()" autocomplete="off">' +
@@ -5133,20 +5155,28 @@ function inc_qtyChanged() {
 }
 
 function inc_updateSummary() {
-  const m   = inc_claimState.product;
-  const qty = inc_claimState.qty;
-  const tot = qty * parseFloat(m.incentiveAmount);
-  const el  = document.getElementById('inc_summary');
+  const m        = inc_claimState.product;
+  const qty      = inc_claimState.qty;
+  const isWhole  = inc_claimState.saleType === 'wholesale';
+  const baseAmt  = parseFloat(m.incentiveAmount);
+  const effAmt   = isWhole ? baseAmt * 0.5 : baseAmt;  // 50% if wholesale
+  const tot      = qty * effAmt;
+  const el       = document.getElementById('inc_summary');
   if (!el) return;
   el.style.display = 'block';
+  const typeLabel = isWhole
+    ? '<span style="background:#fffbeb;color:#92400e;padding:1px 7px;border-radius:10px;font-size:0.72rem;font-weight:700">WHOLESALE &mdash; 50%</span>'
+    : '<span style="background:#d1fae5;color:#065f46;padding:1px 7px;border-radius:10px;font-size:0.72rem;font-weight:700">RETAIL &mdash; 100%</span>';
   el.innerHTML =
     '<div style="font-size:0.73rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:8px">Claim Summary</div>' +
     '<table style="width:100%;font-size:0.85rem">' +
       '<tr><td style="color:var(--text3);padding:2px 0;width:120px">Invoice</td><td style="font-weight:600">' + esc(inc_claimState.invoiceNo) + '</td></tr>' +
       '<tr><td style="color:var(--text3);padding:2px 0">Item</td><td style="font-weight:600">' + esc(m.description) + '</td></tr>' +
       '<tr><td style="color:var(--text3);padding:2px 0">Barcode</td><td style="font-family:var(--font-mono);font-size:0.8rem">' + esc(m.barcode) + '</td></tr>' +
+      '<tr><td style="color:var(--text3);padding:2px 0">Sale Type</td><td>' + typeLabel + '</td></tr>' +
       '<tr><td style="color:var(--text3);padding:2px 0">Qty</td><td style="font-weight:600">' + qty + '</td></tr>' +
-      '<tr><td style="color:var(--text3);padding:2px 0">Incentive/unit</td><td style="font-weight:600;color:var(--blue,#1e90ff)">&#8369;' + parseFloat(m.incentiveAmount).toFixed(2) + '</td></tr>' +
+      '<tr><td style="color:var(--text3);padding:2px 0">Base Incentive</td><td>&#8369;' + baseAmt.toFixed(2) + '</td></tr>' +
+      '<tr><td style="color:var(--text3);padding:2px 0">Effective/unit</td><td style="font-weight:600;color:var(--blue,#1e90ff)">&#8369;' + effAmt.toFixed(2) + (isWhole ? ' <span style="font-size:0.72rem;color:var(--amber,#d97706)">(50%)</span>' : '') + '</td></tr>' +
       '<tr><td style="color:var(--text3);padding:2px 0">TOTAL</td><td style="font-weight:700;font-size:1.05rem;color:var(--green)">&#8369;' + tot.toFixed(2) + '</td></tr>' +
     '</table>';
   document.getElementById('inc_submit_btn').disabled = false;
@@ -5167,8 +5197,11 @@ function inc_showValbox(type, msg) {
 
 async function inc_submitClaim() {
   if (!inc_claimState.valid || !inc_claimState.product) return;
-  const m   = inc_claimState.product;
-  const qty = inc_claimState.qty;
+  const m        = inc_claimState.product;
+  const qty      = inc_claimState.qty;
+  const isWhole  = inc_claimState.saleType === 'wholesale';
+  const baseAmt  = parseFloat(m.incentiveAmount);
+  const effAmt   = isWhole ? baseAmt * 0.5 : baseAmt;
   const btn = document.getElementById('inc_submit_btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
 
@@ -5181,14 +5214,15 @@ async function inc_submitClaim() {
     barcode:         m.barcode,
     description:     m.description,
     qty:             qty,
-    incentivePerUnit:parseFloat(m.incentiveAmount),
-    totalIncentive:  qty * parseFloat(m.incentiveAmount),
+    saleType:        inc_claimState.saleType || 'retail',
+    incentivePerUnit:effAmt,
+    totalIncentive:  qty * effAmt,
   };
 
   try {
     const res = await gasPost(payload);
     if (res.success) {
-      toast('Incentive claim submitted! &#8369;' + (qty * parseFloat(m.incentiveAmount)).toFixed(2), 'success');
+      toast('Incentive claim submitted! &#8369;' + (qty * effAmt).toFixed(2), 'success');
       closeModalDirect();
       inc_loadAgentClaims(localDateStr(new Date()));
     } else {
