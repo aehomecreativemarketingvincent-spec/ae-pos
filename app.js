@@ -43,7 +43,6 @@ window.addEventListener('unhandledrejection', function(e) {
 let currentUser = null; // { id, name, role, username }
 let currentPage = 'dashboard';
 let cart = [];
-let posMode = 'retail'; // 'retail' | 'wholesale' — default Retail per spec
 let activeUsers = {};   // { sessionId: { name, role, loginTime } }
 let mySessionId = null;
 
@@ -58,26 +57,27 @@ const ROLE_NAV = {
     { id: 'receipts',    icon: '', label: 'Receipts' },
     { id: 'summary',     icon: '', label: 'Sales Summary' },
     { id: 'logs',        icon: '', label: 'Analytics' },
-    { id: 'salesExport', icon: '', label: 'Sales Export' },
-    { id: 'wholesalers', icon: '', label: 'Wholesalers' },
-    { id: 'purchaseOrders', icon: '', label: 'Purchase Orders' },
-    { id: 'dailyInventory', icon: '', label: 'Daily Inventory Checking' },
+    { id: 'salesExport',    icon: '', label: 'Sales Export' },
+    { id: 'wholesalers',    icon: '', label: 'Wholesalers' },
+    { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
+    { id: 'incentives',     icon: '', label: 'Incentives' },
   ],
   cashier: [
     { id: 'pos',         icon: '', label: 'Point of Sale' },
     { id: 'summary',     icon: '', label: 'Sales Summary' },
     { id: 'receipts',    icon: '', label: 'Receipts' },
     { id: 'wholesalers', icon: '', label: 'Wholesalers' },
-    { id: 'purchaseOrders', icon: '', label: 'Purchase Orders' },
+    { id: 'incentives',  icon: '', label: 'Incentives' },
   ],
   clerk: [
     { id: 'inventory',   icon: '', label: 'Inventory' },
     { id: 'summary',     icon: '', label: 'Sales Summary' },
     { id: 'pos',         icon: '', label: 'Point of Sale' },
     { id: 'logs',        icon: '', label: 'Analytics' },
-    { id: 'salesExport', icon: '', label: 'Sales Export' },
-    { id: 'wholesalers', icon: '', label: 'Wholesalers' },
-    { id: 'dailyInventory', icon: '', label: 'Daily Inventory Checking' },
+    { id: 'salesExport',    icon: '', label: 'Sales Export' },
+    { id: 'wholesalers',    icon: '', label: 'Wholesalers' },
+    { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
+    { id: 'incentives',     icon: '', label: 'Incentives' },
   ],
   viewer: [
     { id: 'dashboard', icon: '', label: 'Dashboard' },
@@ -461,9 +461,9 @@ function navigateTo(page) {
     cashiers: 'User Management', receipts: 'Receipts',
     summary: 'Sales Summary', logs: 'Analytics & Insights',
     salesExport: 'Sales Export',
-    wholesalers: 'Wholesalers Information'
-    , purchaseOrders: 'Purchase Orders (Wholesaler)'
-    , dailyInventory: 'Daily Inventory Checking'
+    wholesalers: 'Wholesalers Information',
+    inventoryAudit: 'Inventory Audit',
+    incentives:     'Incentive Tracker'
   };
  document.getElementById('topbarTitle').textContent = titles[page] || page;
   // render
@@ -502,8 +502,8 @@ function renderPage(page) {
     logs: renderLogs,
     salesExport: renderSalesExport,
     wholesalers: renderWholesalers,
-    purchaseOrders: renderPurchaseOrders,
-    dailyInventory: renderDailyInventory,
+    inventoryAudit: audit_renderPage,
+    incentives:     inc_renderPage,
   };
   if (pages[page]) pages[page]();
   else {
@@ -531,26 +531,24 @@ async function gasRequest(params, timeoutMs = 30000) {
 }
 
 async function gasPost(payload, timeoutMs = 45000) {
-  // Real POST with body — Content-Type: text/plain keeps this a CORS "simple
-  // request" (no OPTIONS preflight, which Apps Script doesn't handle and
-  // would otherwise get blocked). The payload goes in the request BODY, not
-  // the URL, so there's no URL-length ceiling to hit — this replaces the old
-  // GET + base64-in-URL workaround, which broke ("Network error" / CORS
-  // error surfaced by the browser) once a batch's encoded payload got long
-  // (e.g. many products with longer names, as with Opening/Closing Inventory).
-  // doPost() on the backend already reads e.postData.contents as JSON, so no
-  // server-side change is needed.
+  // GAS CORS rule: only GET with no custom headers works cross-origin.
+  // POST is blocked by CORS. Solution: GET + base64 payload in URL param.
+  // We check for e.parameter.data (not e.parameter.method) in doGet
+  // so it works even if params survive the redirect.
   const json = JSON.stringify(payload);
+  let encoded;
+  try {
+    encoded = btoa(unescape(encodeURIComponent(json)));
+  } catch (e) {
+    const bytes  = new TextEncoder().encode(json);
+    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
+    encoded = btoa(binary);
+  }
+  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(GAS_URL, {
-      method: 'POST',
-      redirect: 'follow',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: json,
-      signal: ctrl.signal
-    });
+    const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
     clearTimeout(timer);
     const text = await res.text();
     if (!text || !text.trim()) return { success: true };
@@ -771,10 +769,6 @@ async function renderPOS() {
 <div class="pos-right">
 <div class="cart-header">
           <span>🛒 Cart</span>
-<div class="pos-mode-toggle" id="posModeToggle">
-            <button data-mode="retail" class="${posMode==='retail'?'active-mode':''}" onclick="setPosMode('retail')">Retail</button>
-            <button data-mode="wholesale" class="${posMode==='wholesale'?'active-mode':''}" onclick="setPosMode('wholesale')">Wholesale</button>
-          </div>
 <button class="btn btn-ghost btn-sm" onclick="clearCart()">Clear</button>
         </div>
  <div class="cart-items" id="cartItems"></div>
@@ -1227,33 +1221,6 @@ document.addEventListener('click', (e) => {
   if (dd && !dd.contains(e.target) && e.target.id !== 'posSearch') dd.classList.add('hidden');
 });
 
-// ─── RETAIL / WHOLESALE MODE ──────────────────
-function setPosMode(mode) {
-  if (mode !== 'retail' && mode !== 'wholesale') return;
-  posMode = mode;
-  document.querySelectorAll('#posModeToggle button').forEach(b => {
-    b.classList.toggle('active-mode', b.dataset.mode === mode);
-  });
-  renderCart();
-}
-
-// Returns { price, total, isWholesale } for a cart item under the current posMode.
-// Wholesale Mode uses the manually-entered Wholesale Price for the item's unit
-// (Piece or Pack); if that field is empty/0, it automatically falls back to the
-// existing Retail Price — Retail Mode is always unaffected.
-function getCartItemEffective(item) {
-  const prod = allProducts.find(p => p.id === item.productId);
-  let price = item.price; // Retail Price, exactly as before
-  let isWholesale = false;
-  if (posMode === 'wholesale' && prod) {
-    const wPrice = item.unit === 'pack'
-      ? parseFloat(prod.wholesalePricePack || 0)
-      : parseFloat(prod.wholesalePricePer || 0);
-    if (wPrice > 0) { price = wPrice; isWholesale = true; }
-  }
-  return { price, total: price * item.qty, isWholesale };
-}
-
 function addToCart(productId, unit) {
   const p = allProducts.find(x => x.id === productId);
   if (!p) return;
@@ -1302,15 +1269,11 @@ function renderCart() {
  itemsEl.innerHTML = cart.map((item, idx) =>{
       const prod = allProducts.find(p => p.id === item.productId);
       const hasPack = prod && parseFloat(prod.pricePack||0) > 0;
-      const eff = getCartItemEffective(item);
-      const priceLabel = eff.isWholesale
-        ? `<span style="text-decoration:line-through;color:var(--text3);margin-right:4px">₱${parseFloat(item.price||0).toFixed(2)}</span>₱${eff.price.toFixed(2)} / ${item.unit} <span style="color:var(--green);font-weight:700">(Wholesale)</span>`
-        : `₱${parseFloat(eff.price||0).toFixed(2)} / ${item.unit}`;
       return `
 <div class="cart-item">
 <div class="ci-info">
 <div class="ci-name">${item.name}</div>
-<div class="ci-price">${priceLabel}</div>
+<div class="ci-price">₱${parseFloat(item.price||0).toFixed(2)} / ${item.unit}</div>
  ${hasPack ? `<div class="ci-unit-toggle">
             <button class="${item.unit==='piece'?'active-piece':''}" onclick="switchCartUnit(${idx},'piece')">Piece ₱${parseFloat(prod.pricePer||0).toFixed(2)}</button>
             <button class="${item.unit==='pack'?'active-pack':''}" onclick="switchCartUnit(${idx},'pack')">Pack ₱${parseFloat(prod.pricePack||0).toFixed(2)}</button>
@@ -1321,13 +1284,13 @@ function renderCart() {
           <input class="ci-qty-input" type="number" name="qty_${idx}" min="1" value="${item.qty}" onchange="setCartQty(${idx}, this.value)">
           <button class="ci-qty-btn" onclick="changeCartQty(${idx}, 1)">+</button>
         </div>
-<div class="ci-total">₱${eff.total.toFixed(2)}</div>
+<div class="ci-total">₱${parseFloat(item.total||0).toFixed(2)}</div>
         <button class="ci-remove" onclick="removeFromCart(${idx})">✕</button>
       </div>`;
     }).join('');
   }
 
-  const total = cart.reduce((s, c) => s + getCartItemEffective(c).total, 0);
+  const total = cart.reduce((s, c) => s + c.total, 0);
   const itemCount = cart.reduce((s, c) => s + c.qty, 0);
  if (countEl) countEl.textContent = itemCount;
  if (subtEl) subtEl.textContent = '₱' + total.toLocaleString('en-PH', { minimumFractionDigits: 2 });
@@ -1378,18 +1341,12 @@ function clearCart() {
 // ─── CHECKOUT ─────────────────────────────────
 function openCheckout() {
  if (cart.length === 0) { toast('Cart is empty!', 'warning'); return; }
-  const isWholesale = posMode === 'wholesale';
-  const total = cart.reduce((s, c) => s + getCartItemEffective(c).total, 0);
+  const total = cart.reduce((s, c) => s + c.total, 0);
   openModal(`
 <div class="modal-title">Checkout</div>
 <div class="checkout-form">
- <div class="checkout-mode-badge ${isWholesale ? 'wholesale' : 'retail'}">Transaction Type: ${isWholesale ? 'Wholesale' : 'Retail'}</div>
 <div class="checkout-summary">
- ${cart.map(c => {
-   const eff = getCartItemEffective(c);
-   const discNote = eff.isWholesale ? ` (Wholesale)` : '';
-   return `<div class="checkout-item-line"><span>${c.name} (${c.unit}) x${c.qty}${discNote}</span><span>₱${eff.total.toFixed(2)}</span></div>`;
- }).join('')}
+ ${cart.map(c => `<div class="checkout-item-line"><span>${c.name} (${c.unit}) x${c.qty}</span><span>₱${parseFloat(c.total||0).toFixed(2)}</span></div>`).join('')}
  <div class="checkout-total-line"><span>TOTAL</span><span>₱${total.toFixed(2)}</span></div>
       </div>
 <div class="field">
@@ -1440,31 +1397,14 @@ async function processCheckout(total) {
   // Validate cash for cash payments
   if (!isNonCash && (!cash || cash < total)) {
     toast('Cash received is insufficient!', 'error');
-    // BUG FIX: this early return never reset _checkoutInProgress, which
-    // permanently blocked every future click on Confirm (no toast, no
-    // modal close, nothing) until the page was reloaded.
-    _checkoutInProgress = false;
     if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
     return;
   }
 
   // BUG 1 FIX: snapshot cart HERE before anything else —
   // was declared inside try block AFTER payload was already built, causing ReferenceError
-  // Wholesale Mode: bake in each item's manually-entered Wholesale Price at checkout time
-  // (falling back to Retail Price if none was set). Retail Mode: unchanged.
-  const isWholesaleSale = posMode === 'wholesale';
-  const cartSnapshot = cart.map(c => {
-    const eff = getCartItemEffective(c);
-    return { ...c, price: eff.price, total: eff.total };
-  });
-  if (!cartSnapshot.length) {
-    toast('Cart is empty!', 'warning');
-    // BUG FIX: same issue as above — reset the guard so checkout isn't
-    // permanently stuck if this path is ever hit.
-    _checkoutInProgress = false;
-    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
-    return;
-  }
+  const cartSnapshot = [...cart];
+  if (!cartSnapshot.length) { toast('Cart is empty!', 'warning'); return; }
 
   const txId  = 'TX' + Date.now();
   const siNum = 'SI' + Date.now();
@@ -1481,7 +1421,6 @@ async function processCheckout(total) {
     total,
     cash:   isNonCash ? total : cash,
     change,
-    transactionType: isWholesaleSale ? 'Wholesale' : 'Retail',
   };
 
   // Close modal ONLY after validation passes
@@ -1543,13 +1482,6 @@ async function processCheckout(total) {
         cash:    isNonCash ? total : cash,
         change,
         paymentMethod,
-        transactionType: isWholesaleSale ? 'Wholesale' : 'Retail',
-      });
-
-      // Reset to Retail for the next transaction (default mode per spec)
-      posMode = 'retail';
-      document.querySelectorAll('#posModeToggle button').forEach(b => {
-        b.classList.toggle('active-mode', b.dataset.mode === 'retail');
       });
 
     } else {
@@ -1640,7 +1572,7 @@ let currentReceiptData = null;
 
 function generateAndShowReceipt(data) {
   currentReceiptData = data;
-  const { txId, siNum, cashier, date, items, total, cash, change, transactionType } = data;
+  const { txId, siNum, cashier, date, items, total, cash, change } = data;
   const dateStr = safeFormatDateLong(date);
   const vatRate = 0.12;
   const vatAmount = total * vatRate / (1 + vatRate);
@@ -1676,7 +1608,6 @@ function generateAndShowReceipt(data) {
         <div><b>Transaction #:</b> ${txId}</div>
         <div><b>Cashier:</b> ${cashier}</div>
         <div><b>Date & Time:</b> ${dateStr}</div>
-        <div><b>Transaction Type:</b> ${transactionType || 'Retail'}</div>
       </div>
       <hr class="receipt-divider">
 <div class="receipt-items-header">
@@ -1729,52 +1660,6 @@ async function downloadReceipt() {
     link.click();
   } catch(e) {
  toast('Download failed. Try again.', 'error');
-  }
-}
-
-// ─── BLUETOOTH RECEIPT PRINTING ───────────────
-// Browsers cannot talk directly to most cheap Bluetooth thermal printers
-// (they use Classic Bluetooth SPP, which Web Bluetooth does not support).
-// The reliable workaround: render the receipt as an image, then hand it to
-// the phone's native Share sheet — the cashier picks a bridge app there
-// (e.g. "RawBT Print Service", free on Play Store) which actually talks to
-// the printer over Bluetooth. This also works with any other print app the
-// cashier may already have, not just RawBT.
-async function printReceiptBluetooth() {
-  if (!currentReceiptData) return;
-  try {
-    const el = document.getElementById('receiptContent');
-    if (typeof html2canvas === 'undefined') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
-    }
-    const canvas = await html2canvas(el, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
-
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-    if (!blob) { toast('Could not prepare receipt image.', 'error'); return; }
-
-    const file = new File([blob], `receipt_${currentReceiptData.txId}.png`, { type: 'image/png' });
-
-    // Web Share API with files — supported on Chrome for Android.
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({
-        files: [file],
-        title: 'Receipt ' + currentReceiptData.txId,
-      });
-      return;
-    }
-
-    // Fallback: browser/device doesn't support sharing files (e.g. desktop
-    // Chrome, or older Android WebView). Download the image instead and
-    // tell the cashier how to print it manually.
-    const link = document.createElement('a');
-    link.download = `receipt_${currentReceiptData.txId}.png`;
-    link.href = canvas.toDataURL('image/png');
-    link.click();
-    toast('Bluetooth print sharing isn\'t supported on this device — receipt image downloaded instead. Open it and share/print from your gallery app.', 'warning');
-  } catch(e) {
-    // User cancelling the share sheet also throws — don't show an error toast for that.
-    if (e && e.name === 'AbortError') return;
- toast('Print failed. Try again.', 'error');
   }
 }
 
@@ -2186,16 +2071,6 @@ function buildProductModal(p) {
           <input id="f_pricePack" type="number" min="0" step="0.01" value="${p?.pricePack || 0}" placeholder="0.00">
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-        <div class="field">
-          <label for="f_wholesalePricePer">Wholesale Price / Piece (₱)</label>
-          <input id="f_wholesalePricePer" type="number" min="0" step="0.01" value="${p?.wholesalePricePer || ''}" placeholder="Leave blank to use Retail">
-        </div>
-        <div class="field">
-          <label for="f_wholesalePricePack">Wholesale Price / Pack (₱)</label>
-          <input id="f_wholesalePricePack" type="number" min="0" step="0.01" value="${p?.wholesalePricePack || ''}" placeholder="Leave blank to use Retail">
-        </div>
-      </div>
     </div>
 
     <button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="saveProduct(${p ? "'"+p.id+"'" : ''})">
@@ -2437,8 +2312,6 @@ async function saveProduct(id = null) {
     qtyPacks: parseInt(document.getElementById('f_qtyPacks')?.value || 0),
     pricePer: parseFloat(document.getElementById('f_pricePer')?.value || 0),
     pricePack: parseFloat(document.getElementById('f_pricePack')?.value || 0),
-    wholesalePricePer: parseFloat(document.getElementById('f_wholesalePricePer')?.value || 0),
-    wholesalePricePack: parseFloat(document.getElementById('f_wholesalePricePack')?.value || 0),
   };
 
   showLoading(id ? 'Updating product...' : 'Saving product...');
@@ -2570,7 +2443,7 @@ function openImportModal() {
   openModal(`
 <div class="modal-title">Import Products from CSV/Excel</div>
     <p style="color:var(--text2);font-size:0.88rem;margin-bottom:12px">
-      Required column: <b>name</b>. Optional: barcode, qtyPcs, qtyPacks, pricePer, pricePack, wholesalePricePer, wholesalePricePack.<br>
+      Required column: <b>name</b>. Optional: barcode, qtyPcs, qtyPacks, pricePer, pricePack.<br>
       <span style="color:var(--text3);font-size:0.8rem">Tip: Use comma-separated CSV or Excel (.xlsx/.xls)</span>
     </p>
 <div class="import-area" id="importArea" onclick="document.getElementById('importFile').click()">
@@ -2677,7 +2550,7 @@ function processImportCSV(csvText, filename) {
     <div style="font-size:0.82rem;font-weight:700;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Preview (first 10 rows)</div>
 <div class="tbl-wrap" style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:10px">
       <table>
-        <thead><tr><th>#</th><th>Name</th><th>Barcode</th><th>Qty Pcs</th><th>Qty Packs</th><th>Price/Pc</th><th>Price/Pack</th><th>Wholesale/Pc</th><th>Wholesale/Pack</th></tr></thead>
+        <thead><tr><th>#</th><th>Name</th><th>Barcode</th><th>Qty Pcs</th><th>Qty Packs</th><th>Price/Pc</th><th>Price/Pack</th></tr></thead>
         <tbody>
           ${rows.slice(0, 10).map((r, i) => `<tr>
             <td class="text-muted">${i+1}</td>
@@ -2687,8 +2560,6 @@ function processImportCSV(csvText, filename) {
             <td>${r.qtypacks || r.qtyPacks || r['qty(packs)'] || 0}</td>
             <td>₱${parseFloat(r.priceper || r.pricePer || r['price/pc'] || 0).toFixed(2)}</td>
             <td>₱${parseFloat(r.pricepack || r.pricePack || r['price/pack'] || 0).toFixed(2)}</td>
-            <td>${parseFloat(r.wholesalepriceper || r.wholesalepricepc || r['wholesale/pc'] || r['wholesaleprice/pc'] || 0) > 0 ? '₱' + parseFloat(r.wholesalepriceper || r.wholesalepricepc || r['wholesale/pc'] || r['wholesaleprice/pc']).toFixed(2) : '—'}</td>
-            <td>${parseFloat(r.wholesalepricepack || r['wholesale/pack'] || r['wholesaleprice/pack'] || 0) > 0 ? '₱' + parseFloat(r.wholesalepricepack || r['wholesale/pack'] || r['wholesaleprice/pack']).toFixed(2) : '—'}</td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -2713,17 +2584,33 @@ async function gasBulkImport(batch) {
     qtyPacks:  String(p.qtypacks  || p.qtyPacks  || p['qty(packs)'] || p['Qty Packs'] || p['QTY PACKS'] || '0'),
     pricePer:  String(p.priceper  || p.pricePer  || p['price/pc']   || p['Price/Pc']  || p['PRICE/PC']  || '0'),
     pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || p['Price/Pack']|| p['PRICE/PACK']|| '0'),
-    wholesalePricePer:  String(p.wholesalepriceper  || p.wholesalepricepc  || p['wholesale/pc']   || p['wholesaleprice/pc']   || p['Wholesale/Pc']   || p['Wholesale Price Per']  || '0'),
-    wholesalePricePack: String(p.wholesalepricepack || p['wholesale/pack'] || p['wholesaleprice/pack'] || p['Wholesale/Pack'] || p['Wholesale Price Pack'] || '0'),
   })).filter(p => p.name);
 
-  // Real POST via gasPost — no more URL-length limit, so no need for the
-  // separate base64-in-URL workaround this used to have.
+  // Use GET + base64 payload (same as gasPost) — avoids CORS block
+  const payload = { action: 'bulkAddProducts', products: JSON.stringify(products) };
+  const json    = JSON.stringify(payload);
+  let encoded;
   try {
-    const res = await gasPost({ action: 'bulkAddProducts', products: JSON.stringify(products) }, 60000);
-    return res && res.success !== undefined ? res : { success: true, count: products.length };
+    encoded = btoa(unescape(encodeURIComponent(json)));
+  } catch (e) {
+    const bytes  = new TextEncoder().encode(json);
+    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
+    encoded = btoa(binary);
+  }
+  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    clearTimeout(timer);
+    const text = await res.text();
+    if (!text || !text.trim()) return { success: true, count: products.length };
+    try { return JSON.parse(text); }
+    catch(e) { return { success: true, count: products.length }; }
   } catch(e) {
-    throw new Error(e.message.includes('timed out') ? 'Import timed out. Try a smaller batch.' : 'Import error: ' + e.message);
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('Import timed out. Try a smaller batch.');
+    throw new Error('Import error: ' + e.message);
   }
 }
 
@@ -2756,8 +2643,6 @@ async function confirmImport() {
 
   let totalImported = 0;
   let failed = 0;
-  const failedRows = []; // BUG FIX: track only the rows that actually failed,
-                          // so "Retry Failed" doesn't re-import already-saved rows.
 
   for (let b = 0; b < batches.length; b++) {
     const batch = batches[b];
@@ -2782,7 +2667,6 @@ async function confirmImport() {
         totalImported += res.count || batch.length;
       } else {
         failed += batch.length;
-        failedRows.push(...batch);
         console.warn('Batch ' + batchNum + ' failed:', res.message);
       }
     } catch(e) {
@@ -2791,10 +2675,9 @@ async function confirmImport() {
       try {
         const res2 = await gasBulkImport(batch);
         if (res2.success) totalImported += res2.count || batch.length;
-        else { failed += batch.length; failedRows.push(...batch); }
+        else failed += batch.length;
       } catch(e2) {
         failed += batch.length;
-        failedRows.push(...batch);
         console.warn('Batch ' + batchNum + ' retry also failed:', e2.message);
       }
     }
@@ -2812,14 +2695,10 @@ async function confirmImport() {
   } else if (totalImported > 0) {
  if (statusEl) statusEl.innerHTML = `<div style="color:#f59e0b;font-weight:700">️ Imported ${totalImported} products. ${failed} failed — try importing the rest again.</div>`;
  toast(`Partial import: ${totalImported} saved, ${failed} failed.`, 'warning');
-    // BUG FIX: only retry the rows that failed, not the full original file
-    pendingImportRows = failedRows;
  if (btn) { btn.disabled = false; btn.innerHTML = ' Retry Failed'; }
   } else {
  if (statusEl) statusEl.innerHTML = '<div style="color:#ef4444;font-weight:700">Import failed. Check your connection and try again.</div>';
  toast('Import failed. Try again.', 'error');
-    // BUG FIX: keep only the failed rows for retry here too
-    pendingImportRows = failedRows;
  if (btn) { btn.disabled = false; btn.innerHTML = ' Retry Import'; }
   }
 }
@@ -4293,1579 +4172,1056 @@ async function deleteWholesaler(id) {
   } catch(e) { toast('Network error.', 'error'); }
 }
 
-// ═══════════════════════════════════════════════
-// PURCHASE ORDERS (Wholesaler) — new isolated module
-// Workflow: Dashboard → New Order → History → Reports
-// Reuses existing CSS classes only (.card, .kpi-grid, .tbl-wrap table,
-// .btn, .inv-btn, .search-wrap, openModal/toast/esc) — no new styling.
-// ═══════════════════════════════════════════════
-let poTab = 'dashboard';
-let poCache = [];
-let poNewItems = [];
-let poHistoryFiltered = null;
 
-async function renderPurchaseOrders() {
-  document.getElementById('pageContent').innerHTML = `
-    <div class="po-subnav" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
-      ${[
-        ['dashboard', 'Dashboard'],
-        ['new', '+ New Order'],
-        ['history', 'History'],
-        ['reports', 'Reports'],
-      ].map(([id, label]) => `
-        <button class="btn ${poTab === id ? 'btn-primary' : 'btn-ghost'} btn-sm" data-po-tab="${id}" onclick="poSwitchTab('${id}')">${label}</button>
-      `).join('')}
-    </div>
-    <div id="poTabContent"><div class="loading-spinner"><div class="spinner"></div> Loading...</div></div>
-  `;
-  await poRenderTab(poTab);
+// ═══════════════════════════════════════════════════════════
+// INVENTORY AUDIT MODULE
+// All functions prefixed with audit_
+// Does NOT modify live inventory stock — compare only
+// ═══════════════════════════════════════════════════════════
+
+let audit_sessions  = [];
+let audit_current   = null;
+let audit_sessionId = null;
+
+async function audit_renderPage() {
+  const pc = document.getElementById('pageContent');
+  if (!pc) return;
+  pc.innerHTML =
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px">' +
+      '<button class="btn btn-primary" onclick="audit_startNew()">Generate Inventory Count Sheet</button>' +
+      '<button class="btn btn-ghost" onclick="audit_loadHistory()">View Past Audits</button>' +
+    '</div>' +
+    '<div id="auditContent">' +
+      '<div class="no-data">' +
+        '<div class="no-data-icon"></div>' +
+        '<div class="no-data-text">Click <b>Generate Inventory Count Sheet</b> to start a new physical count.<br>' +
+          '<span style="font-size:0.8rem;color:var(--text3)">This module does NOT modify your live inventory.</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
 }
 
-function poSwitchTab(tab) {
-  poTab = tab;
-  document.querySelectorAll('[data-po-tab]').forEach(b => {
-    b.classList.toggle('btn-primary', b.dataset.poTab === tab);
-    b.classList.toggle('btn-ghost', b.dataset.poTab !== tab);
-  });
-  poRenderTab(tab);
-}
-
-async function poRenderTab(tab) {
-  const el = document.getElementById('poTabContent');
+async function audit_startNew() {
+  const el = document.getElementById('auditContent');
   if (!el) return;
-  el.innerHTML = `<div class="loading-spinner"><div class="spinner"></div> Loading...</div>`;
-  if (tab === 'dashboard') return poRenderDashboardTab();
-  if (tab === 'new')       return poRenderNewOrderTab();
-  if (tab === 'history')   return poRenderHistoryTab();
-  if (tab === 'reports')   return poRenderReportsTab();
-}
-
-// ── Shared: load PO data ──────────────────────
-async function poLoadOrders() {
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div> Loading products...</div>';
   try {
-    const res = await gasRequest({ action: 'getPurchaseOrders' });
-    poCache = res.data || [];
-    return poCache;
-  } catch(e) {
-    toast('Could not load purchase orders.', 'error');
-    return [];
-  }
-}
-
-function poDayRangeToday() {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const end   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  return { start, end };
-}
-
-// ═══ TAB 1: DASHBOARD ═══
-async function poRenderDashboardTab() {
-  const el = document.getElementById('poTabContent');
-  const orders = await poLoadOrders();
-
-  const { start: todayStart, end: todayEnd } = poDayRangeToday();
-  const total     = orders.length;
-  const pending   = orders.filter(o => o.status === 'Pending').length;
-  const completed = orders.filter(o => o.status === 'Completed').length;
-  const cancelled = orders.filter(o => o.status === 'Cancelled').length;
-  const todayCount = orders.filter(o => {
-    const d = parseDate(o.createdAt);
-    return d && d >= todayStart && d <= todayEnd;
-  }).length;
-
-  const recent = [...orders].reverse().slice(0, 8);
-
-  if (!el) return;
-  el.innerHTML = `
-    <div class="kpi-grid">
-      <div class="kpi-card kpi-blue"><div class="kpi-label">Total Records</div><div class="kpi-value">${total}</div></div>
-      <div class="kpi-card kpi-orange"><div class="kpi-label">Pending</div><div class="kpi-value">${pending}</div></div>
-      <div class="kpi-card kpi-green"><div class="kpi-label">Completed</div><div class="kpi-value">${completed}</div></div>
-      <div class="kpi-card kpi-grad"><div class="kpi-label">Cancelled</div><div class="kpi-value">${cancelled}</div></div>
-      <div class="kpi-card kpi-blue"><div class="kpi-label">Today's Transactions</div><div class="kpi-value">${todayCount}</div></div>
-    </div>
-    <div class="card">
-      <div class="card-title">Recent Purchase Orders</div>
-      ${recent.length ? `
-      <div class="tbl-wrap"><table>
-        <thead><tr><th>PO #</th><th>Wholesaler</th><th>Grand Total</th><th>Status</th><th>Date</th></tr></thead>
-        <tbody>${recent.map(o => `<tr>
-          <td><span style="font-family:var(--font-mono);font-size:0.8rem">${esc(o.poNumber||'')}</span></td>
-          <td>${esc(o.wholesalerName||'')}</td>
-          <td class="text-green fw-700">₱${parseFloat(o.grandTotal||0).toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
-          <td>${poStatusBadge(o.status)}</td>
-          <td class="text-muted" style="font-size:0.8rem">${safeFormatDateOnly(o.createdAt)}</td>
-        </tr>`).join('')}</tbody>
-      </table></div>` : '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No purchase orders yet.</div></div>'}
-    </div>
-  `;
-}
-
-function poStatusBadge(status) {
-  const map = {
-    Pending:   '<span class="badge-low">Pending</span>',
-    Completed: '<span class="badge-in-stock">Completed</span>',
-    Cancelled: '<span class="badge-out">Cancelled</span>',
-  };
-  return map[status] || esc(status || '');
-}
-
-// ═══ TAB 2: NEW ORDER ═══
-async function poRenderNewOrderTab() {
-  const el = document.getElementById('poTabContent');
-  // BUG FIX: was `if (!allProducts.length)`, which only loaded products
-  // ONCE per session — any stock/price edit made in Inventory afterward
-  // never showed up here. Always refresh, same as POS already does.
-  await loadProducts();
-  if (typeof _wholesalersCache === 'undefined' || !_wholesalersCache || !_wholesalersCache.length) await loadWholesalers();
-
-  if (!el) return;
-  el.innerHTML = `
-    <div class="card">
-      <div class="card-title"> Customer Information</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-        <div class="field">
-          <label for="po_wholesalerPick">Select Existing Wholesaler (optional)</label>
-          <select id="po_wholesalerPick" name="po_wholesalerPick" onchange="poPickWholesaler(this.value)">
-            <option value="">— Type new / manual entry —</option>
-            ${(_wholesalersCache||[]).map(w => `<option value="${esc(w.id)}">${esc(w.wholesaler_name)} (${esc(w.store_name)})</option>`).join('')}
-          </select>
-        </div>
-        <div></div>
-        <div class="field">
-          <label for="po_wholesalerName">Customer / Wholesaler Name *</label>
-          <input id="po_wholesalerName" name="po_wholesalerName" type="text" placeholder="e.g. Juan Dela Cruz">
-        </div>
-        <div class="field">
-          <label for="po_storeName">Store Name</label>
-          <input id="po_storeName" name="po_storeName" type="text" placeholder="e.g. JD Trading">
-        </div>
-        <div class="field">
-          <label for="po_contactNumber">Contact Number</label>
-          <input id="po_contactNumber" name="po_contactNumber" type="text" placeholder="09xxxxxxxxx">
-        </div>
-        <div class="field">
-          <label for="po_deliveryAddress">Delivery Address</label>
-          <input id="po_deliveryAddress" name="po_deliveryAddress" type="text" placeholder="Optional">
-        </div>
-        <div class="field">
-          <label for="po_pickupDate">Pickup/Delivery Date *</label>
-          <input id="po_pickupDate" name="po_pickupDate" type="date">
-        </div>
-        <div class="field">
-          <label for="po_paymentTerms">Payment Terms</label>
-          <input id="po_paymentTerms" name="po_paymentTerms" type="text" placeholder="e.g. COD, 30 days">
-        </div>
-        <div class="field" style="grid-column:1/-1">
-          <label for="po_remarks">Remarks</label>
-          <input id="po_remarks" name="po_remarks" type="text" placeholder="Optional notes">
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <div class="card-title" style="margin:0"> Order Items</div>
-        <button class="btn btn-primary btn-sm" onclick="poOpenAddItemModal()">+ Add Item</button>
-      </div>
-      <div id="poItemsTable"></div>
-    </div>
-
-    <div class="card" style="background:var(--bg2)">
-      <div class="card-title">Order Summary</div>
-      <div id="poOrderSummary"></div>
-    </div>
-
-    <div style="display:flex;gap:10px;margin-top:14px">
-      <button class="btn btn-primary" id="poSaveBtn" onclick="poSaveOrder()"> Save Order</button>
-      <button class="btn btn-ghost" onclick="poCancelNewOrder()">Cancel</button>
-    </div>
-  `;
-  poRenderItemsTable();
-}
-
-function poPickWholesaler(id) {
-  if (!id) return;
-  const w = (_wholesalersCache||[]).find(x => x.id === id);
-  if (!w) return;
-  document.getElementById('po_wholesalerName').value = w.wholesaler_name || '';
-  document.getElementById('po_storeName').value      = w.store_name || '';
-  document.getElementById('po_contactNumber').value  = w.contact_number || '';
-  document.getElementById('po_deliveryAddress').value= w.address || '';
-}
-
-function poOpenAddItemModal() {
-  openModal(`
-    <div class="modal-title">Add Item</div>
-    <div class="search-wrap" style="margin-bottom:10px">
-      <span class="search-icon">🔍</span>
-      <input type="text" id="poItemSearch" name="poItemSearch" placeholder="Search product name or barcode..." oninput="poFilterItemPicker(this.value)" autocomplete="off">
-    </div>
-    <div id="poItemPickerList" style="max-height:340px;overflow-y:auto"></div>
-  `);
-  poFilterItemPicker('');
-}
-
-function poFilterItemPicker(q) {
-  const listEl = document.getElementById('poItemPickerList');
-  if (!listEl) return;
-  q = (q || '').toLowerCase().trim();
-  const matches = allProducts.filter(p =>
-    !q || (p.name||'').toLowerCase().includes(q) || (p.barcode||'').toLowerCase().includes(q)
-  ).slice(0, 30);
-
-  listEl.innerHTML = matches.length ? matches.map(p => {
-    const hasPack = parseFloat(p.pricePack||0) > 0;
-    return `<div class="cart-item" style="cursor:pointer" onclick="poAddItemToOrder('${p.id}','piece')">
-      <div class="ci-info">
-        <div class="ci-name">${esc(p.name)}</div>
-        <div class="ci-price">₱${parseFloat(p.pricePer||0).toFixed(2)} / piece${hasPack ? ` · ₱${parseFloat(p.pricePack||0).toFixed(2)} / pack` : ''}</div>
-      </div>
-      ${hasPack ? `<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();poAddItemToOrder('${p.id}','pack')">+ Pack</button>` : ''}
-    </div>`;
-  }).join('') : '<div class="no-data"><div class="no-data-text">No matching products.</div></div>';
-}
-
-function poAddItemToOrder(productId, unit) {
-  const p = allProducts.find(x => x.id === productId);
-  if (!p) return;
-  // Default price for wholesaler PO: use Wholesale Price if set, else fall back to Retail
-  const wPrice = unit === 'pack' ? parseFloat(p.wholesalePricePack||0) : parseFloat(p.wholesalePricePer||0);
-  const rPrice = unit === 'pack' ? parseFloat(p.pricePack||0) : parseFloat(p.pricePer||0);
-  const price  = wPrice > 0 ? wPrice : rPrice;
-
-  poNewItems.push({
-    productId: p.id, name: p.name, unit, qty: 1, price, disc: 0,
-  });
-  closeModalDirect();
-  poRenderItemsTable();
-}
-
-function poRenderItemsTable() {
-  const el = document.getElementById('poItemsTable');
-  if (!el) return;
-
-  if (!poNewItems.length) {
-    el.innerHTML = '<div class="no-data"><div class="no-data-text">No items added yet.</div></div>';
-    poUpdateOrderSummary();
-    return;
-  }
-
-  el.innerHTML = `
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>#</th><th>Item</th><th>Unit</th><th>Qty</th><th>Price</th><th>Disc</th><th>Total</th><th></th></tr></thead>
-      <tbody>${poNewItems.map((it, idx) => `<tr>
-        <td>${idx+1}</td>
-        <td>${esc(it.name)}</td>
-        <td>${it.unit}</td>
-        <td><input type="number" min="1" id="po_item_qty_${idx}" name="po_item_qty_${idx}" aria-label="Quantity for ${esc(it.name)}" value="${it.qty}" style="width:60px" onchange="poUpdateItem(${idx},'qty',this.value)"></td>
-        <td><input type="number" min="0" step="0.01" id="po_item_price_${idx}" name="po_item_price_${idx}" aria-label="Price for ${esc(it.name)}" value="${it.price}" style="width:80px" onchange="poUpdateItem(${idx},'price',this.value)"></td>
-        <td><input type="number" min="0" step="0.01" id="po_item_disc_${idx}" name="po_item_disc_${idx}" aria-label="Discount for ${esc(it.name)}" value="${it.disc}" style="width:70px" onchange="poUpdateItem(${idx},'disc',this.value)"></td>
-        <td class="fw-700">₱${poItemTotal(it).toFixed(2)}</td>
-        <td><button class="ci-remove" onclick="poRemoveItem(${idx})">✕</button></td>
-      </tr>`).join('')}</tbody>
-    </table></div>
-  `;
-  poUpdateOrderSummary();
-}
-
-function poItemTotal(it) {
-  return Math.max(0, (parseFloat(it.qty||0) * parseFloat(it.price||0)) - parseFloat(it.disc||0));
-}
-
-function poUpdateItem(idx, field, val) {
-  if (!poNewItems[idx]) return;
-  poNewItems[idx][field] = field === 'qty' ? (parseInt(val)||1) : (parseFloat(val)||0);
-  poRenderItemsTable();
-}
-
-function poRemoveItem(idx) {
-  poNewItems.splice(idx, 1);
-  poRenderItemsTable();
-}
-
-function poUpdateOrderSummary() {
-  const el = document.getElementById('poOrderSummary');
-  if (!el) return;
-  const items = poNewItems.length;
-  const qty   = poNewItems.reduce((s,i) => s + (parseFloat(i.qty)||0), 0);
-  const subtotal = poNewItems.reduce((s,i) => s + (parseFloat(i.qty||0)*parseFloat(i.price||0)), 0);
-  const discount = poNewItems.reduce((s,i) => s + (parseFloat(i.disc)||0), 0);
-  const grandTotal = Math.max(0, subtotal - discount);
-
-  el.innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 20px">
-      <div>Items: <b>${items}</b></div>
-      <div>Qty: <b>${qty}</b></div>
-      <div>Subtotal: <b>₱${subtotal.toFixed(2)}</b></div>
-      <div>Discount: <b class="text-red">₱${discount.toFixed(2)}</b></div>
-    </div>
-    <div style="text-align:right;margin-top:10px;font-size:1.1rem" class="fw-700">Grand Total: <span class="text-green">₱${grandTotal.toFixed(2)}</span></div>
-  `;
-}
-
-function poCancelNewOrder() {
-  poNewItems = [];
-  poSwitchTab('dashboard');
-}
-
-async function poSaveOrder() {
-  const wholesalerName = document.getElementById('po_wholesalerName')?.value.trim();
-  const pickupDate     = document.getElementById('po_pickupDate')?.value;
-  if (!wholesalerName) { toast('Customer/Wholesaler Name is required.', 'error'); return; }
-  if (!pickupDate)      { toast('Pickup/Delivery Date is required.', 'error'); return; }
-  if (!poNewItems.length) { toast('Add at least one item.', 'warning'); return; }
-
-  const subtotal   = poNewItems.reduce((s,i) => s + (parseFloat(i.qty||0)*parseFloat(i.price||0)), 0);
-  const discount   = poNewItems.reduce((s,i) => s + (parseFloat(i.disc)||0), 0);
-  const grandTotal = Math.max(0, subtotal - discount);
-
-  const btn = document.getElementById('poSaveBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
-
-  try {
-    const res = await gasPost({
-      action: 'addPurchaseOrder',
-      caller_role: currentUser.role,
-      poNumber: 'PO' + Date.now(),
-      wholesalerId: document.getElementById('po_wholesalerPick')?.value || '',
-      wholesalerName,
-      storeName: document.getElementById('po_storeName')?.value || '',
-      contactNumber: document.getElementById('po_contactNumber')?.value || '',
-      deliveryAddress: document.getElementById('po_deliveryAddress')?.value || '',
-      pickupDeliveryDate: pickupDate,
-      paymentTerms: document.getElementById('po_paymentTerms')?.value || '',
-      remarks: document.getElementById('po_remarks')?.value || '',
-      items: JSON.stringify(poNewItems),
-      subtotal, discount, grandTotal,
-      createdBy: currentUser.name || currentUser.username || '',
-    });
-    if (res.success) {
-      toast('Purchase order saved!', 'success');
-      poNewItems = [];
-      poSwitchTab('history');
-    } else {
-      toast(res.message || 'Error saving order.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
-    }
-  } catch(e) {
-    toast('Network error. Please try again.', 'error');
-    if (btn) { btn.disabled = false; btn.textContent = ' Save Order'; }
-  }
-}
-
-// ═══ TAB 3: HISTORY ═══
-async function poRenderHistoryTab() {
-  const el = document.getElementById('poTabContent');
-  const orders = await poLoadOrders();
-  poHistoryFiltered = null;
-
-  if (!el) return;
-  el.innerHTML = `
-    <div class="card" style="margin-bottom:16px">
-      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto auto;gap:10px;align-items:end">
-        <div class="field" style="margin:0">
-          <label for="poHistSearch">Search</label>
-          <input type="text" id="poHistSearch" name="poHistSearch" placeholder="Order # or Customer">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="poHistStatus">Status</label>
-          <select id="poHistStatus" name="poHistStatus">
-            <option value="">All</option>
-            <option value="Pending">Pending</option>
-            <option value="Completed">Completed</option>
-            <option value="Cancelled">Cancelled</option>
-          </select>
-        </div>
-        <div class="field" style="margin:0"><label for="poHistFrom">From</label><input type="date" id="poHistFrom" name="poHistFrom"></div>
-        <div class="field" style="margin:0"><label for="poHistTo">To</label><input type="date" id="poHistTo" name="poHistTo"></div>
-        <button class="btn btn-primary btn-sm" onclick="poApplyHistoryFilter()">Filter</button>
-        <button class="btn btn-ghost btn-sm" onclick="poClearHistoryFilter()">Clear</button>
-      </div>
-    </div>
-    <div class="card"><div id="poHistoryTable"></div></div>
-  `;
-  poRenderHistoryTable(orders);
-}
-
-function poApplyHistoryFilter() {
-  const q      = (document.getElementById('poHistSearch')?.value || '').toLowerCase().trim();
-  const status = document.getElementById('poHistStatus')?.value || '';
-  const from   = document.getElementById('poHistFrom')?.value ? new Date(document.getElementById('poHistFrom').value) : null;
-  const to     = document.getElementById('poHistTo')?.value   ? new Date(document.getElementById('poHistTo').value)   : null;
-
-  const filtered = poCache.filter(o => {
-    if (q && !((o.poNumber||'').toLowerCase().includes(q) || (o.wholesalerName||'').toLowerCase().includes(q))) return false;
-    if (status && o.status !== status) return false;
-    const d = parseDate(o.createdAt);
-    if (from && d && d < from) return false;
-    if (to   && d && d > new Date(to.getTime() + 86399999)) return false;
-    return true;
-  });
-  poHistoryFiltered = filtered;
-  poRenderHistoryTable(filtered);
-}
-
-function poClearHistoryFilter() {
-  document.getElementById('poHistSearch').value = '';
-  document.getElementById('poHistStatus').value = '';
-  document.getElementById('poHistFrom').value = '';
-  document.getElementById('poHistTo').value = '';
-  poHistoryFiltered = null;
-  poRenderHistoryTable(poCache);
-}
-
-function poRenderHistoryTable(data) {
-  const el = document.getElementById('poHistoryTable');
-  if (!el) return;
-  const role = currentUser.role;
-  const canManage = role === 'admin'; // Complete / Cancel / Delete — admin-only (stock-affecting actions)
-
-  if (!data.length) {
-    el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No orders found.</div></div>';
-    return;
-  }
-
-  const rows = [...data].reverse().map(o => {
-    const actions = [
-      `<button class="inv-btn" onclick="poViewOrder('${o.id}')">View</button>`,
-      canManage && o.status === 'Pending' ? `<button class="inv-btn inv-btn-edit" onclick="poCompleteOrder('${o.id}')">Complete</button>` : '',
-      canManage && o.status === 'Pending' ? `<button class="inv-btn" onclick="poCancelOrder('${o.id}')">Cancel</button>` : '',
-      canManage && o.status !== 'Completed' ? `<button class="inv-btn inv-btn-del" onclick="poDeleteOrder('${o.id}')">Del</button>` : '',
-    ].filter(Boolean).join('');
-
-    return `<tr>
-      <td><span style="font-family:var(--font-mono);font-size:0.8rem">${esc(o.poNumber||'')}</span></td>
-      <td>${esc(o.wholesalerName||'')}</td>
-      <td class="text-muted" style="font-size:0.8rem">${safeFormatDateOnly(o.createdAt)}</td>
-      <td class="text-muted" style="font-size:0.8rem">${esc(o.pickupDeliveryDate||'—')}</td>
-      <td class="fw-700">₱${parseFloat(o.grandTotal||0).toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
-      <td>${poStatusBadge(o.status)}</td>
-      <td><div style="display:flex;gap:5px;flex-wrap:wrap">${actions}</div></td>
-    </tr>`;
-  }).join('');
-
-  el.innerHTML = `
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Order #</th><th>Customer</th><th>Created</th><th>Pickup/Delivery</th><th>Grand Total</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>
-  `;
-}
-
-function poViewOrder(id) {
-  const o = poCache.find(x => x.id === id);
-  if (!o) return;
-  let items = [];
-  try { items = JSON.parse(o.items || '[]'); } catch(e) {}
-
-  openModal(`
-    <div class="modal-title">Order ${esc(o.poNumber||'')}</div>
-    <div style="margin-bottom:10px">${poStatusBadge(o.status)}</div>
-    <div style="font-size:0.88rem;line-height:1.7">
-      <div><b>Customer:</b> ${esc(o.wholesalerName||'')} ${o.storeName ? '(' + esc(o.storeName) + ')' : ''}</div>
-      <div><b>Contact:</b> ${esc(o.contactNumber||'—')}</div>
-      <div><b>Delivery Address:</b> ${esc(o.deliveryAddress||'—')}</div>
-      <div><b>Pickup/Delivery Date:</b> ${esc(o.pickupDeliveryDate||'—')}</div>
-      <div><b>Payment Terms:</b> ${esc(o.paymentTerms||'—')}</div>
-      <div><b>Remarks:</b> ${esc(o.remarks||'—')}</div>
-      <div><b>Created By:</b> ${esc(o.createdBy||'—')} on ${safeFormatDateTime(o.createdAt,'—')}</div>
-      ${o.status === 'Completed' ? `<div><b>Completed By:</b> ${esc(o.completedBy||'—')} on ${safeFormatDateTime(o.completedAt,'—')}</div>` : ''}
-    </div>
-    <div class="tbl-wrap" style="margin-top:12px"><table>
-      <thead><tr><th>Item</th><th>Unit</th><th>Qty</th><th>Price</th><th>Disc</th><th>Total</th></tr></thead>
-      <tbody>${items.map(it => `<tr>
-        <td>${esc(it.name)}</td><td>${it.unit}</td><td>${it.qty}</td>
-        <td>₱${parseFloat(it.price||0).toFixed(2)}</td><td>₱${parseFloat(it.disc||0).toFixed(2)}</td>
-        <td class="fw-700">₱${poItemTotal(it).toFixed(2)}</td>
-      </tr>`).join('')}</tbody>
-    </table></div>
-    <div style="text-align:right;margin-top:10px" class="fw-700">Grand Total: <span class="text-green">₱${parseFloat(o.grandTotal||0).toFixed(2)}</span></div>
-  `);
-}
-
-async function poCompleteOrder(id) {
-  const o = poCache.find(x => x.id === id);
-  if (!confirm(`Mark order "${o?.poNumber||''}" as Completed?\nThis will deduct stock from Inventory.`)) return;
-  try {
-    const res = await gasPost({ action: 'completePurchaseOrder', id, caller_role: currentUser.role, completedBy: currentUser.name || currentUser.username || '' });
-    if (res.success) { toast('Order completed. Stock deducted.', 'success'); await poRenderHistoryTab(); }
-    else toast(res.message || 'Error completing order.', 'error');
-  } catch(e) { toast('Network error.', 'error'); }
-}
-
-async function poCancelOrder(id) {
-  const o = poCache.find(x => x.id === id);
-  if (!confirm(`Cancel order "${o?.poNumber||''}"?`)) return;
-  try {
-    const res = await gasPost({ action: 'cancelPurchaseOrder', id, caller_role: currentUser.role });
-    if (res.success) { toast('Order cancelled.', 'success'); await poRenderHistoryTab(); }
-    else toast(res.message || 'Error cancelling order.', 'error');
-  } catch(e) { toast('Network error.', 'error'); }
-}
-
-async function poDeleteOrder(id) {
-  const o = poCache.find(x => x.id === id);
-  if (!confirm(`Delete order "${o?.poNumber||''}"?\nThis cannot be undone.`)) return;
-  try {
-    const res = await gasPost({ action: 'deletePurchaseOrder', id, caller_role: currentUser.role });
-    if (res.success) { toast('Order deleted.', 'success'); await poRenderHistoryTab(); }
-    else toast(res.message || 'Error deleting order.', 'error');
-  } catch(e) { toast('Network error.', 'error'); }
-}
-
-// ═══ TAB 4: REPORTS ═══
-async function poRenderReportsTab() {
-  const el = document.getElementById('poTabContent');
-  const orders = await poLoadOrders();
-  const now = new Date();
-  const monthAgo = new Date(now - 30 * 86400000);
-
-  const total     = orders.length;
-  const thisMonth = orders.filter(o => { const d = parseDate(o.createdAt); return d && d >= monthAgo; }).length;
-  const completed = orders.filter(o => o.status === 'Completed').length;
-  const pending   = orders.filter(o => o.status === 'Pending').length;
-  const cancelled = orders.filter(o => o.status === 'Cancelled').length;
-  const totalValue = orders.filter(o => o.status !== 'Cancelled').reduce((s,o) => s + parseFloat(o.grandTotal||0), 0);
-
-  // Sales by Wholesaler
-  const byWholesaler = {};
-  orders.filter(o => o.status !== 'Cancelled').forEach(o => {
-    const key = o.wholesalerName || 'Unknown';
-    if (!byWholesaler[key]) byWholesaler[key] = { orders: 0, value: 0 };
-    byWholesaler[key].orders++;
-    byWholesaler[key].value += parseFloat(o.grandTotal||0);
-  });
-  const wholesalerRows = Object.entries(byWholesaler).sort((a,b) => b[1].value - a[1].value);
-
-  if (!el) return;
-  el.innerHTML = `
-    <div class="kpi-grid">
-      <div class="kpi-card kpi-blue"><div class="kpi-label">Total Orders</div><div class="kpi-value">${total}</div></div>
-      <div class="kpi-card kpi-grad"><div class="kpi-label">This Month</div><div class="kpi-value">${thisMonth}</div></div>
-      <div class="kpi-card kpi-green"><div class="kpi-label">Completed</div><div class="kpi-value">${completed}</div></div>
-      <div class="kpi-card kpi-orange"><div class="kpi-label">Pending</div><div class="kpi-value">${pending}</div></div>
-      <div class="kpi-card kpi-blue"><div class="kpi-label">Cancelled</div><div class="kpi-value">${cancelled}</div></div>
-      <div class="kpi-card kpi-green"><div class="kpi-label">Total Order Value</div><div class="kpi-value">₱${totalValue.toLocaleString('en-PH',{minimumFractionDigits:2})}</div></div>
-    </div>
-
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <div class="card-title" style="margin:0">Sales by Wholesaler</div>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-primary btn-sm" onclick="poExportExcel()"> Excel</button>
-          <button class="btn btn-ghost btn-sm" onclick="poExportPDF()"> PDF</button>
-        </div>
-      </div>
-      ${wholesalerRows.length ? `
-      <div class="tbl-wrap"><table>
-        <thead><tr><th>Wholesaler</th><th>Orders</th><th>Total Value</th></tr></thead>
-        <tbody>${wholesalerRows.map(([name, v]) => `<tr>
-          <td>${esc(name)}</td><td>${v.orders}</td>
-          <td class="fw-700 text-green">₱${v.value.toLocaleString('en-PH',{minimumFractionDigits:2})}</td>
-        </tr>`).join('')}</tbody>
-      </table></div>` : '<div class="no-data"><div class="no-data-text">No data yet.</div></div>'}
-    </div>
-  `;
-}
-
-async function poExportExcel() {
-  try {
-    if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
-    }
-    const header = ['PO #','Wholesaler','Store','Contact','Pickup/Delivery Date','Subtotal','Discount','Grand Total','Status','Created By','Created At'];
-    const rows = poCache.map(o => [
-      o.poNumber||'', o.wholesalerName||'', o.storeName||'', o.contactNumber||'',
-      o.pickupDeliveryDate||'', parseFloat(o.subtotal||0), parseFloat(o.discount||0),
-      parseFloat(o.grandTotal||0), o.status||'', o.createdBy||'', safeFormatDateTime(o.createdAt,'')
-    ]);
-    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Purchase Orders');
-    XLSX.writeFile(wb, 'PurchaseOrders_' + Date.now() + '.xlsx');
-  } catch(e) {
-    toast('Excel export failed.', 'error');
-  }
-}
-
-async function poExportPDF() {
-  try {
-    if (typeof window.jspdf === 'undefined') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
-    }
-    if (typeof window.jspdf === 'undefined' || !window.jspdf.jsPDF) {
-      toast('PDF library failed to load.', 'error');
+    const res = await gasRequest({ action: 'getProducts' });
+    const products = (res.data || []).filter(p => p.name && p.name.trim());
+    if (!products.length) {
+      el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div>No products found.</div></div>';
       return;
     }
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF();
-    doc.setFontSize(14);
-    doc.text('Purchase Orders (Wholesaler) Report', 14, 16);
-    doc.setFontSize(9);
-    let y = 26;
-    doc.text('PO #', 14, y); doc.text('Wholesaler', 50, y); doc.text('Grand Total', 120, y); doc.text('Status', 160, y);
-    y += 6;
-    poCache.forEach(o => {
-      if (y > 280) { doc.addPage(); y = 16; }
-      doc.text(String(o.poNumber||''), 14, y);
-      doc.text(String(o.wholesalerName||'').substring(0,28), 50, y);
-      doc.text('P' + parseFloat(o.grandTotal||0).toFixed(2), 120, y);
-      doc.text(String(o.status||''), 160, y);
-      y += 6;
-    });
-    doc.save('PurchaseOrders_' + Date.now() + '.pdf');
+    audit_current = products.map(p => ({
+      productId:     p.id,
+      productName:   p.name || '',
+      category:      p.category || '\u2014',
+      posStockPcs:   parseInt(p.qtyPcs   || 0),
+      posStockPacks: parseInt(p.qtyPacks || 0),
+      actualCount:   '',
+      variance:      '',
+      remarks:       '',
+      dateCounted:   '',
+      countedBy:     '',
+    }));
+    audit_sessionId = null;
+    audit_renderTable(el);
   } catch(e) {
-    toast('PDF export failed.', 'error');
+    el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div>Failed to load products.</div></div>';
+    toast('Could not load products for audit.', 'error');
   }
 }
 
-// ═══════════════════════════════════════════════
-// DAILY INVENTORY CHECKING — new isolated module
-// Workflow: Opening Inventory → Selling → Closing Inventory → History
-// Pieces and Packs tracked separately throughout (no pack-to-piece
-// conversion — matches how Products/Inventory already work).
-// Reuses existing CSS classes only — no new visual styling except a
-// small print-only stylesheet block (needed for the A4 print layout,
-// scoped so it never affects on-screen UI).
-// ═══════════════════════════════════════════════
-let diTab = 'opening';
-let diCache = [];
-let diTodaySoldQty = {};
-let diDraftOpening = {};   // productId -> {addPcs, addPacks, actualPcs, actualPacks}
-let diDraftClosing = {};   // productId -> {actualPcs, actualPacks}
-let diSearchQ = '';
-let diCategoryFilter = '';
-let diPage = 1;
-const DI_PAGE_SIZE = 50;
-
-function diTodayStr() {
-  const d = new Date();
-  const yyyy = d.getFullYear(), mm = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
-  return `${yyyy}-${mm}-${dd}`;
-}
-function diYesterdayStr() {
-  const d = new Date(); d.setDate(d.getDate() - 1);
-  const yyyy = d.getFullYear(), mm = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-async function renderDailyInventory() {
-  document.getElementById('pageContent').innerHTML = `
-    <div class="po-subnav" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
-      ${[
-        ['opening', 'Opening Inventory'],
-        ['closing', 'Closing Inventory'],
-        ['history', 'History'],
-      ].map(([id, label]) => `
-        <button class="btn ${diTab === id ? 'btn-primary' : 'btn-ghost'} btn-sm" data-di-tab="${id}" onclick="diSwitchTab('${id}')">${label}</button>
-      `).join('')}
-    </div>
-    <div id="diTabContent"><div class="loading-spinner"><div class="spinner"></div> Loading...</div></div>
-  `;
-  // BUG FIX (root cause of Opening Stock showing outdated values): was
-  // `if (!allProducts.length)`, which only loaded products ONCE per
-  // session — any Inventory edit made after that was invisible here.
-  // Always refresh so POS Stock always reflects the latest Current Stock
-  // from Inventory, same as the POS page already does.
-  await loadProducts();
-  await diLoadRecords();
-  await diRenderTab(diTab);
-}
-
-function diSwitchTab(tab) {
-  diTab = tab;
-  diPage = 1;
-  document.querySelectorAll('[data-di-tab]').forEach(b => {
-    b.classList.toggle('btn-primary', b.dataset.diTab === tab);
-    b.classList.toggle('btn-ghost', b.dataset.diTab !== tab);
-  });
-  diRenderTab(tab);
-}
-
-async function diRenderTab(tab) {
-  const el = document.getElementById('diTabContent');
+function audit_renderTable(container) {
+  if (!audit_current || !audit_current.length) return;
+  const el  = container || document.getElementById('auditContent');
   if (!el) return;
-  el.innerHTML = `<div class="loading-spinner"><div class="spinner"></div> Loading...</div>`;
-  if (tab === 'opening') return diRenderOpeningTab();
-  if (tab === 'closing') return diRenderClosingTab();
-  if (tab === 'history') return diRenderHistoryTab();
+  const now     = new Date();
+  const dateStr = localDateStr(now);
+
+  const rows = audit_current.map(function(r, i) {
+    const actualVal = r.actualCount !== '' ? parseInt(r.actualCount) : '';
+    const variance  = actualVal !== '' ? actualVal - r.posStockPcs : '';
+    const varClass  = variance === '' ? '' : variance > 0 ? 'text-green' : variance < 0 ? 'text-red' : 'text-muted';
+    const varDisp   = variance === '' ? '\u2014' : (variance > 0 ? '+' : '') + variance;
+    return '<tr>' +
+      '<td style="font-size:0.85rem"><b>' + esc(r.productName) + '</b></td>' +
+      '<td style="font-size:0.8rem">' + esc(r.category) + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + r.posStockPcs + '</td>' +
+      '<td style="text-align:center">' +
+        '<input type="number" min="0" ' +
+          'data-idx="' + i + '" ' +
+          'value="' + (r.actualCount !== '' ? r.actualCount : '') + '" ' +
+          'placeholder="0" ' +
+          'oninput="audit_onCount(this,' + i + ')" ' +
+          'style="width:72px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;text-align:center;font-family:var(--font-main);font-size:0.9rem">' +
+      '</td>' +
+      '<td class="fw-700 ' + varClass + '" style="text-align:center" id="audit_var_' + i + '">' + varDisp + '</td>' +
+      '<td>' +
+        '<input type="text" ' +
+          'value="' + esc(r.remarks || '') + '" ' +
+          'placeholder="Remarks..." ' +
+          'oninput="audit_onRemark(this,' + i + ')" ' +
+          'style="width:130px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-family:var(--font-main);font-size:0.8rem">' +
+      '</td>' +
+      '<td style="font-size:0.78rem;white-space:nowrap">' + (r.dateCounted || dateStr) + '</td>' +
+      '<td style="font-size:0.78rem">' + esc(r.countedBy || (currentUser ? currentUser.name : '') || '') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML =
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">' +
+      '<button class="btn btn-success" onclick="audit_saveSession()">Save Audit Session</button>' +
+      '<button class="btn btn-primary" onclick="audit_exportExcel()">Export Excel</button>' +
+      '<button class="btn btn-ghost" onclick="audit_printAudit()">Print</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="audit_renderPage()">Cancel</button>' +
+      '<span style="font-size:0.78rem;color:var(--text3);margin-left:auto">Variance = Actual Count \u2212 POS Stock</span>' +
+    '</div>' +
+    '<div class="tbl-wrap" style="max-height:65vh;overflow-y:auto">' +
+      '<table>' +
+        '<thead><tr>' +
+          '<th>Product Name</th><th>Category</th><th>POS Stock</th>' +
+          '<th>Actual Count</th><th>Variance</th><th>Remarks</th>' +
+          '<th>Date Counted</th><th>Counted By</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>';
 }
 
-async function diLoadRecords() {
-  try {
-    const res = await gasRequest({ action: 'getDailyInventory' });
-    diCache = res.data || [];
-    return diCache;
-  } catch(e) {
-    toast('Could not load Daily Inventory records.', 'error');
-    return [];
-  }
-}
-
-function diGetRecordByDate(dateStr) {
-  return diCache.find(r => r.date === dateStr) || null;
-}
-
-// Looks up yesterday's Closing actual counts for a product; falls back to
-// the live Inventory balance if no Closing was recorded (per spec).
-function diGetPosStock(productId) {
-  const y = diGetRecordByDate(diYesterdayStr());
-  if (y && y.closingCompleted === 'true') {
-    try {
-      const items = JSON.parse(y.closingItems || '[]');
-      const found = items.find(it => it.productId === productId);
-      if (found) return { pcs: parseFloat(found.actualPcs)||0, packs: parseFloat(found.actualPacks)||0, source: 'closing' };
-    } catch(e) {}
-  }
-  const p = allProducts.find(x => x.id === productId);
-  return { pcs: parseFloat(p?.qtyPcs||0)||0, packs: parseFloat(p?.qtyPacks||0)||0, source: 'live' };
-}
-
-function diVariance(actual, expected) {
-  if (actual === '' || actual === null || actual === undefined) return null; // not counted
-  return (parseFloat(actual)||0) - (parseFloat(expected)||0);
-}
-function diRemarks(varPcs, varPacks) {
-  if (varPcs === null && varPacks === null) return 'NOT COUNTED';
-  const v1 = varPcs || 0, v2 = varPacks || 0;
-  if (v1 === 0 && v2 === 0) return 'MATCH';
-  if (v1 < 0 || v2 < 0) return 'SHORT';
-  return 'OVER';
-}
-function diRemarksBadge(remarks) {
-  const map = {
-    'MATCH':       '<span class="badge-in-stock">MATCH</span>',
-    'SHORT':       '<span class="badge-out">SHORT</span>',
-    'OVER':        '<span class="badge-low">OVER</span>',
-    'NOT COUNTED': '<span class="text-muted" style="font-size:0.78rem">Not counted</span>',
-  };
-  return map[remarks] || esc(remarks);
-}
-
-function diCategoryOptions() {
-  const cats = [...new Set(allProducts.map(p => p.category).filter(Boolean))].sort();
-  return cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
-}
-
-function diFilteredProducts() {
-  const q = diSearchQ.toLowerCase().trim();
-  return allProducts.filter(p => {
-    if (diCategoryFilter && p.category !== diCategoryFilter) return false;
-    if (!q) return true;
-    return (p.name||'').toLowerCase().includes(q) || (p.barcode||'').toLowerCase().includes(q) || (p.id||'').toLowerCase().includes(q);
-  });
-}
-
-function diSummaryCards(items) {
-  const total = items.length;
-  const counted = items.filter(it => it.remarks !== 'NOT COUNTED');
-  const short = items.filter(it => it.remarks === 'SHORT').length;
-  const over  = items.filter(it => it.remarks === 'OVER').length;
-  const withVariance = short + over;
-  const accuracy = counted.length ? (((counted.length - withVariance) / counted.length) * 100).toFixed(1) : 'N/A';
-  return `
-    <div class="kpi-grid">
-      <div class="kpi-card kpi-blue"><div class="kpi-label">Total Items</div><div class="kpi-value">${total}</div></div>
-      <div class="kpi-card kpi-grad"><div class="kpi-label">Items with Variance</div><div class="kpi-value">${withVariance}</div></div>
-      <div class="kpi-card kpi-orange"><div class="kpi-label">Total Short</div><div class="kpi-value">${short}</div></div>
-      <div class="kpi-card kpi-green"><div class="kpi-label">Total Over</div><div class="kpi-value">${over}</div></div>
-      <div class="kpi-card kpi-blue"><div class="kpi-label">Inventory Accuracy</div><div class="kpi-value">${accuracy}${accuracy!=='N/A'?'%':''}</div></div>
-    </div>
-  `;
-}
-
-function diFilterBar(searchId, catId, onFilter) {
-  return `
-    <div class="card" style="margin-bottom:16px">
-      <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
-        <div class="field" style="margin:0">
-          <label for="${searchId}">Search (Item Name, SKU, Barcode)</label>
-          <input type="text" id="${searchId}" name="${searchId}" value="${esc(diSearchQ)}" oninput="${onFilter}" placeholder="Search...">
-        </div>
-        <div class="field" style="margin:0">
-          <label for="${catId}">Category</label>
-          <select id="${catId}" name="${catId}" onchange="${onFilter}">
-            <option value="">Show All</option>
-            ${diCategoryOptions()}
-          </select>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-// ═══ OPENING INVENTORY ═══
-async function diRenderOpeningTab() {
-  const el = document.getElementById('diTabContent');
-  const today = diGetRecordByDate(diTodayStr());
-
-  if (today && today.openingCompleted === 'true') {
-    let items = [];
-    try { items = JSON.parse(today.openingItems || '[]'); } catch(e) {}
-    if (!el) return;
-    el.innerHTML = `
-      <div class="card" style="background:var(--bg2);margin-bottom:16px">
-        <b>Opening Inventory for ${esc(today.date)} is already recorded</b> by ${esc(today.openingBy||'—')}.
-      </div>
-      ${diSummaryCards(items)}
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <div class="card-title" style="margin:0">Opening Inventory — ${esc(today.date)}</div>
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-ghost btn-sm" onclick="diSaveRecordImage('opening', ${JSON.stringify(today.date)})"> Save Image</button>
-            <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(today.date)}, 'opening')"> Excel</button>
-          </div>
-        </div>
-        ${diRenderReadonlyTable(items, 'opening')}
-      </div>
-    `;
-    return;
-  }
-
-  diDraftOpening = diDraftOpening || {};
-  if (!el) return;
-  el.innerHTML = `
-    <div id="diOpeningSummary"></div>
-    ${diFilterBar('diOpenSearch','diOpenCategory','diOpeningApplyFilter()')}
-    <div class="card">
-      <div id="diOpeningTableWrap"></div>
-      <div id="diOpeningPagination" style="margin-top:10px"></div>
-    </div>
-    <div style="display:flex;gap:10px;margin-top:14px">
-      <button class="btn btn-primary" id="diOpeningSaveBtn" onclick="diSaveOpening()"> Save Opening Inventory</button>
-    </div>
-  `;
-  diRenderOpeningTable();
-}
-
-function diOpeningApplyFilter() {
-  diSearchQ = document.getElementById('diOpenSearch')?.value || '';
-  diCategoryFilter = document.getElementById('diOpenCategory')?.value || '';
-  diPage = 1;
-  diRenderOpeningTable();
-}
-
-function diOpeningRowData(p) {
-  const pos = diGetPosStock(p.id);
-  const draft = diDraftOpening[p.id] || { addPcs: 0, addPacks: 0, actualPcs: '', actualPacks: '' };
-  const totalPcs = pos.pcs + (parseFloat(draft.addPcs)||0);
-  const totalPacks = pos.packs + (parseFloat(draft.addPacks)||0);
-  const varPcs = diVariance(draft.actualPcs, totalPcs);
-  const varPacks = diVariance(draft.actualPacks, totalPacks);
-  const remarks = diRemarks(varPcs, varPacks);
-  return { productId: p.id, name: p.name, category: p.category||'',
-    posStockPcs: pos.pcs, posStockPacks: pos.packs,
-    addPcs: draft.addPcs, addPacks: draft.addPacks,
-    totalPcs, totalPacks,
-    actualPcs: draft.actualPcs, actualPacks: draft.actualPacks,
-    variancePcs: varPcs, variancePacks: varPacks, remarks, hasPack: parseFloat(p.pricePack||0) > 0 };
-}
-
-function diRenderOpeningTable() {
-  const wrap = document.getElementById('diOpeningTableWrap');
-  const pagEl = document.getElementById('diOpeningPagination');
-  const sumEl = document.getElementById('diOpeningSummary');
-  if (!wrap) return;
-
-  const filtered = diFilteredProducts();
-  const allRows = filtered.map(diOpeningRowData);
-  if (sumEl) sumEl.innerHTML = diSummaryCards(allRows);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / DI_PAGE_SIZE));
-  diPage = Math.min(diPage, totalPages);
-  const pageProducts = filtered.slice((diPage-1)*DI_PAGE_SIZE, diPage*DI_PAGE_SIZE);
-  const pageRows = pageProducts.map(diOpeningRowData);
-
-  if (!pageRows.length) {
-    wrap.innerHTML = '<div class="no-data"><div class="no-data-text">No matching products.</div></div>';
-    if (pagEl) pagEl.innerHTML = '';
-    return;
-  }
-
-  wrap.innerHTML = `
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Item</th><th>POS Stock</th><th>Additional</th><th>Total Stocks</th><th>Actual Counts</th><th>Variance</th><th>Remarks</th></tr></thead>
-      <tbody>${pageRows.map(r => `<tr>
-        <td>${esc(r.name)}</td>
-        <td class="text-muted" style="font-size:0.82rem">${r.posStockPcs} pcs${r.hasPack ? ` / ${r.posStockPacks} packs` : ''}</td>
-        <td>
-          <input type="number" min="0" id="di_o_addPcs_${r.productId}" name="di_o_addPcs_${r.productId}" aria-label="Additional pieces for ${esc(r.name)}" value="${r.addPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','addPcs',this.value)" onkeydown="diHandleEnterKey(event)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_o_addPacks_${r.productId}" name="di_o_addPacks_${r.productId}" aria-label="Additional packs for ${esc(r.name)}" value="${r.addPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','addPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
-        </td>
-        <td class="fw-700">${r.totalPcs} pcs${r.hasPack ? ` / ${r.totalPacks} packs` : ''}</td>
-        <td>
-          <input type="number" min="0" id="di_o_actPcs_${r.productId}" name="di_o_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateOpeningDraft('${r.productId}','actualPcs',this.value)" onkeydown="diHandleEnterKey(event)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_o_actPacks_${r.productId}" name="di_o_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateOpeningDraft('${r.productId}','actualPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
-        </td>
-        <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
-        <td>${diRemarksBadge(r.remarks)}</td>
-      </tr>`).join('')}</tbody>
-    </table></div>
-  `;
-
-  if (pagEl) {
-    pagEl.innerHTML = `
-      <div style="display:flex;justify-content:center;align-items:center;gap:10px">
-        <button class="btn btn-ghost btn-sm" ${diPage<=1?'disabled':''} onclick="diChangePage(-1)">‹ Prev</button>
-        <span class="text-muted" style="font-size:0.85rem">Page ${diPage} of ${totalPages} (${filtered.length} items)</span>
-        <button class="btn btn-ghost btn-sm" ${diPage>=totalPages?'disabled':''} onclick="diChangePage(1)">Next ›</button>
-      </div>
-    `;
-  }
-}
-
-function diChangePage(delta) {
-  diPage += delta;
-  if (diTab === 'opening') diRenderOpeningTable();
-  else if (diTab === 'closing') diRenderClosingTable();
-}
-
-// ─── ENTER-TO-NEXT-FIELD (Daily Inventory quick input) ───
-// Pressing Enter in any pcs/packs box jumps to the next input in the same
-// table (in DOM order), so encoders don't have to reach for the mouse/Tab.
-// Works automatically whether or not a product has a "packs" field, since
-// that input simply isn't in the DOM when hasPack is false.
-function diHandleEnterKey(e) {
-  if (e.key !== 'Enter') return;
-  e.preventDefault();
-  const wrap = e.target.closest('.tbl-wrap');
-  if (!wrap) return;
-  const inputs = Array.from(wrap.querySelectorAll('input'));
-  const idx = inputs.indexOf(e.target);
-  if (idx === -1) return;
-  const next = inputs[idx + 1];
-  if (next) {
-    next.focus();
-    next.select();
+function audit_onCount(input, idx) {
+  if (!audit_current || !audit_current[idx]) return;
+  const val = input.value.trim();
+  audit_current[idx].actualCount = val !== '' ? parseInt(val) : '';
+  audit_current[idx].dateCounted = localDateStr(new Date());
+  audit_current[idx].countedBy   = currentUser ? (currentUser.name || currentUser.username || '') : '';
+  const varEl = document.getElementById('audit_var_' + idx);
+  if (!varEl) return;
+  const actual = val !== '' ? parseInt(val) : null;
+  const pos    = audit_current[idx].posStockPcs;
+  if (actual === null) {
+    varEl.textContent = '\u2014';
+    varEl.className   = 'fw-700 text-muted';
   } else {
-    e.target.blur(); // last field on the page — nothing more to jump to
+    const v = actual - pos;
+    varEl.textContent = (v > 0 ? '+' : '') + v;
+    varEl.className   = 'fw-700 ' + (v > 0 ? 'text-green' : v < 0 ? 'text-red' : 'text-muted');
   }
 }
 
-function diUpdateOpeningDraft(productId, field, val) {
-  if (!diDraftOpening[productId]) diDraftOpening[productId] = { addPcs: 0, addPacks: 0, actualPcs: '', actualPacks: '' };
-  diDraftOpening[productId][field] = val === '' ? '' : (parseFloat(val)||0);
-  diRenderOpeningTable();
+function audit_onRemark(input, idx) {
+  if (!audit_current || !audit_current[idx]) return;
+  audit_current[idx].remarks = input.value;
 }
 
-// Shared batch-sender for Opening/Closing saves — same batch size already
-// proven safe by the existing bulk product import (avoids exceeding the URL
-// length limit of the GAS GET+base64 request, which is what was causing the
-// "Network Error" on stores with more than a handful of products).
-const DI_SAVE_BATCH_SIZE = 15;
-
-async function diSaveInBatches(phase, allRows, btn, defaultLabel) {
-  const batches = [];
-  for (let i = 0; i < allRows.length; i += DI_SAVE_BATCH_SIZE) {
-    batches.push(allRows.slice(i, i + DI_SAVE_BATCH_SIZE));
-  }
-  if (!batches.length) { toast('No items to save.', 'warning'); return false; }
-
-  for (let b = 0; b < batches.length; b++) {
-    if (btn) btn.textContent = `Saving... (${b+1}/${batches.length})`;
-    try {
-      const res = await gasPost({
-        action: phase === 'opening' ? 'saveOpeningInventory' : 'saveClosingInventory',
-        caller_role: currentUser.role,
-        date: diTodayStr(),
-        items: JSON.stringify(batches[b]),
-        isFirstBatch: b === 0,
-        isLastBatch: b === batches.length - 1,
-        createdBy: currentUser.name || currentUser.username || '',
-      });
-      if (!res.success) {
-        toast(res.message || 'Error saving.', 'error');
-        if (btn) { btn.disabled = false; btn.textContent = defaultLabel; }
-        return false;
-      }
-    } catch(e) {
-      toast('Network error. Please try again.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = defaultLabel; }
-      return false;
+async function audit_saveSession() {
+  if (!audit_current || !audit_current.length) { toast('Nothing to save.', 'warning'); return; }
+  const counted = audit_current.filter(function(r) { return r.actualCount !== ''; });
+  if (!counted.length) { toast('Enter at least one Actual Count before saving.', 'warning'); return; }
+  const now       = new Date();
+  const sessionId = audit_sessionId || ('AUD-' + Date.now());
+  const payload   = {
+    action:    'audit_saveSession',
+    sessionId: sessionId,
+    auditedBy: currentUser ? (currentUser.name || currentUser.username || '') : '',
+    auditDate: now.toISOString(),
+    rows:      JSON.stringify(audit_current),
+  };
+  const btn = document.querySelector('#auditContent .btn-success');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+  try {
+    const res = await gasPost(payload);
+    if (res.success) {
+      audit_sessionId = sessionId;
+      toast('Audit session saved!', 'success');
+      if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
+    } else {
+      toast(res.message || 'Error saving audit.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
     }
-    // Small pause between batches to avoid GAS rate limits (same pattern as bulk import)
-    if (b < batches.length - 1) await new Promise(r => setTimeout(r, 400));
-  }
-  return true;
-}
-
-async function diSaveOpening() {
-  const allRows = allProducts.map(diOpeningRowData);
-  const btn = document.getElementById('diOpeningSaveBtn');
-  if (btn) { btn.disabled = true; }
-  const ok = await diSaveInBatches('opening', allRows, btn, ' Save Opening Inventory');
-  if (ok) {
-    toast('Opening Inventory saved!', 'success');
-    diDraftOpening = {};
-    await diLoadRecords();
-    diRenderOpeningTab();
-  }
-}
-
-// ═══ CLOSING INVENTORY ═══
-async function diRenderClosingTab() {
-  const el = document.getElementById('diTabContent');
-  const today = diGetRecordByDate(diTodayStr());
-
-  if (!today || today.openingCompleted !== 'true') {
-    if (!el) return;
-    el.innerHTML = `
-      <div class="card" style="background:var(--bg2)">
-        <b>Opening Inventory must be completed first</b> before you can do Closing Inventory for today.
-        <div style="margin-top:10px"><button class="btn btn-primary btn-sm" onclick="diSwitchTab('opening')">Go to Opening Inventory</button></div>
-      </div>
-    `;
-    return;
-  }
-
-  if (today.closingCompleted === 'true') {
-    let items = [];
-    try { items = JSON.parse(today.closingItems || '[]'); } catch(e) {}
-    if (!el) return;
-    el.innerHTML = `
-      <div class="card" style="background:var(--bg2);margin-bottom:16px">
-        <b>Closing Inventory for ${esc(today.date)} is already recorded</b> by ${esc(today.closingBy||'—')}.
-      </div>
-      ${diSummaryCards(items)}
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-          <div class="card-title" style="margin:0">Closing Inventory — ${esc(today.date)}</div>
-          <div style="display:flex;gap:8px">
-            <button class="btn btn-ghost btn-sm" onclick="diSaveRecordImage('closing', ${JSON.stringify(today.date)})"> Save Image</button>
-            <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(today.date)}, 'closing')"> Excel</button>
-          </div>
-        </div>
-        ${diRenderReadonlyTable(items, 'closing')}
-      </div>
-    `;
-    return;
-  }
-
-  if (!el) return;
-  el.innerHTML = `<div class="loading-spinner"><div class="spinner"></div> Loading today's sales...</div>`;
-  try {
-    const res = await gasRequest({ action: 'getTodaySoldQty' });
-    diTodaySoldQty = res.data || {};
   } catch(e) {
-    diTodaySoldQty = {};
-    toast('Could not load today\'s sales — Sold Today may show as 0.', 'warning');
-  }
-
-  diDraftClosing = diDraftClosing || {};
-  el.innerHTML = `
-    <div id="diClosingSummary"></div>
-    ${diFilterBar('diCloseSearch','diCloseCategory','diClosingApplyFilter()')}
-    <div class="card">
-      <div id="diClosingTableWrap"></div>
-      <div id="diClosingPagination" style="margin-top:10px"></div>
-    </div>
-    <div style="display:flex;gap:10px;margin-top:14px">
-      <button class="btn btn-primary" id="diClosingSaveBtn" onclick="diSaveClosing()"> Save Closing Inventory</button>
-    </div>
-  `;
-  diRenderClosingTable();
-}
-
-function diClosingApplyFilter() {
-  diSearchQ = document.getElementById('diCloseSearch')?.value || '';
-  diCategoryFilter = document.getElementById('diCloseCategory')?.value || '';
-  diPage = 1;
-  diRenderClosingTable();
-}
-
-function diClosingOpeningItems() {
-  const today = diGetRecordByDate(diTodayStr());
-  if (!today) return [];
-  try { return JSON.parse(today.openingItems || '[]'); } catch(e) { return []; }
-}
-
-function diClosingRowData(openingItem) {
-  const sold = diTodaySoldQty[openingItem.productId] || { pcs: 0, packs: 0 };
-  const draft = diDraftClosing[openingItem.productId] || { actualPcs: '', actualPacks: '' };
-  const expectedPcs = (parseFloat(openingItem.totalPcs)||0) - (parseFloat(sold.pcs)||0);
-  const expectedPacks = (parseFloat(openingItem.totalPacks)||0) - (parseFloat(sold.packs)||0);
-  const varPcs = diVariance(draft.actualPcs, expectedPcs);
-  const varPacks = diVariance(draft.actualPacks, expectedPacks);
-  const remarks = diRemarks(varPcs, varPacks);
-  return { productId: openingItem.productId, name: openingItem.name, category: openingItem.category||'',
-    openingTotalPcs: openingItem.totalPcs, openingTotalPacks: openingItem.totalPacks,
-    soldPcs: sold.pcs, soldPacks: sold.packs,
-    expectedPcs, expectedPacks,
-    actualPcs: draft.actualPcs, actualPacks: draft.actualPacks,
-    variancePcs: varPcs, variancePacks: varPacks, remarks, hasPack: openingItem.hasPack };
-}
-
-function diRenderClosingTable() {
-  const wrap = document.getElementById('diClosingTableWrap');
-  const pagEl = document.getElementById('diClosingPagination');
-  const sumEl = document.getElementById('diClosingSummary');
-  if (!wrap) return;
-
-  const q = diSearchQ.toLowerCase().trim();
-  const openingItems = diClosingOpeningItems().filter(it => {
-    if (diCategoryFilter && it.category !== diCategoryFilter) return false;
-    if (!q) return true;
-    return (it.name||'').toLowerCase().includes(q);
-  });
-  const allRows = openingItems.map(diClosingRowData);
-  if (sumEl) sumEl.innerHTML = diSummaryCards(allRows);
-
-  const totalPages = Math.max(1, Math.ceil(openingItems.length / DI_PAGE_SIZE));
-  diPage = Math.min(diPage, totalPages);
-  const pageItems = openingItems.slice((diPage-1)*DI_PAGE_SIZE, diPage*DI_PAGE_SIZE);
-  const pageRows = pageItems.map(diClosingRowData);
-
-  if (!pageRows.length) {
-    wrap.innerHTML = '<div class="no-data"><div class="no-data-text">No matching products.</div></div>';
-    if (pagEl) pagEl.innerHTML = '';
-    return;
-  }
-
-  wrap.innerHTML = `
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Item</th><th>Opening Total</th><th>Sold Today</th><th>Expected Remaining</th><th>Actual Counts</th><th>Variance</th><th>Remarks</th></tr></thead>
-      <tbody>${pageRows.map(r => `<tr>
-        <td>${esc(r.name)}</td>
-        <td class="text-muted" style="font-size:0.82rem">${r.openingTotalPcs} pcs${r.hasPack ? ` / ${r.openingTotalPacks} packs` : ''}</td>
-        <td class="text-muted" style="font-size:0.82rem">${r.soldPcs} pcs${r.hasPack ? ` / ${r.soldPacks} packs` : ''}</td>
-        <td class="fw-700">${r.expectedPcs} pcs${r.hasPack ? ` / ${r.expectedPacks} packs` : ''}</td>
-        <td>
-          <input type="number" min="0" id="di_c_actPcs_${r.productId}" name="di_c_actPcs_${r.productId}" aria-label="Actual piece count for ${esc(r.name)}" value="${r.actualPcs}" style="width:60px" placeholder="pcs" onchange="diUpdateClosingDraft('${r.productId}','actualPcs',this.value)" onkeydown="diHandleEnterKey(event)">
-          ${r.hasPack ? `<input type="number" min="0" id="di_c_actPacks_${r.productId}" name="di_c_actPacks_${r.productId}" aria-label="Actual pack count for ${esc(r.name)}" value="${r.actualPacks}" style="width:60px" placeholder="packs" onchange="diUpdateClosingDraft('${r.productId}','actualPacks',this.value)" onkeydown="diHandleEnterKey(event)">` : ''}
-        </td>
-        <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack ? ` / ${r.variancePacks===null?'—':r.variancePacks}` : ''}</td>
-        <td>${diRemarksBadge(r.remarks)}</td>
-      </tr>`).join('')}</tbody>
-    </table></div>
-  `;
-
-  if (pagEl) {
-    pagEl.innerHTML = `
-      <div style="display:flex;justify-content:center;align-items:center;gap:10px">
-        <button class="btn btn-ghost btn-sm" ${diPage<=1?'disabled':''} onclick="diChangePage(-1)">‹ Prev</button>
-        <span class="text-muted" style="font-size:0.85rem">Page ${diPage} of ${totalPages} (${openingItems.length} items)</span>
-        <button class="btn btn-ghost btn-sm" ${diPage>=totalPages?'disabled':''} onclick="diChangePage(1)">Next ›</button>
-      </div>
-    `;
+    toast('Network error saving audit.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
   }
 }
 
-function diUpdateClosingDraft(productId, field, val) {
-  if (!diDraftClosing[productId]) diDraftClosing[productId] = { actualPcs: '', actualPacks: '' };
-  diDraftClosing[productId][field] = val === '' ? '' : (parseFloat(val)||0);
-  diRenderClosingTable();
-}
-
-async function diSaveClosing() {
-  const allRows = diClosingOpeningItems().map(diClosingRowData);
-  const btn = document.getElementById('diClosingSaveBtn');
-  if (btn) { btn.disabled = true; }
-  const ok = await diSaveInBatches('closing', allRows, btn, ' Save Closing Inventory');
-  if (ok) {
-    toast('Closing Inventory saved!', 'success');
-    diDraftClosing = {};
-    await diLoadRecords();
-    diRenderClosingTab();
-  }
-}
-
-// ═══ SHARED: read-only item table (used by History view + already-completed Opening/Closing) ═══
-function diRenderReadonlyTable(items, type) {
-  if (!items.length) return '<div class="no-data"><div class="no-data-text">No items recorded.</div></div>';
-  const isOpening = type === 'opening';
-  return `
-    <div class="tbl-wrap"><table>
-      <thead><tr>
-        <th>Item</th>
-        <th>${isOpening ? 'POS Stock' : 'Opening Total'}</th>
-        <th>${isOpening ? 'Additional' : 'Sold Today'}</th>
-        <th>${isOpening ? 'Total Stocks' : 'Expected Remaining'}</th>
-        <th>Actual Counts</th><th>Variance</th><th>Remarks</th>
-      </tr></thead>
-      <tbody>${items.map(r => `<tr>
-        <td>${esc(r.name)}</td>
-        <td class="text-muted" style="font-size:0.82rem">${isOpening ? `${r.posStockPcs} pcs${r.hasPack?` / ${r.posStockPacks} packs`:''}` : `${r.openingTotalPcs} pcs${r.hasPack?` / ${r.openingTotalPacks} packs`:''}`}</td>
-        <td class="text-muted" style="font-size:0.82rem">${isOpening ? `${r.addPcs} pcs${r.hasPack?` / ${r.addPacks} packs`:''}` : `${r.soldPcs} pcs${r.hasPack?` / ${r.soldPacks} packs`:''}`}</td>
-        <td class="fw-700">${isOpening ? `${r.totalPcs} pcs${r.hasPack?` / ${r.totalPacks} packs`:''}` : `${r.expectedPcs} pcs${r.hasPack?` / ${r.expectedPacks} packs`:''}`}</td>
-        <td>${r.actualPcs===''?'—':r.actualPcs} pcs${r.hasPack?` / ${r.actualPacks===''?'—':r.actualPacks} packs`:''}</td>
-        <td>${r.variancePcs===null?'—':r.variancePcs}${r.hasPack?` / ${r.variancePacks===null?'—':r.variancePacks}`:''}</td>
-        <td>${diRemarksBadge(r.remarks)}</td>
-      </tr>`).join('')}</tbody>
-    </table></div>
-  `;
-}
-
-// ═══ HISTORY ═══
-async function diRenderHistoryTab() {
-  const el = document.getElementById('diTabContent');
+async function audit_loadHistory() {
+  const el = document.getElementById('auditContent');
   if (!el) return;
-  const sorted = [...diCache].sort((a,b) => (b.date||'').localeCompare(a.date||''));
-
-  if (!sorted.length) {
-    el.innerHTML = '<div class="card"><div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No Daily Inventory records yet.</div></div></div>';
-    return;
-  }
-
-  const canDelete = currentUser.role === 'admin';
-  el.innerHTML = `
-    <div class="card"><div class="tbl-wrap"><table>
-      <thead><tr><th>Date</th><th>Opening</th><th>Closing</th><th>Opening Summary</th><th>Closing Summary</th><th>Actions</th></tr></thead>
-      <tbody>${sorted.map(r => {
-        let openItems = [], closeItems = [];
-        try { openItems = JSON.parse(r.openingItems||'[]'); } catch(e){}
-        try { closeItems = JSON.parse(r.closingItems||'[]'); } catch(e){}
-        const openSum = r.openingCompleted === 'true' ? `${openItems.filter(i=>i.remarks==='SHORT').length} short, ${openItems.filter(i=>i.remarks==='OVER').length} over` : '—';
-        const closeSum = r.closingCompleted === 'true' ? `${closeItems.filter(i=>i.remarks==='SHORT').length} short, ${closeItems.filter(i=>i.remarks==='OVER').length} over` : '—';
-        return `<tr>
-          <td class="fw-700">${esc(r.date)}</td>
-          <td>${r.openingCompleted === 'true' ? '<span class="badge-in-stock">Done</span>' : '<span class="text-muted">—</span>'}</td>
-          <td>${r.closingCompleted === 'true' ? '<span class="badge-in-stock">Done</span>' : '<span class="text-muted">—</span>'}</td>
-          <td class="text-muted" style="font-size:0.82rem">${openSum}</td>
-          <td class="text-muted" style="font-size:0.82rem">${closeSum}</td>
-          <td>
-            <div style="display:flex;gap:5px;flex-wrap:wrap">
-              <button class="inv-btn" onclick="diViewRecord('${r.id}')">View</button>
-              ${canDelete && r.closingCompleted !== 'true' ? `<button class="inv-btn inv-btn-del" onclick="diDeleteRecord('${r.id}')">Del</button>` : ''}
-            </div>
-          </td>
-        </tr>`;
-      }).join('')}</tbody>
-    </table></div></div>
-  `;
-}
-
-function diViewRecord(id) {
-  const r = diCache.find(x => x.id === id);
-  if (!r) return;
-  let openItems = [], closeItems = [];
-  try { openItems = JSON.parse(r.openingItems||'[]'); } catch(e){}
-  try { closeItems = JSON.parse(r.closingItems||'[]'); } catch(e){}
-
-  openModal(`
-    <div class="modal-title">Daily Inventory — ${esc(r.date)}</div>
-    <div style="display:flex;gap:8px;margin-bottom:14px">
-      <button class="btn btn-ghost btn-sm" onclick="diSaveRecordImage('opening', ${JSON.stringify(r.date)})"> Save Opening Image</button>
-      <button class="btn btn-ghost btn-sm" onclick="diSaveRecordImage('closing', ${JSON.stringify(r.date)})"> Save Closing Image</button>
-      <button class="btn btn-primary btn-sm" onclick="diExportExcel(${JSON.stringify(r.date)}, 'both')"> Excel</button>
-    </div>
-    <div class="card-title">Opening Inventory ${r.openingCompleted==='true' ? '(by '+esc(r.openingBy||'—')+')' : '(not done)'}</div>
-    ${diRenderReadonlyTable(openItems, 'opening')}
-    <div class="card-title" style="margin-top:16px">Closing Inventory ${r.closingCompleted==='true' ? '(by '+esc(r.closingBy||'—')+')' : '(not done)'}</div>
-    ${diRenderReadonlyTable(closeItems, 'closing')}
-  `);
-}
-
-async function diDeleteRecord(id) {
-  const r = diCache.find(x => x.id === id);
-  if (!confirm(`Delete Daily Inventory record for ${r?.date||''}?\nThis cannot be undone.`)) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div> Loading...</div>';
   try {
-    const res = await gasPost({ action: 'deleteOpeningInventory', id, caller_role: currentUser.role });
-    if (res.success) { toast('Record deleted.', 'success'); await diLoadRecords(); diRenderHistoryTab(); }
-    else toast(res.message || 'Error deleting record.', 'error');
+    const res      = await gasRequest({ action: 'audit_getSessions' });
+    const sessions = res.data || [];
+    if (!sessions.length) {
+      el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div>No audit sessions saved yet.</div></div>';
+      return;
+    }
+    const grouped = {};
+    sessions.forEach(function(s) {
+      if (!grouped[s.sessionId]) {
+        grouped[s.sessionId] = { sessionId: s.sessionId, auditedBy: s.auditedBy, auditDate: s.auditDate, count: 0 };
+      }
+      grouped[s.sessionId].count++;
+    });
+    const list = Object.values(grouped).sort(function(a, b) { return b.auditDate.localeCompare(a.auditDate); });
+    const rows  = list.map(function(s) {
+      return '<tr>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(s.sessionId) + '</td>' +
+        '<td>' + safeFormatDateTime(s.auditDate) + '</td>' +
+        '<td>' + esc(s.auditedBy) + '</td>' +
+        '<td>' + s.count + ' items</td>' +
+        '<td><div style="display:flex;gap:5px">' +
+          '<button class="inv-btn inv-btn-edit" onclick="audit_viewSession(\'' + esc(s.sessionId) + '\')">View</button>' +
+          '<button class="inv-btn inv-btn-del"  onclick="audit_deleteSession(\'' + esc(s.sessionId) + '\')">Del</button>' +
+        '</div></td>' +
+      '</tr>';
+    }).join('');
+    el.innerHTML =
+      '<div style="margin-bottom:12px;display:flex;gap:8px">' +
+        '<span style="font-size:0.9rem;font-weight:600">' + list.length + ' audit session(s)</span>' +
+        '<button class="btn btn-ghost btn-sm" onclick="audit_renderPage()" style="margin-left:auto">Back</button>' +
+      '</div>' +
+      '<div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Session ID</th><th>Date</th><th>Audited By</th><th>Items</th><th>Actions</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div>';
+  } catch(e) {
+    el.innerHTML = '<div class="no-data"><div class="no-data-icon"></div><div>Failed to load history.</div></div>';
+    toast('Could not load audit history.', 'error');
+  }
+}
+
+async function audit_viewSession(sessionId) {
+  const el = document.getElementById('auditContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  try {
+    const res  = await gasRequest({ action: 'audit_getSessions', sessionId: sessionId });
+    const rows = (res.data || []).filter(function(r) { return r.sessionId === sessionId; });
+    if (!rows.length) { toast('Session not found.', 'error'); return; }
+    audit_current = rows.map(function(r) {
+      return {
+        productId:     r.productId,
+        productName:   r.productName,
+        category:      r.category,
+        posStockPcs:   parseInt(r.posStockPcs   || 0),
+        posStockPacks: parseInt(r.posStockPacks  || 0),
+        actualCount:   r.actualCount !== '' ? parseInt(r.actualCount) : '',
+        variance:      r.variance,
+        remarks:       r.remarks,
+        dateCounted:   r.dateCounted,
+        countedBy:     r.countedBy,
+      };
+    });
+    audit_sessionId = sessionId;
+    audit_renderTable(el);
+  } catch(e) {
+    toast('Could not load session.', 'error');
+  }
+}
+
+async function audit_deleteSession(sessionId) {
+  if (!confirm('Delete audit session "' + sessionId + '"?\nThis cannot be undone.')) return;
+  try {
+    const res = await gasPost({
+      action:      'audit_deleteSession',
+      sessionId:   sessionId,
+      caller_role: currentUser ? currentUser.role : '',
+    });
+    if (res.success) { toast('Audit session deleted.', 'success'); audit_loadHistory(); }
+    else toast(res.message || 'Error deleting.', 'error');
   } catch(e) { toast('Network error.', 'error'); }
 }
 
-
-// ═══ SAVE AS IMAGE ═══
-function diBuildRecordDiv_(type, dateStr) {
-  const r = diGetRecordByDate(dateStr);
-  if (!r) { toast('Record not found.', 'error'); return null; }
-  let items = [];
-  try { items = JSON.parse(type === 'opening' ? (r.openingItems||'[]') : (r.closingItems||'[]')); } catch(e) {}
-  if (!items.length) { toast('Nothing to save — no items recorded.', 'warning'); return null; }
-
-  const isOpening = type === 'opening';
-  const div = document.createElement('div');
-  div.id = 'diImageArea';
-  // Positioned off-screen (not display:none) so html2canvas can still render it.
-  div.style.cssText = 'position:absolute;left:-9999px;top:0;background:#fff';
-  div.innerHTML = `
-    <div style="padding:20px;font-family:Arial,sans-serif;font-size:11px;color:#000;width:900px">
-      <h2 style="margin:0 0 4px">AE Home Trade Corp. — Daily Inventory Checking</h2>
-      <div>${isOpening ? 'Opening' : 'Closing'} Inventory — Date: ${esc(r.date)}</div>
-      <table style="width:100%;border-collapse:collapse;margin-top:12px" border="1" cellpadding="4">
-        <thead><tr>
-          <th>Item Name</th><th>POS Stock</th><th>Additional</th><th>Total Stocks</th>
-          <th>Actual Counts</th><th>Sold</th><th>Variance</th><th>Remarks</th>
-        </tr></thead>
-        <tbody>${items.map(it => `<tr>
-          <td>${esc(it.name)}</td>
-          <td>${isOpening ? `${it.posStockPcs} pcs${it.hasPack?`/${it.posStockPacks} pk`:''}` : `${it.openingTotalPcs} pcs${it.hasPack?`/${it.openingTotalPacks} pk`:''}`}</td>
-          <td>${isOpening ? `${it.addPcs} pcs${it.hasPack?`/${it.addPacks} pk`:''}` : '—'}</td>
-          <td>${isOpening ? `${it.totalPcs} pcs${it.hasPack?`/${it.totalPacks} pk`:''}` : `${it.expectedPcs} pcs${it.hasPack?`/${it.expectedPacks} pk`:''}`}</td>
-          <td>${it.actualPcs===''?'-':it.actualPcs} pcs${it.hasPack?`/${it.actualPacks===''?'-':it.actualPacks} pk`:''}</td>
-          <td>${isOpening ? '—' : `${it.soldPcs} pcs${it.hasPack?`/${it.soldPacks} pk`:''}`}</td>
-          <td>${it.variancePcs===null?'-':it.variancePcs}${it.hasPack?`/${it.variancePacks===null?'-':it.variancePacks}`:''}</td>
-          <td>${esc(it.remarks)}</td>
-        </tr>`).join('')}</tbody>
-      </table>
-      <div style="margin-top:30px;display:flex;justify-content:space-between">
-        <div>Prepared By: _______________________</div>
-        <div>Checked By: _______________________</div>
-        <div>Date: ${esc(r.date)}</div>
-      </div>
-      <div style="margin-top:6px">Store/Branch: AE Home Trade Corp. — Vigan</div>
-    </div>
-  `;
-  return div;
-}
-
-async function diSaveRecordImage(type, dateStr) {
-  const div = diBuildRecordDiv_(type, dateStr);
-  if (!div) return;
-  document.body.appendChild(div);
-  try {
-    if (typeof html2canvas === 'undefined') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
-    }
-    const canvas = await html2canvas(div, { backgroundColor: '#ffffff', scale: 2 });
-    await new Promise(resolve => {
-      canvas.toBlob(blob => {
-        if (!blob) { toast('Could not generate image.', 'error'); resolve(); return; }
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `DailyInventory_${type}_${dateStr}.png`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        toast('Image saved!', 'success');
-        resolve();
-      }, 'image/png');
-    });
-  } catch(e) {
-    toast('Could not save image. Check your connection.', 'error');
-  } finally {
-    document.body.removeChild(div);
-  }
-}
-
-
-// ═══ EXPORT TO EXCEL ═══
-async function diExportExcel(dateStr, type) {
-  const r = diGetRecordByDate(dateStr);
-  if (!r) { toast('Record not found.', 'error'); return; }
+async function audit_exportExcel() {
+  if (!audit_current || !audit_current.length) { toast('No data to export.', 'warning'); return; }
+  toast('Preparing Excel...', 'info');
   try {
     if (typeof XLSX === 'undefined') {
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
     }
+    const now    = new Date();
+    const HEADER = ['Product Name','Category','POS Stock (Pcs)','Actual Count','Variance','Remarks','Date Counted','Counted By'];
+    const data   = audit_current.map(function(r) {
+      const actual   = r.actualCount !== '' ? parseInt(r.actualCount) : '';
+      const variance = actual !== '' ? actual - r.posStockPcs : '';
+      return [r.productName, r.category, r.posStockPcs, actual !== '' ? actual : '',
+              variance !== '' ? variance : '', r.remarks || '',
+              r.dateCounted || localDateStr(now),
+              r.countedBy || (currentUser ? currentUser.name : '') || ''];
+    });
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['AE HOME POS \u2014 Inventory Physical Count Audit'],
+      ['Date Generated:', now.toLocaleString('en-PH')],
+      ['Audited By:', currentUser ? currentUser.name || '' : ''],
+      [],
+      HEADER,
+      ...data,
+    ]);
+    for (var c = 0; c < HEADER.length; c++) {
+      var addr = XLSX.utils.encode_cell({ r: 4, c: c });
+      if (ws[addr]) ws[addr].s = { font: { bold: true }, fill: { patternType: 'solid', fgColor: { rgb: 'FFD966' } } };
+    }
+    ws['!cols'] = [{wch:30},{wch:16},{wch:14},{wch:14},{wch:12},{wch:24},{wch:14},{wch:18}];
     const wb = XLSX.utils.book_new();
-
-    function addSheet(items, label, isOpening) {
-      if (!items.length) return;
-      const header = ['Item','POS Stock Pcs','POS Stock Packs','Additional Pcs','Additional Packs','Total Stocks Pcs','Total Stocks Packs','Sold Pcs','Sold Packs','Actual Pcs','Actual Packs','Variance Pcs','Variance Packs','Remarks'];
-      const rows = items.map(it => isOpening ? [
-        it.name, it.posStockPcs, it.posStockPacks, it.addPcs, it.addPacks, it.totalPcs, it.totalPacks,
-        '', '', it.actualPcs, it.actualPacks, it.variancePcs, it.variancePacks, it.remarks
-      ] : [
-        it.name, it.openingTotalPcs, it.openingTotalPacks, '', '', it.expectedPcs, it.expectedPacks,
-        it.soldPcs, it.soldPacks, it.actualPcs, it.actualPacks, it.variancePcs, it.variancePacks, it.remarks
-      ]);
-      const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
-      XLSX.utils.book_append_sheet(wb, ws, label);
-    }
-
-    let openItems = [], closeItems = [];
-    try { openItems = JSON.parse(r.openingItems||'[]'); } catch(e){}
-    try { closeItems = JSON.parse(r.closingItems||'[]'); } catch(e){}
-
-    if (type === 'opening' || type === 'both') addSheet(openItems, 'Opening', true);
-    if (type === 'closing' || type === 'both') addSheet(closeItems, 'Closing', false);
-
-    XLSX.writeFile(wb, `DailyInventory_${dateStr}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, ws, 'Inventory Audit');
+    XLSX.writeFile(wb, 'InventoryAudit_' + localDateStr(now) + '.xlsx');
+    toast('Excel downloaded!', 'success');
   } catch(e) {
-    toast('Excel export failed.', 'error');
+    toast('Export failed: ' + e.message, 'error');
   }
 }
 
-// ═══════════════════════════════════════════════
-// LICENSING & SUBSCRIPTION — MODULE 2: License Manager (frontend)
-// Trial/Activation UI + device token. Fully isolated: does NOT touch the
-// existing login flow yet (that wiring is Module 3). Test it by typing
-// showLicenseWelcomeScreen() in the browser console.
-// ═══════════════════════════════════════════════
-let licenseState = null;
-
-// Device Token — HONEST implementation: this is a random ID stored in this
-// browser's localStorage, NOT a real hardware fingerprint (browsers block
-// JS from reading actual hardware IDs). Clearing browser data or switching
-// browsers generates a new token. Real protection is server-side — see
-// checkLicenseStatus() in backend.gs.
-function getDeviceToken() {
-  let token = localStorage.getItem('ae_pos_device_token');
-  if (!token) {
-    token = 'DEV-' + Math.random().toString(36).substring(2, 10).toUpperCase() + '-' + Date.now().toString(36).toUpperCase();
-    localStorage.setItem('ae_pos_device_token', token);
-  }
-  return token;
+function audit_printAudit() {
+  if (!audit_current || !audit_current.length) { toast('Nothing to print.', 'warning'); return; }
+  const now  = new Date();
+  const rows = audit_current.map(function(r) {
+    const actual   = r.actualCount !== '' ? parseInt(r.actualCount) : '\u2014';
+    const variance = r.actualCount !== '' ? (parseInt(r.actualCount) - r.posStockPcs) : '\u2014';
+    const vStr     = variance === '\u2014' ? '\u2014' : (variance > 0 ? '+' + variance : String(variance));
+    return '<tr>' +
+      '<td>' + esc(r.productName) + '</td><td>' + esc(r.category) + '</td>' +
+      '<td>' + r.posStockPcs + '</td><td>' + actual + '</td>' +
+      '<td>' + vStr + '</td><td>' + esc(r.remarks || '') + '</td>' +
+      '<td>' + (r.dateCounted || localDateStr(now)) + '</td>' +
+      '<td>' + esc(r.countedBy || (currentUser ? currentUser.name : '') || '') + '</td>' +
+    '</tr>';
+  }).join('');
+  const win = window.open('', '_blank');
+  if (!win) { toast('Pop-up blocked. Allow pop-ups and try again.', 'warning'); return; }
+  win.document.write(
+    '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+    '<title>Inventory Audit</title>' +
+    '<style>body{font-family:Arial,sans-serif;font-size:12px;margin:20px}' +
+    'h2{margin-bottom:4px}p{margin:2px 0 12px}' +
+    'table{border-collapse:collapse;width:100%}' +
+    'th,td{border:1px solid #ccc;padding:6px 8px}' +
+    'th{background:#FFD966;font-weight:bold}' +
+    '@media print{button{display:none}}</style></head><body>' +
+    '<h2>AE HOME POS \u2014 Inventory Physical Count Audit</h2>' +
+    '<p>Generated: ' + now.toLocaleString('en-PH') + ' | Audited By: ' + esc(currentUser ? currentUser.name || '' : '') + '</p>' +
+    '<table><thead><tr>' +
+    '<th>Product Name</th><th>Category</th><th>POS Stock</th><th>Actual Count</th>' +
+    '<th>Variance</th><th>Remarks</th><th>Date Counted</th><th>Counted By</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<br><button onclick="window.print()">Print</button>' +
+    '</body></html>'
+  );
+  win.document.close();
 }
 
-async function licCheckStatus() {
-  try {
-    const res = await gasRequest({ action: 'checkLicenseStatus', deviceToken: getDeviceToken() });
-    licenseState = res.success ? res.data : { status: 'None' };
-    return licenseState;
-  } catch(e) {
-    licenseState = { status: 'Unknown' }; // couldn't reach server — Module 3 will decide the offline-grace behavior
-    return licenseState;
-  }
-}
 
-async function licStartTrial(storeName, ownerName) {
-  try {
-    const res = await gasPost({
-      action: 'startTrial',
-      deviceToken: getDeviceToken(),
-      storeName: storeName || '',
-      ownerName: ownerName || '',
-    });
-    if (res.success) {
-      toast('Free trial started!', 'success');
-      await licCheckStatus();
-      return true;
-    }
-    toast(res.message || 'Could not start trial.', 'error');
-    return false;
-  } catch(e) {
-    toast('Network error. Please try again.', 'error');
-    return false;
-  }
-}
+// ═══════════════════════════════════════════════════════════
+// INCENTIVE TRACKER MODULE
+// All functions prefixed with inc_
+// Roles: admin/clerk = full mgmt; cashier = submit claims only
+// ═══════════════════════════════════════════════════════════
 
-async function licActivateLicense(licenseKey) {
-  try {
-    const res = await gasPost({
-      action: 'activateLicense',
-      deviceToken: getDeviceToken(),
-      licenseKey: (licenseKey || '').trim().toUpperCase(),
-    });
-    if (res.success) {
-      toast('License activated!', 'success');
-      await licCheckStatus();
-      return true;
-    }
-    toast(res.message || 'Could not activate license.', 'error');
-    return false;
-  } catch(e) {
-    toast('Network error. Please try again.', 'error');
-    return false;
-  }
-}
+// ── STATE ─────────────────────────────────────────────────
+let inc_masterCache = [];   // Incentive Master List
+let inc_claimState  = { invoiceNo:'', product:null, qty:1, valid:false };
+let inc_rejectId    = null;
 
-// ─── WELCOME SCREEN (full-screen overlay, isolated from index.html) ──
-function showLicenseWelcomeScreen() {
-  const existing = document.getElementById('licWelcomeOverlay');
-  if (existing) existing.remove();
-
-  const overlay = document.createElement('div');
-  overlay.id = 'licWelcomeOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:400;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;overflow-y:auto';
-  overlay.innerHTML = `
-    <div style="max-width:440px;width:100%">
-      <div style="background:var(--grad);border-radius:16px;padding:30px 24px;text-align:center;color:white;margin-bottom:20px">
-        <div style="font-size:1.5rem;font-weight:800">AE Home POS</div>
-        <div style="opacity:0.9;margin-top:4px">Welcome! Choose how you'd like to get started.</div>
-      </div>
-      <div class="card" style="display:flex;flex-direction:column;gap:10px">
-        <button class="btn btn-primary" style="width:100%" onclick="licOpenStartTrialModal()"> Start Free Trial (${LICENSE_TRIAL_DAYS_LABEL} days)</button>
-        <button class="btn btn-ghost" style="width:100%" onclick="licOpenActivateModal()"> Activate License</button>
-        <button class="btn btn-ghost" style="width:100%" onclick="licOpenSubscribeModal()"> Subscribe</button>
-      </div>
-      <div id="licWelcomeStatus" style="margin-top:16px;text-align:center;font-size:0.85rem" class="text-muted"></div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  licRenderWelcomeStatus();
-}
-
-// Trial length is admin-configured server-side (LICENSE_CONFIG.trialDays in
-// backend.gs) — this label is just for display and doesn't enforce anything;
-// the real check always happens on the server.
-const LICENSE_TRIAL_DAYS_LABEL = 7;
-
-function hideLicenseWelcomeScreen() {
-  const el = document.getElementById('licWelcomeOverlay');
-  if (el) el.remove();
-}
-
-async function licRenderWelcomeStatus() {
-  const el = document.getElementById('licWelcomeStatus');
-  if (!el) return;
-  el.textContent = 'Checking license status...';
-  const state = await licCheckStatus();
-  if (!el.isConnected) return; // overlay may have been closed already
-  if (state.status === 'None') {
-    el.textContent = 'No trial or license found on this device yet.';
-  } else if (state.status === 'Unknown') {
-    el.textContent = 'Could not reach the license server — check your connection.';
+// ── MAIN PAGE ROUTER ──────────────────────────────────────
+async function inc_renderPage() {
+  const role = currentUser.role;
+  if (role === 'admin' || role === 'clerk') {
+    await inc_renderAdminPage();
   } else {
-    el.innerHTML = `Current status on this device: <b>${esc(state.status)}</b>${state.licenseKey ? ' — ' + esc(state.licenseKey) : ''}`;
+    await inc_renderAgentPage();
   }
 }
 
-function licOpenStartTrialModal() {
-  openModal(`
-    <div class="modal-title">Start Free Trial</div>
-    <div class="field">
-      <label for="lic_storeName">Store Name</label>
-      <input id="lic_storeName" name="lic_storeName" type="text" placeholder="e.g. AE Home Trade Corp.">
-    </div>
-    <div class="field">
-      <label for="lic_ownerName">Owner Name</label>
-      <input id="lic_ownerName" name="lic_ownerName" type="text" placeholder="e.g. Vhinzzy">
-    </div>
-    <button class="btn btn-primary" style="width:100%;margin-top:10px" id="licTrialBtn" onclick="licConfirmStartTrial()"> Start Free Trial</button>
-  `);
+// ══════════════════════════════════════════════════════════
+// ADMIN / CLERK VIEW
+// ══════════════════════════════════════════════════════════
+async function inc_renderAdminPage() {
+  const pc = document.getElementById('pageContent');
+  if (!pc) return;
+  pc.innerHTML =
+    '<div id="incTabBar" class="tab-bar" style="margin-bottom:16px">' +
+      '<button class="tab-btn active" onclick="inc_showTab(\'daily\',this)">Daily Report</button>' +
+      '<button class="tab-btn" onclick="inc_showTab(\'all\',this)">All Claims</button>' +
+      '<button class="tab-btn" onclick="inc_showTab(\'master\',this)">Incentive List</button>' +
+    '</div>' +
+    '<div id="incContent"></div>';
+  inc_showTab('daily', document.querySelector('#incTabBar .tab-btn'));
 }
 
-async function licConfirmStartTrial() {
-  const btn = document.getElementById('licTrialBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Starting...'; }
-  const storeName = document.getElementById('lic_storeName')?.value || '';
-  const ownerName = document.getElementById('lic_ownerName')?.value || '';
-  const ok = await licStartTrial(storeName, ownerName);
-  if (ok) {
-    closeModalDirect();
-    licRenderWelcomeStatus();
-  } else if (btn) {
-    btn.disabled = false; btn.textContent = ' Start Free Trial';
+function inc_showTab(tab, btn) {
+  const tabBar = document.getElementById('incTabBar');
+  if (tabBar) tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  if (tab === 'daily')  inc_loadDailyReport();
+  if (tab === 'all')    inc_loadAllClaims();
+  if (tab === 'master') inc_loadMasterList();
+}
+
+// ── DAILY REPORT ──────────────────────────────────────────
+async function inc_loadDailyReport(dateVal) {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  const today = localDateStr(new Date());
+  const d     = dateVal || today;
+  el.innerHTML =
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">' +
+      '<input type="date" id="incDatePicker" value="' + d + '" ' +
+        'onchange="inc_loadDailyReport(this.value)" ' +
+        'style="padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_loadDailyReport(\'' + today + '\')">Today</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_exportDailyExcel(\'' + d + '\')">Export Excel</button>' +
+    '</div>' +
+    '<div class="loading-spinner"><div class="spinner"></div></div>';
+
+  try {
+    const res = await gasRequest({ action:'inc_getDailySummary', date:d });
+    if (!res.success) { toast(res.message || 'Error loading report.','error'); return; }
+    const summary    = res.summary || [];
+    const claims     = res.claims  || [];
+    const grandTotal = res.grandTotal || 0;
+
+    if (!summary.length) {
+      el.innerHTML += '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No incentive claims for ' + d + '</div></div>';
+      // Re-render the date picker
+      el.innerHTML =
+        '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">' +
+          '<input type="date" id="incDatePicker" value="' + d + '" onchange="inc_loadDailyReport(this.value)" style="padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
+          '<button class="btn btn-ghost btn-sm" onclick="inc_loadDailyReport(\'' + today + '\')">Today</button>' +
+        '</div>' +
+        '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No incentive claims for ' + d + '</div></div>';
+      return;
+    }
+
+    const empRows = summary.map(s =>
+      '<tr>' +
+        '<td><b>' + esc(s.employeeName) + '</b></td>' +
+        '<td style="text-align:center">' + s.count + '</td>' +
+        '<td class="fw-700 text-green" style="font-size:1rem">&#8369;' + parseFloat(s.total).toFixed(2) + '</td>' +
+        '<td><button class="btn btn-ghost btn-sm" onclick="inc_viewEmployeeDay(\'' + esc(s.employeeId) + '\',\'' + d + '\')">View Items</button></td>' +
+      '</tr>'
+    ).join('');
+
+    el.innerHTML =
+      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">' +
+        '<input type="date" id="incDatePicker" value="' + d + '" onchange="inc_loadDailyReport(this.value)" style="padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
+        '<button class="btn btn-ghost btn-sm" onclick="inc_loadDailyReport(\'' + today + '\')">Today</button>' +
+        '<button class="btn btn-ghost btn-sm" onclick="inc_viewAllItemsDay(\'' + d + '\')">View All Items</button>' +
+        '<button class="btn btn-success btn-sm" onclick="inc_exportDailyExcel(\'' + d + '\')">Export Excel</button>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-hdr" style="padding:14px 18px;border-bottom:1px solid var(--border)">' +
+          '<span style="font-weight:700">Employee Incentive Summary</span>' +
+          '<span style="font-size:0.8rem;color:var(--text3)">' + safeFormatDateOnly(d) + '</span>' +
+        '</div>' +
+        '<div class="tbl-wrap"><table>' +
+          '<thead><tr><th>Employee</th><th>Claims</th><th>Total Incentive</th><th></th></tr></thead>' +
+          '<tbody>' + empRows + '</tbody>' +
+        '</table></div>' +
+      '</div>' +
+      '<div style="background:var(--text1,#111);color:white;border-radius:10px;padding:16px 22px;display:flex;justify-content:space-between;align-items:center;margin-top:4px">' +
+        '<div>' +
+          '<div style="font-size:0.75rem;opacity:.6">GRAND TOTAL INCENTIVE RECEIVABLE</div>' +
+          '<div style="font-size:0.72rem;opacity:.45">' + safeFormatDateOnly(d) + ' &bull; ' + summary.length + ' employee(s)</div>' +
+        '</div>' +
+        '<div style="font-size:1.8rem;font-weight:700;font-family:var(--font-mono)">&#8369;' + parseFloat(grandTotal).toFixed(2) + '</div>' +
+      '</div>';
+
+  } catch(e) {
+    toast('Network error loading daily report.', 'error');
   }
 }
 
-function licOpenActivateModal() {
-  openModal(`
-    <div class="modal-title">Activate License</div>
-    <div class="field">
-      <label for="lic_key">License Key</label>
-      <input id="lic_key" name="lic_key" type="text" placeholder="AEH-XXXX-XXXX-XXXX-XXXX" style="text-transform:uppercase">
-    </div>
-    <button class="btn btn-primary" style="width:100%;margin-top:10px" id="licActivateBtn" onclick="licConfirmActivate()"> Activate</button>
-  `);
-}
+// ── VIEW EMPLOYEE ITEMS FOR A DAY ─────────────────────────
+async function inc_viewEmployeeDay(employeeId, date) {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  try {
+    const res    = await gasRequest({ action:'inc_getClaims', employeeId:employeeId, date:date });
+    const claims = res.data || [];
+    const total  = claims.reduce((s,c) => s + parseFloat(c.totalIncentive||0), 0);
+    const empName = claims.length ? claims[0].employeeName : '';
 
-async function licConfirmActivate() {
-  const btn = document.getElementById('licActivateBtn');
-  const key = document.getElementById('lic_key')?.value || '';
-  if (!key.trim()) { toast('Enter a license key.', 'warning'); return; }
-  if (btn) { btn.disabled = true; btn.textContent = 'Activating...'; }
-  const ok = await licActivateLicense(key);
-  if (ok) {
-    closeModalDirect();
-    licRenderWelcomeStatus();
-  } else if (btn) {
-    btn.disabled = false; btn.textContent = ' Activate';
+    const rows = claims.map(c =>
+      '<tr>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.barcode) + '</td>' +
+        '<td><b>' + esc(c.description) + '</b></td>' +
+        '<td style="text-align:center">' + (c.qty||1) + '</td>' +
+        '<td>&#8369;' + parseFloat(c.incentivePerUnit||0).toFixed(2) + '</td>' +
+        '<td class="fw-700 text-green">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
+        '<td>' + inc_statusBadge(c.status) + '</td>' +
+        '<td>' + inc_actionBtns(c) + '</td>' +
+      '</tr>'
+    ).join('') || '<tr><td colspan="8"><div class="no-data"><div class="no-data-text">No claims.</div></div></td></tr>';
+
+    el.innerHTML =
+      '<div class="back-link" onclick="inc_loadDailyReport(\'' + date + '\')" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--text3);font-size:0.82rem;margin-bottom:16px">' +
+        '&#8592; Back to Daily Report' +
+      '</div>' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">' +
+        '<div><div style="font-size:1rem;font-weight:700">' + esc(empName) + '</div><div style="font-size:0.78rem;color:var(--text3)">' + safeFormatDateOnly(date) + '</div></div>' +
+        '<div style="font-size:1.4rem;font-weight:700;color:var(--green)">&#8369;' + total.toFixed(2) + '</div>' +
+      '</div>' +
+      '<div class="card"><div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Invoice</th><th>Barcode</th><th>Item</th><th>Qty</th><th>&#8369;/Unit</th><th>Total</th><th>Status</th><th>Action</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div></div>';
+  } catch(e) {
+    toast('Error loading employee claims.', 'error');
   }
 }
 
-function licOpenSubscribeModal() {
-  // Real payment submission UI is Module 5 — this is a placeholder so the
-  // button isn't dead, per the phased build plan.
-  openModal(`
-    <div class="modal-title">Subscribe</div>
-    <p>The Payment page (GCash / Maya / Bank Transfer, with admin verification) is coming in the next update.</p>
-    <p>For now, contact AE Home to receive a License Key, then use "Activate License" above.</p>
-  `);
+// ── VIEW ALL ITEMS FOR A DAY ──────────────────────────────
+async function inc_viewAllItemsDay(date) {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  try {
+    const res    = await gasRequest({ action:'inc_getDailySummary', date:date });
+    const claims = res.claims || [];
+    const grand  = res.grandTotal || 0;
+
+    const rows = claims.map(c =>
+      '<tr>' +
+        '<td><b>' + esc(c.employeeName) + '</b></td>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
+        '<td>' + esc(c.description) + '</td>' +
+        '<td style="text-align:center">' + (c.qty||1) + '</td>' +
+        '<td class="fw-700 text-green">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
+        '<td>' + inc_statusBadge(c.status) + '</td>' +
+      '</tr>'
+    ).join('') || '<tr><td colspan="6"><div class="no-data"><div class="no-data-text">No items.</div></div></td></tr>';
+
+    el.innerHTML =
+      '<div class="back-link" onclick="inc_loadDailyReport(\'' + date + '\')" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--text3);font-size:0.82rem;margin-bottom:16px">' +
+        '&#8592; Back to Daily Report' +
+      '</div>' +
+      '<div style="font-size:0.95rem;font-weight:700;margin-bottom:12px">All Items &mdash; ' + safeFormatDateOnly(date) + '</div>' +
+      '<div class="card"><div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Employee</th><th>Invoice</th><th>Item</th><th>Qty</th><th>Incentive</th><th>Status</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div></div>' +
+      '<div style="background:var(--text1,#111);color:white;border-radius:10px;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;margin-top:8px">' +
+        '<span style="opacity:.6;font-size:0.8rem">GRAND TOTAL</span>' +
+        '<span style="font-size:1.4rem;font-weight:700">&#8369;' + parseFloat(grand).toFixed(2) + '</span>' +
+      '</div>';
+  } catch(e) {
+    toast('Error loading items.', 'error');
+  }
+}
+
+// ── ALL CLAIMS ────────────────────────────────────────────
+async function inc_loadAllClaims() {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  try {
+    const res    = await gasRequest({ action:'inc_getClaims' });
+    const claims = (res.data || []).slice().reverse();
+
+    const rows = claims.map(c =>
+      '<tr>' +
+        '<td style="font-size:0.78rem">' + safeFormatDateTime(c.claimDate) + '</td>' +
+        '<td><b>' + esc(c.employeeName) + '</b></td>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
+        '<td>' + esc(c.description) + '</td>' +
+        '<td style="text-align:center">' + (c.qty||1) + '</td>' +
+        '<td class="fw-700">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
+        '<td>' + inc_statusBadge(c.status) + '</td>' +
+        '<td>' + inc_actionBtns(c) + '</td>' +
+      '</tr>'
+    ).join('') || '<tr><td colspan="8"><div class="no-data"><div class="no-data-text">No claims yet.</div></div></td></tr>';
+
+    el.innerHTML =
+      '<div class="card"><div class="tbl-wrap" style="max-height:65vh;overflow-y:auto"><table>' +
+        '<thead><tr><th>Date</th><th>Employee</th><th>Invoice</th><th>Item</th><th>Qty</th><th>Total</th><th>Status</th><th>Action</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div></div>';
+  } catch(e) {
+    toast('Error loading claims.', 'error');
+  }
+}
+
+// ── MASTER LIST ───────────────────────────────────────────
+async function inc_loadMasterList() {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  try {
+    const res = await gasRequest({ action:'inc_getMaster' });
+    inc_masterCache = res.data || [];
+    inc_renderMasterTable(inc_masterCache, el);
+  } catch(e) {
+    toast('Error loading incentive list.', 'error');
+  }
+}
+
+function inc_renderMasterTable(items, el) {
+  const target = el || document.getElementById('incContent');
+  if (!target) return;
+  const canEdit = currentUser.role === 'admin';
+
+  const rows = items.map(m =>
+    '<tr>' +
+      '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.barcode) + '</td>' +
+      '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.itemCode) + '</td>' +
+      '<td><b>' + esc(m.description) + '</b></td>' +
+      '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category) + '</td>' +
+      '<td class="fw-700 text-green" style="font-size:1rem">&#8369;' + parseFloat(m.incentiveAmount||0).toFixed(2) + '</td>' +
+      '<td>' + inc_statusBadge(m.status) + '</td>' +
+      (canEdit ?
+        '<td><div style="display:flex;gap:5px">' +
+          '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
+          '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
+        '</div></td>' : '<td></td>') +
+    '</tr>'
+  ).join('') || '<tr><td colspan="7"><div class="no-data"><div class="no-data-text">No incentive items yet. Add one to get started.</div></div></td></tr>';
+
+  target.innerHTML =
+    '<div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center">' +
+      (canEdit ? '<button class="btn btn-primary" onclick="inc_openItemModal()">+ Add Item</button>' : '') +
+      '<div class="search-wrap" style="margin-bottom:0">' +
+        '<span class="search-icon">&#128269;</span>' +
+        '<input type="text" id="incMasterSearch" placeholder="Search item or barcode..." oninput="inc_filterMaster(this.value)" style="padding:8px 12px 8px 32px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
+      '</div>' +
+    '</div>' +
+    '<div class="card"><div class="tbl-wrap"><table>' +
+      '<thead><tr><th>Barcode</th><th>Item Code</th><th>Description</th><th>Category</th><th>Incentive</th><th>Status</th><th>Action</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table></div></div>';
+}
+
+function inc_filterMaster(q) {
+  const term    = (q||'').toLowerCase();
+  const filtered = inc_masterCache.filter(m =>
+    m.barcode.toLowerCase().includes(term) ||
+    m.description.toLowerCase().includes(term) ||
+    (m.category||'').toLowerCase().includes(term) ||
+    (m.itemCode||'').toLowerCase().includes(term)
+  );
+  const el = document.getElementById('incContent');
+  if (el) {
+    const tbody = el.querySelector('tbody');
+    if (!tbody) return;
+    const canEdit = currentUser.role === 'admin';
+    tbody.innerHTML = filtered.map(m =>
+      '<tr>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.barcode) + '</td>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.itemCode) + '</td>' +
+        '<td><b>' + esc(m.description) + '</b></td>' +
+        '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category) + '</td>' +
+        '<td class="fw-700 text-green">&#8369;' + parseFloat(m.incentiveAmount||0).toFixed(2) + '</td>' +
+        '<td>' + inc_statusBadge(m.status) + '</td>' +
+        (canEdit ?
+          '<td><div style="display:flex;gap:5px">' +
+            '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
+            '<button class="inv-btn inv-btn-del" onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
+          '</div></td>' : '<td></td>') +
+      '</tr>'
+    ).join('') || '<tr><td colspan="7"><div class="no-data"><div class="no-data-text">No matching items.</div></div></td></tr>';
+  }
+}
+
+// ── MASTER ITEM MODAL ─────────────────────────────────────
+function inc_openItemModal(id) {
+  const isEdit = !!id;
+  const m      = isEdit ? inc_masterCache.find(x => x.id === id) : null;
+  openModal(
+    (isEdit ? '<div class="modal-title">Edit Incentive Item</div>' : '<div class="modal-title">Add Incentive Item</div>') +
+    '<div class="input-row">' +
+      '<div class="field" style="grid-column:1/-1"><label for="ii_desc">Product Description *</label><input id="ii_desc" name="ii_desc" value="' + esc(m ? m.description : '') + '" placeholder="e.g. Washing Machine XL"></div>' +
+    '</div>' +
+    '<div class="input-row">' +
+      '<div class="field"><label for="ii_barcode">Barcode</label><input id="ii_barcode" name="ii_barcode" value="' + esc(m ? m.barcode : '') + '" placeholder="e.g. 100001"></div>' +
+      '<div class="field"><label for="ii_code">Item Code</label><input id="ii_code" name="ii_code" value="' + esc(m ? m.itemCode : '') + '" placeholder="e.g. WM-001"></div>' +
+    '</div>' +
+    '<div class="input-row">' +
+      '<div class="field"><label for="ii_cat">Category</label><input id="ii_cat" name="ii_cat" value="' + esc(m ? m.category : '') + '" placeholder="e.g. Appliances"></div>' +
+      '<div class="field"><label for="ii_amt">Incentive Amount (&#8369;) *</label><input id="ii_amt" name="ii_amt" type="number" min="0" value="' + (m ? m.incentiveAmount : '') + '" placeholder="e.g. 50"></div>' +
+    '</div>' +
+    '<div class="input-row">' +
+      '<div class="field"><label for="ii_status">Status</label><select id="ii_status" name="ii_status"><option value="Active"' + (m && m.status==='Active' ? ' selected' : '') + '>Active</option><option value="Inactive"' + (m && m.status==='Inactive' ? ' selected' : '') + '>Inactive</option></select></div>' +
+    '</div>' +
+    '<button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="inc_saveItemModal(\'' + (id||'') + '\')">' + (isEdit ? 'Update Item' : 'Add Item') + '</button>'
+  );
+}
+
+async function inc_saveItemModal(id) {
+  const desc = document.getElementById('ii_desc')?.value.trim();
+  const amt  = document.getElementById('ii_amt')?.value;
+  if (!desc) { toast('Product description is required.','error'); return; }
+  if (!amt || isNaN(parseFloat(amt))) { toast('Incentive amount is required.','error'); return; }
+
+  const payload = {
+    action:          'inc_saveMasterItem',
+    id:              id || null,
+    barcode:         document.getElementById('ii_barcode')?.value.trim() || '',
+    itemCode:        document.getElementById('ii_code')?.value.trim() || '',
+    description:     desc,
+    category:        document.getElementById('ii_cat')?.value.trim() || '',
+    incentiveAmount: parseFloat(amt),
+    status:          document.getElementById('ii_status')?.value || 'Active',
+    updatedBy:       currentUser.name || currentUser.username,
+  };
+  const btn = document.querySelector('#modalBox .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+  try {
+    const res = await gasPost(payload);
+    if (res.success) {
+      toast(id ? 'Incentive item updated.' : 'Item added to master list.', 'success');
+      closeModalDirect();
+      inc_loadMasterList();
+    } else {
+      toast(res.message || 'Error saving item.','error');
+      if (btn) { btn.disabled = false; btn.textContent = id ? 'Update Item' : 'Add Item'; }
+    }
+  } catch(e) {
+    toast('Network error.','error');
+    if (btn) { btn.disabled = false; }
+  }
+}
+
+async function inc_deleteMasterItem(id) {
+  if (!confirm('Delete this incentive item? This cannot be undone.')) return;
+  try {
+    const res = await gasPost({ action:'inc_deleteMasterItem', id, caller_role: currentUser.role });
+    if (res.success) { toast('Item deleted.','success'); inc_loadMasterList(); }
+    else toast(res.message || 'Error deleting.','error');
+  } catch(e) { toast('Network error.','error'); }
+}
+
+// ══════════════════════════════════════════════════════════
+// AGENT / CASHIER VIEW — Submit Claims
+// ══════════════════════════════════════════════════════════
+async function inc_renderAgentPage() {
+  const pc = document.getElementById('pageContent');
+  if (!pc) return;
+
+  const today = localDateStr(new Date());
+  pc.innerHTML =
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">' +
+      '<div style="font-size:0.9rem;color:var(--text2)">Your Incentive Claims &mdash; ' + safeFormatDateOnly(today) + '</div>' +
+      '<button class="btn btn-primary" onclick="inc_openClaimModal()">+ Add Incentive Claim</button>' +
+    '</div>' +
+    '<div id="incAgentContent"><div class="loading-spinner"><div class="spinner"></div></div></div>';
+
+  await inc_loadAgentClaims(today);
+}
+
+async function inc_loadAgentClaims(date) {
+  const el = document.getElementById('incAgentContent');
+  if (!el) return;
+  try {
+    const res    = await gasRequest({ action:'inc_getClaims', employeeId: currentUser.id || currentUser.username, date:date });
+    const claims = res.data || [];
+    const total  = claims.reduce((s,c) => s + parseFloat(c.totalIncentive||0), 0);
+
+    const rows = claims.slice().reverse().map(c =>
+      '<tr>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
+        '<td><b>' + esc(c.description) + '</b></td>' +
+        '<td style="text-align:center">' + (c.qty||1) + '</td>' +
+        '<td>&#8369;' + parseFloat(c.incentivePerUnit||0).toFixed(2) + '</td>' +
+        '<td class="fw-700 text-green">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
+        '<td>' + inc_statusBadge(c.status) + '</td>' +
+        '<td style="font-size:0.75rem;color:var(--text3)">' + safeFormatDateTime(c.claimDate) + '</td>' +
+      '</tr>'
+    ).join('') || '<tr><td colspan="7"><div class="no-data"><div class="no-data-text">No claims yet today. Click <b>Add Incentive Claim</b> to start.</div></div></td></tr>';
+
+    el.innerHTML =
+      '<div style="background:linear-gradient(135deg,var(--blue,#1e90ff),#0056d2);border-radius:12px;padding:18px 22px;color:white;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">' +
+        '<div><div style="font-size:0.75rem;opacity:.7">TODAY\'S INCENTIVE</div><div style="font-size:2rem;font-weight:700;font-family:var(--font-mono)">&#8369;' + total.toFixed(2) + '</div><div style="font-size:0.78rem;opacity:.6">' + claims.length + ' claim(s)</div></div>' +
+      '</div>' +
+      '<div class="card"><div class="tbl-wrap"><table>' +
+        '<thead><tr><th>Invoice</th><th>Item</th><th>Qty</th><th>&#8369;/Unit</th><th>Total</th><th>Status</th><th>Time</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table></div></div>';
+  } catch(e) {
+    toast('Error loading your claims.','error');
+  }
+}
+
+// ── CLAIM MODAL ───────────────────────────────────────────
+function inc_openClaimModal() {
+  inc_claimState = { invoiceNo:'', product:null, qty:1, valid:false };
+  openModal(
+    '<div class="modal-title">Add Incentive Claim</div>' +
+    '<div class="field"><label for="inc_invoice">Sales Invoice Number</label>' +
+      '<input id="inc_invoice" name="inc_invoice" placeholder="e.g. SI1782100366396" oninput="inc_invoiceInput()">' +
+    '</div>' +
+    '<div class="field"><label for="inc_product">Product (Barcode or Description)</label>' +
+      '<input id="inc_product" name="inc_product" placeholder="Type barcode or product name..." oninput="inc_productSearch()" autocomplete="off">' +
+      '<div id="inc_dropdown" style="display:none;border:1.5px solid var(--border);border-radius:8px;margin-top:4px;background:white;max-height:200px;overflow-y:auto;box-shadow:var(--shadow2)"></div>' +
+    '</div>' +
+    '<div class="field" id="inc_qty_row" style="display:none"><label for="inc_qty">Quantity</label>' +
+      '<input id="inc_qty" name="inc_qty" type="number" min="1" value="1" oninput="inc_qtyChanged()">' +
+    '</div>' +
+    '<div id="inc_valbox" style="display:none;border-radius:8px;padding:12px 14px;margin-top:10px;font-size:0.84rem"></div>' +
+    '<div id="inc_summary" style="display:none;background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
+    '<button class="btn btn-primary" id="inc_submit_btn" style="width:100%;margin-top:12px" disabled onclick="inc_submitClaim()">Submit Claim</button>'
+  );
+  // Pre-load master cache for search
+  if (!inc_masterCache.length) {
+    gasRequest({ action:'inc_getMaster' }).then(r => { inc_masterCache = r.data || []; }).catch(()=>{});
+  }
+}
+
+function inc_invoiceInput() {
+  inc_claimState.invoiceNo = (document.getElementById('inc_invoice')?.value || '').trim();
+  inc_claimState.product   = null;
+  inc_claimState.valid     = false;
+  document.getElementById('inc_submit_btn').disabled = true;
+  document.getElementById('inc_summary').style.display = 'none';
+  document.getElementById('inc_qty_row').style.display  = 'none';
+  inc_showValbox('','');
+}
+
+function inc_productSearch() {
+  const q  = (document.getElementById('inc_product')?.value || '').toLowerCase().trim();
+  const dd = document.getElementById('inc_dropdown');
+  inc_claimState.product = null;
+  inc_claimState.valid   = false;
+  document.getElementById('inc_submit_btn').disabled = true;
+  document.getElementById('inc_summary').style.display = 'none';
+  document.getElementById('inc_qty_row').style.display  = 'none';
+  if (!q || !dd) { if(dd) dd.style.display='none'; return; }
+
+  const matches = inc_masterCache.filter(m =>
+    m.barcode.toLowerCase().includes(q) || m.description.toLowerCase().includes(q)
+  );
+  if (!matches.length) { dd.style.display='none'; return; }
+
+  dd.innerHTML = matches.map(m => {
+    const active = m.status === 'Active';
+    return '<div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center"' +
+      ' onmouseover="this.style.background=\'var(--bg2,#f7f8fa)\'" onmouseout="this.style.background=\'\'"' +
+      ' onclick="inc_selectProduct(\'' + esc(m.id) + '\')">' +
+      '<div><div style="font-weight:600;font-size:0.85rem">' + esc(m.description) + '</div>' +
+      '<div style="font-size:0.73rem;color:var(--text3);font-family:var(--font-mono)">' + esc(m.barcode) + (m.itemCode ? ' &bull; ' + esc(m.itemCode) : '') + '</div></div>' +
+      '<div style="font-weight:700;font-size:0.9rem;color:' + (active ? 'var(--green)' : 'var(--red,#ef4444)') + '">' +
+        (active ? '&#8369;' + parseFloat(m.incentiveAmount).toFixed(2) : 'No Incentive') +
+      '</div></div>';
+  }).join('');
+  dd.style.display = 'block';
+}
+
+function inc_selectProduct(id) {
+  const m = inc_masterCache.find(x => x.id === id);
+  if (!m) return;
+  const inp = document.getElementById('inc_product');
+  if (inp) inp.value = m.description;
+  const dd = document.getElementById('inc_dropdown');
+  if (dd) dd.style.display = 'none';
+  inc_claimState.product = m;
+  inc_validateClaim();
+}
+
+function inc_validateClaim() {
+  const inv     = inc_claimState.invoiceNo;
+  const product = inc_claimState.product;
+  if (!inv)     { inc_showValbox('warn','Please enter a Sales Invoice number first.'); return; }
+  if (!product) { inc_showValbox('',''); return; }
+
+  // No active incentive
+  if (product.status !== 'Active') {
+    inc_showValbox('error','&#9747; <b>' + esc(product.description) + '</b> has no active incentive. Cannot claim.');
+    inc_claimState.valid = false;
+    document.getElementById('inc_submit_btn').disabled = true;
+    document.getElementById('inc_qty_row').style.display = 'none';
+    document.getElementById('inc_summary').style.display = 'none';
+    return;
+  }
+
+  // Valid — show qty + summary
+  inc_claimState.valid = true;
+  inc_showValbox('ok','&#10003; Item found &nbsp;&bull;&nbsp; &#10003; Incentive active');
+  document.getElementById('inc_qty_row').style.display = 'flex';
+  inc_claimState.qty = parseInt(document.getElementById('inc_qty')?.value) || 1;
+  inc_updateSummary();
+}
+
+function inc_qtyChanged() {
+  const q = Math.max(1, parseInt(document.getElementById('inc_qty')?.value) || 1);
+  inc_claimState.qty = q;
+  if (inc_claimState.valid) inc_updateSummary();
+}
+
+function inc_updateSummary() {
+  const m   = inc_claimState.product;
+  const qty = inc_claimState.qty;
+  const tot = qty * parseFloat(m.incentiveAmount);
+  const el  = document.getElementById('inc_summary');
+  if (!el) return;
+  el.style.display = 'block';
+  el.innerHTML =
+    '<div style="font-size:0.73rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:8px">Claim Summary</div>' +
+    '<table style="width:100%;font-size:0.85rem">' +
+      '<tr><td style="color:var(--text3);padding:2px 0;width:120px">Invoice</td><td style="font-weight:600">' + esc(inc_claimState.invoiceNo) + '</td></tr>' +
+      '<tr><td style="color:var(--text3);padding:2px 0">Item</td><td style="font-weight:600">' + esc(m.description) + '</td></tr>' +
+      '<tr><td style="color:var(--text3);padding:2px 0">Barcode</td><td style="font-family:var(--font-mono);font-size:0.8rem">' + esc(m.barcode) + '</td></tr>' +
+      '<tr><td style="color:var(--text3);padding:2px 0">Qty</td><td style="font-weight:600">' + qty + '</td></tr>' +
+      '<tr><td style="color:var(--text3);padding:2px 0">Incentive/unit</td><td style="font-weight:600;color:var(--blue,#1e90ff)">&#8369;' + parseFloat(m.incentiveAmount).toFixed(2) + '</td></tr>' +
+      '<tr><td style="color:var(--text3);padding:2px 0">TOTAL</td><td style="font-weight:700;font-size:1.05rem;color:var(--green)">&#8369;' + tot.toFixed(2) + '</td></tr>' +
+    '</table>';
+  document.getElementById('inc_submit_btn').disabled = false;
+}
+
+function inc_showValbox(type, msg) {
+  const el = document.getElementById('inc_valbox');
+  if (!el) return;
+  if (!type) { el.style.display='none'; return; }
+  const colors = {
+    ok:    'background:#d1fae5;border:1px solid #6ee7b7;color:#065f46',
+    warn:  'background:#fffbeb;border:1px solid #fde68a;color:#92400e',
+    error: 'background:#fee2e2;border:1px solid #fca5a5;color:#991b1b',
+  };
+  el.style.cssText = (colors[type]||'') + ';display:block;border-radius:8px;padding:10px 14px;font-size:0.84rem;margin-top:10px';
+  el.innerHTML = msg;
+}
+
+async function inc_submitClaim() {
+  if (!inc_claimState.valid || !inc_claimState.product) return;
+  const m   = inc_claimState.product;
+  const qty = inc_claimState.qty;
+  const btn = document.getElementById('inc_submit_btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+
+  const payload = {
+    action:          'inc_submitClaim',
+    claimDate:       new Date().toISOString(),
+    employeeId:      currentUser.id || currentUser.username,
+    employeeName:    currentUser.name || currentUser.username,
+    invoiceNo:       inc_claimState.invoiceNo,
+    barcode:         m.barcode,
+    description:     m.description,
+    qty:             qty,
+    incentivePerUnit:parseFloat(m.incentiveAmount),
+    totalIncentive:  qty * parseFloat(m.incentiveAmount),
+  };
+
+  try {
+    const res = await gasPost(payload);
+    if (res.success) {
+      toast('Incentive claim submitted! &#8369;' + (qty * parseFloat(m.incentiveAmount)).toFixed(2), 'success');
+      closeModalDirect();
+      inc_loadAgentClaims(localDateStr(new Date()));
+    } else {
+      toast(res.message || 'Error submitting claim.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Submit Claim'; }
+    }
+  } catch(e) {
+    toast('Network error.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Submit Claim'; }
+  }
+}
+
+// ── VERIFY / REJECT ───────────────────────────────────────
+async function inc_verifyClaim(id) {
+  try {
+    const res = await gasPost({ action:'inc_verifyClaim', id, verifiedBy: currentUser.name || currentUser.username });
+    if (res.success) { toast('Claim verified.','success'); navigateTo('incentives'); }
+    else toast(res.message || 'Error verifying.','error');
+  } catch(e) { toast('Network error.','error'); }
+}
+
+function inc_openRejectModal(id) {
+  inc_rejectId = id;
+  openModal(
+    '<div class="modal-title">Reject Claim</div>' +
+    '<p style="font-size:0.85rem;color:var(--text2);margin-bottom:14px">Please provide a reason for rejection. This will be recorded and visible to the employee.</p>' +
+    '<div class="field"><label for="inc_reject_reason">Rejection Reason *</label>' +
+      '<textarea id="inc_reject_reason" name="inc_reject_reason" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);min-height:80px" placeholder="e.g. Item was not sold under this invoice..."></textarea>' +
+    '</div>' +
+    '<button class="btn btn-danger" style="width:100%;margin-top:8px" onclick="inc_confirmReject()">Confirm Reject</button>'
+  );
+}
+
+async function inc_confirmReject() {
+  const reason = document.getElementById('inc_reject_reason')?.value.trim();
+  if (!reason) { toast('Please enter a rejection reason.','error'); return; }
+  const btn = document.querySelector('#modalBox .btn-danger');
+  if (btn) { btn.disabled = true; btn.textContent = 'Rejecting...'; }
+  try {
+    const res = await gasPost({
+      action: 'inc_rejectClaim', id: inc_rejectId,
+      rejectionReason: reason,
+      verifiedBy: currentUser.name || currentUser.username,
+    });
+    if (res.success) { toast('Claim rejected.','success'); closeModalDirect(); navigateTo('incentives'); }
+    else { toast(res.message || 'Error.','error'); if(btn){btn.disabled=false;btn.textContent='Confirm Reject';} }
+  } catch(e) { toast('Network error.','error'); if(btn){btn.disabled=false;} }
+}
+
+// ── EXCEL EXPORT ──────────────────────────────────────────
+async function inc_exportDailyExcel(date) {
+  toast('Preparing Excel...','info');
+  try {
+    const res = await gasRequest({ action:'inc_getDailySummary', date:date });
+    if (!res.success || !res.claims || !res.claims.length) { toast('No data to export.','warning'); return; }
+    if (typeof XLSX === 'undefined') {
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+    }
+    const now = new Date();
+    const HEADER = ['Employee','Invoice No.','Barcode','Description','Qty','Incentive/Unit','Total Incentive','Status'];
+    const data = res.claims.map(c => [
+      c.employeeName, c.invoiceNo, c.barcode, c.description,
+      parseInt(c.qty||1), parseFloat(c.incentivePerUnit||0), parseFloat(c.totalIncentive||0), c.status
+    ]);
+    // Summary section
+    const summaryRows = res.summary.map(s => [s.employeeName, '', '', 'SUBTOTAL', '', '', s.total, '']);
+
+    const sheet_data = [
+      ['AE HOME POS \u2014 Incentive Daily Report'],
+      ['Date:', safeFormatDateOnly(date)],
+      ['Generated:', now.toLocaleString('en-PH')],
+      [],
+      HEADER,
+      ...data,
+      [],
+      ['EMPLOYEE SUMMARY'],
+      ['Employee','','','','','','Total Incentive',''],
+      ...summaryRows,
+      [],
+      ['','','','','','','Grand Total:', res.grandTotal],
+    ];
+
+    const ws = XLSX.utils.aoa_to_sheet(sheet_data);
+    for (var c2 = 0; c2 < HEADER.length; c2++) {
+      var addr = XLSX.utils.encode_cell({r:4, c:c2});
+      if (ws[addr]) ws[addr].s = { font:{bold:true}, fill:{patternType:'solid',fgColor:{rgb:'FFD966'}} };
+    }
+    ws['!cols'] = [{wch:22},{wch:18},{wch:12},{wch:30},{wch:6},{wch:14},{wch:16},{wch:10}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Incentive Report');
+    XLSX.writeFile(wb, 'IncentiveReport_' + date + '.xlsx');
+    toast('Excel downloaded!','success');
+  } catch(e) { toast('Export failed: '+e.message,'error'); }
+}
+
+// ── HELPERS ───────────────────────────────────────────────
+function inc_statusBadge(status) {
+  const map = {
+    'Pending':  'background:#fffbeb;color:#92400e',
+    'Verified': 'background:#d1fae5;color:#065f46',
+    'Rejected': 'background:#fee2e2;color:#991b1b',
+  };
+  const style = map[status] || 'background:#f3f4f6;color:var(--text3)';
+  return '<span style="' + style + ';padding:2px 9px;border-radius:20px;font-size:0.72rem;font-weight:700">' + (status||'') + '</span>';
+}
+
+function inc_actionBtns(c) {
+  const role = currentUser.role;
+  if (c.status !== 'Pending') {
+    return c.status === 'Rejected'
+      ? '<span style="font-size:0.73rem;color:var(--red,#ef4444)">' + esc(c.rejectionReason||'') + '</span>'
+      : '';
+  }
+  if (role === 'admin' || role === 'manager' || role === 'clerk') {
+    return '<div style="display:flex;gap:5px">' +
+      '<button class="inv-btn inv-btn-in" onclick="inc_verifyClaim(\'' + esc(c.id) + '\')">Verify</button>' +
+      '<button class="inv-btn inv-btn-del" onclick="inc_openRejectModal(\'' + esc(c.id) + '\')">Reject</button>' +
+    '</div>';
+  }
+  return '';
 }
