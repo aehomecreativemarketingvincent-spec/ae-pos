@@ -5048,30 +5048,168 @@ function inc_openClaimModal() {
   inc_claimState = { invoiceNo:'', product:null, qty:1, saleType:'retail', valid:false };
   openModal(
     '<div class="modal-title">Add Incentive Claim</div>' +
-    '<div class="field"><label for="inc_invoice">Sales Invoice Number</label>' +
-      '<input id="inc_invoice" name="inc_invoice" placeholder="e.g. SI1782100366396" oninput="inc_invoiceInput()">' +
+
+    // Step 1: Invoice number + lookup button
+    '<div class="field">' +
+      '<label for="inc_invoice">Sales Invoice / Transaction Number</label>' +
+      '<div style="display:flex;gap:8px">' +
+        '<input id="inc_invoice" name="inc_invoice" placeholder="e.g. SI1782100366396" style="flex:1" ' +
+               'onkeydown="if(event.key===\'Enter\')inc_lookupInvoice()">' +
+        '<button class="btn btn-ghost btn-sm" onclick="inc_lookupInvoice()" style="white-space:nowrap;flex-shrink:0">Look Up</button>' +
+      '</div>' +
+      '<div style="font-size:0.75rem;color:var(--text3);margin-top:4px">Type the invoice number from the receipt then click Look Up</div>' +
     '</div>' +
-    '<div class="field"><label>Sale Type</label>' +
-      '<div style="display:flex;gap:8px;margin-top:4px">' +
-        '<button id="inc_btn_retail" onclick="inc_setSaleType(\'retail\')" style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--green);background:var(--green);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Retail (100%)</button>' +
-        '<button id="inc_btn_wholesale" onclick="inc_setSaleType(\'wholesale\')" style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Wholesale (50%)</button>' +
+
+    // Invoice info + items list (hidden until lookup)
+    '<div id="inc_invoice_info" style="display:none;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 13px;margin-bottom:10px;font-size:0.82rem"></div>' +
+    '<div id="inc_items_section" style="display:none">' +
+
+      // Sale Type
+      '<div class="field"><label>Sale Type</label>' +
+        '<div style="display:flex;gap:8px;margin-top:4px">' +
+          '<button id="inc_btn_retail" onclick="inc_setSaleType(\'retail\')" ' +
+            'style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--green);background:var(--green);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Retail (100%)</button>' +
+          '<button id="inc_btn_wholesale" onclick="inc_setSaleType(\'wholesale\')" ' +
+            'style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Wholesale (50%)</button>' +
+        '</div>' +
+      '</div>' +
+
+      // Items from invoice
+      '<div class="field"><label>Items in this Invoice — Select one to claim</label>' +
+        '<div id="inc_invoice_items" style="border:1.5px solid var(--border);border-radius:8px;overflow:hidden;margin-top:4px;max-height:200px;overflow-y:auto"></div>' +
+      '</div>' +
+
+      // Qty row
+      '<div class="field" id="inc_qty_row" style="display:none"><label for="inc_qty">Quantity</label>' +
+        '<input id="inc_qty" name="inc_qty" type="number" min="1" value="1" oninput="inc_qtyChanged()">' +
       '</div>' +
     '</div>' +
-    '<div class="field"><label for="inc_product">Product (Barcode or Description)</label>' +
-      '<input id="inc_product" name="inc_product" placeholder="Type barcode or product name..." oninput="inc_productSearch()" autocomplete="off">' +
-      '<div id="inc_dropdown" style="display:none;border:1.5px solid var(--border);border-radius:8px;margin-top:4px;background:white;max-height:200px;overflow-y:auto;box-shadow:var(--shadow2)"></div>' +
-    '</div>' +
-    '<div class="field" id="inc_qty_row" style="display:none"><label for="inc_qty">Quantity</label>' +
-      '<input id="inc_qty" name="inc_qty" type="number" min="1" value="1" oninput="inc_qtyChanged()">' +
-    '</div>' +
+
     '<div id="inc_valbox" style="display:none;border-radius:8px;padding:12px 14px;margin-top:10px;font-size:0.84rem"></div>' +
     '<div id="inc_summary" style="display:none;background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
     '<button class="btn btn-primary" id="inc_submit_btn" style="width:100%;margin-top:12px" disabled onclick="inc_submitClaim()">Submit Claim</button>'
   );
-  // Pre-load master cache for search
+  // Pre-load master cache
   if (!inc_masterCache.length) {
     gasRequest({ action:'inc_getMaster' }).then(r => { inc_masterCache = r.data || []; }).catch(()=>{});
   }
+}
+
+// ── INVOICE LOOKUP ────────────────────────────────────────
+async function inc_lookupInvoice() {
+  const invoiceNo = (document.getElementById('inc_invoice')?.value || '').trim();
+  if (!invoiceNo) { inc_showValbox('warn','Please enter an invoice or transaction number.'); return; }
+
+  const infoEl  = document.getElementById('inc_invoice_info');
+  const sectEl  = document.getElementById('inc_items_section');
+  const itemsEl = document.getElementById('inc_invoice_items');
+  if (infoEl)  infoEl.style.display  = 'none';
+  if (sectEl)  sectEl.style.display  = 'none';
+  if (itemsEl) itemsEl.innerHTML = '';
+  inc_claimState.product = null;
+  inc_claimState.valid   = false;
+  document.getElementById('inc_submit_btn').disabled = true;
+  document.getElementById('inc_summary').style.display = 'none';
+  document.getElementById('inc_qty_row').style.display = 'none';
+  inc_showValbox('','');
+
+  // Show loading
+  inc_showValbox('warn','Looking up invoice...');
+
+  try {
+    const res = await gasRequest({ action:'inc_getInvoiceItems', invoiceNo: invoiceNo });
+
+    if (!res.success) {
+      inc_showValbox('error','&#9747; ' + (res.message || 'Invoice not found.'));
+      return;
+    }
+
+    inc_claimState.invoiceNo = invoiceNo;
+
+    // Show invoice info
+    if (infoEl) {
+      infoEl.style.display = 'block';
+      infoEl.innerHTML =
+        '<b>&#10003; Invoice Found</b>' +
+        (res.cashier ? ' &nbsp;&bull;&nbsp; Cashier: <b>' + esc(res.cashier) + '</b>' : '') +
+        (res.date    ? ' &nbsp;&bull;&nbsp; Date: <b>' + safeFormatDateTime(res.date) + '</b>' : '');
+    }
+
+    // Build item rows
+    const items = res.items || [];
+    if (!items.length) {
+      inc_showValbox('warn','&#9888; No items found in this invoice.');
+      return;
+    }
+
+    if (!inc_masterCache.length) {
+      const mr = await gasRequest({ action:'inc_getMaster' });
+      inc_masterCache = mr.data || [];
+    }
+
+    const itemRows = items.map((it, idx) => {
+      // Match with incentive master
+      const master  = inc_masterCache.find(m =>
+        (it.barcode && m.barcode === it.barcode) ||
+        m.description.toLowerCase() === (it.description||'').toLowerCase()
+      );
+      const hasInc  = master && master.status === 'Active';
+      const incAmt  = hasInc ? '&#8369;' + parseFloat(master.incentiveAmount).toFixed(2) : 'No incentive';
+      const incColor= hasInc ? 'color:var(--green);font-weight:700' : 'color:var(--red,#ef4444)';
+
+      const _divStyle = 'display:flex;align-items:center;justify-content:space-between;padding:10px 13px;border-bottom:1px solid #e4e7ed;' + (hasInc ? 'cursor:pointer' : 'opacity:0.5;cursor:not-allowed');
+      const _divClick = hasInc ? 'inc_selectInvoiceItem(' + idx + ')' : '';
+      const _divHover = hasInc ? ' onmouseover="this.style.background=\'#f0f4ff\'" onmouseout="this.style.background=\'\'"' : '';
+      return '<div onclick="' + _divClick + '" style="' + _divStyle + '"' + _divHover + ' id="inc_item_row_' + idx + '">' +
+        '<div>' +
+          '<div style="font-weight:600;font-size:0.85rem">' + esc(it.description || '—') + '</div>' +
+          '<div style="font-size:0.73rem;color:var(--text3);font-family:var(--font-mono)">' +
+            (it.barcode ? 'Barcode: ' + esc(it.barcode) : 'No barcode') +
+            ' &nbsp;&bull;&nbsp; Qty: ' + (it.qty || 1) +
+          '</div>' +
+        '</div>' +
+        '<div style="font-size:0.85rem;' + incColor + '">' + incAmt + '</div>' +
+      '</div>';
+    }).join('');
+
+    if (itemsEl) itemsEl.innerHTML = itemRows || '<div style="padding:10px;color:var(--text3)">No items found.</div>';
+    if (sectEl)  sectEl.style.display = 'block';
+    inc_showValbox('','');
+
+    // Store items+master data for selectInvoiceItem
+    window._incInvoiceItems = items.map(it => {
+      const master = inc_masterCache.find(m =>
+        (it.barcode && m.barcode === it.barcode) ||
+        m.description.toLowerCase() === (it.description||'').toLowerCase()
+      );
+      return { ...it, master: master || null };
+    });
+
+  } catch(e) {
+    inc_showValbox('error','Network error looking up invoice. Please try again.');
+  }
+}
+
+function inc_selectInvoiceItem(idx) {
+  const items = window._incInvoiceItems || [];
+  const it    = items[idx];
+  if (!it || !it.master) return;
+
+  // Highlight selected row
+  document.querySelectorAll('[id^="inc_item_row_"]').forEach(el => {
+    el.style.background = '';
+    el.style.outline    = '';
+  });
+  const row = document.getElementById('inc_item_row_' + idx);
+  if (row) { row.style.background = 'var(--accent-l,#eef2ff)'; row.style.outline = '2px solid var(--blue,#1e90ff)'; }
+
+  inc_claimState.product = it.master;
+  inc_claimState.valid   = true;
+  inc_claimState.qty     = it.qty || 1;
+  document.getElementById('inc_qty').value  = it.qty || 1;
+  document.getElementById('inc_qty_row').style.display = 'flex';
+  inc_showValbox('ok','&#10003; Item selected &nbsp;&bull;&nbsp; &#10003; Incentive: &#8369;' + parseFloat(it.master.incentiveAmount).toFixed(2));
+  inc_updateSummary();
 }
 
 function inc_invoiceInput() {
