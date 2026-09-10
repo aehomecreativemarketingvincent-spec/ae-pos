@@ -79,9 +79,12 @@ const ROLE_NAV = {
     { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
     { id: 'incentives',     icon: '', label: 'Incentives' },
   ],
+  agent: [
+    { id: 'incentives', icon: '', label: 'Incentives' },
+  ],
   viewer: [
     { id: 'dashboard', icon: '', label: 'Dashboard' },
-    { id: 'receipts', icon: '', label: 'Receipts' },
+    { id: 'receipts',  icon: '', label: 'Receipts' },
   ]
 };
 
@@ -433,7 +436,7 @@ function initApp() {
   buildNav(role);
 
   // Default page
-  const defaultPages = { admin: 'dashboard', cashier: 'pos', clerk: 'inventory', viewer: 'dashboard' };
+  const defaultPages = { admin: 'dashboard', cashier: 'pos', clerk: 'inventory', viewer: 'dashboard', agent: 'incentives' };
   navigateTo(defaultPages[role] || 'dashboard');
 }
 
@@ -2478,7 +2481,7 @@ async function handleImportFile(input) {
     } else {
       if (typeof XLSX === 'undefined') {
  if (preview) preview.innerHTML += '<div style="text-align:center;color:var(--text3);font-size:0.8rem">Loading Excel parser...</div>';
-        await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+        await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
       }
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: 'array' });
@@ -3289,7 +3292,7 @@ async function downloadSummaryExcel(period, exportData) {
   toast('Preparing Excel file...', 'info');
   try {
     if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
     }
 
     const rows  = buildSummaryRows(exportData);
@@ -3753,7 +3756,7 @@ async function exportSalesExcel(rows, label) {
   toast('Preparing Excel...', 'info');
   try {
     if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
     }
     var HEADER = [
       '#', 'Transaction ID', 'Date', 'Time', 'Cashier',
@@ -4438,7 +4441,7 @@ async function audit_exportExcel() {
   toast('Preparing Excel...', 'info');
   try {
     if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
     }
     const now    = new Date();
     const HEADER = ['Product Name','Category','POS Stock (Pcs)','Actual Count','Variance','Remarks','Date Counted','Counted By'];
@@ -5160,7 +5163,7 @@ async function inc_exportDailyExcel(date) {
     const res = await gasRequest({ action:'inc_getDailySummary', date:date });
     if (!res.success || !res.claims || !res.claims.length) { toast('No data to export.','warning'); return; }
     if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
     }
     const now = new Date();
     const HEADER = ['Employee','Invoice No.','Barcode','Description','Qty','Incentive/Unit','Total Incentive','Status'];
