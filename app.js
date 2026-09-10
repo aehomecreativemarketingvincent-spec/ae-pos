@@ -255,6 +255,86 @@ async function doLogin() {
   }
 }
 
+// ── SALES AGENT SELF-REGISTRATION ────────────────────────
+function showRegisterPanel() {
+  const lc = document.querySelector('.login-card');
+  const rp = document.getElementById('registerPanel');
+  if (lc) lc.style.display = 'none';
+  if (rp) rp.style.display = 'block';
+  document.getElementById('regName')?.focus();
+  // Clear fields and message
+  ['regName','regUser','regPass','regPass2'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  setRegMsg('','');
+}
+
+function showLoginPanel() {
+  const lc = document.querySelector('.login-card');
+  const rp = document.getElementById('registerPanel');
+  if (lc) lc.style.display = 'block';
+  if (rp) rp.style.display = 'none';
+  setRegMsg('','');
+}
+
+function setRegMsg(msg, type) {
+  const el = document.getElementById('regMsg');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = type === 'error' ? 'var(--red,#ef4444)'
+                 : type === 'ok'    ? 'var(--green,#059669)'
+                 : 'var(--text3,#6b7280)';
+}
+
+async function doRegister() {
+  const name  = document.getElementById('regName')?.value.trim();
+  const user  = document.getElementById('regUser')?.value.trim().toLowerCase();
+  const pass  = document.getElementById('regPass')?.value;
+  const pass2 = document.getElementById('regPass2')?.value;
+
+  // Validation
+  if (!name)              { setRegMsg('Full name is required.','error'); return; }
+  if (!user)              { setRegMsg('Username is required.','error'); return; }
+  if (user.length < 3)    { setRegMsg('Username must be at least 3 characters.','error'); return; }
+  if (!/^[a-z0-9._]+$/.test(user)) { setRegMsg('Username: letters, numbers, dots, underscores only.','error'); return; }
+  if (!pass)              { setRegMsg('Password is required.','error'); return; }
+  if (pass.length < 4)    { setRegMsg('Password must be at least 4 characters.','error'); return; }
+  if (pass !== pass2)     { setRegMsg('Passwords do not match.','error'); return; }
+
+  setRegMsg('Creating account...','');
+  const btn = document.querySelector('#registerPanel .btn-login');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
+
+  try {
+    const res = await gasPost({
+      action:   'addCashier',
+      name:     name,
+      username: user,
+      password: pass,
+      role:     'agent',   // always agent — locked, cannot be changed by user
+    });
+
+    if (res.success) {
+      setRegMsg('Account created! You can now sign in.', 'ok');
+      if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
+      // Auto-fill login and switch back after 1.5s
+      setTimeout(() => {
+        showLoginPanel();
+        const lu = document.getElementById('loginUser');
+        if (lu) lu.value = user;
+        document.getElementById('loginPass')?.focus();
+      }, 1500);
+    } else {
+      setRegMsg(res.message || 'Error creating account.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
+    }
+  } catch(e) {
+    setRegMsg('Network error. Please try again.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
+  }
+}
+
 function showLoginErr(msg) {
   const el = document.getElementById('loginError');
  el.textContent = msg;
