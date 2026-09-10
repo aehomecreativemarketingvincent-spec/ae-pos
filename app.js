@@ -2903,6 +2903,7 @@ function openAddCashierModal() {
         <select id="c_role" name="c_role">
           <option value="cashier">Cashier</option>
           <option value="clerk">Inventory Clerk</option>
+          <option value="agent">Sales Agent (Incentives only)</option>
           <option value="admin">Admin</option>
         </select>
       </div>
@@ -2926,6 +2927,7 @@ function openEditCashierModal(id) {
           <select id="c_role">
             <option value="cashier" ${c.role==='cashier'?'selected':''}>Cashier</option>
             <option value="clerk" ${c.role==='clerk'?'selected':''}>Inventory Clerk</option>
+            <option value="agent" ${c.role==='agent'?'selected':''}>Sales Agent (Incentives only)</option>
             <option value="admin" ${c.role==='admin'?'selected':''}>Admin</option>
           </select>
         </div>
