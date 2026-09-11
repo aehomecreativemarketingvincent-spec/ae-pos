@@ -74,6 +74,21 @@
         <label for="regPass2">CONFIRM PASSWORD</label>
         <input type="password" id="regPass2" name="regPass2" placeholder="Re-enter password" autocomplete="new-password">
       </div>
+      <div class="form-group">
+        <label for="regBranch">BRANCH</label>
+        <select id="regBranch" name="regBranch">
+          <option value="">-- Select your branch --</option>
+          <option value="Vigan">Vigan</option>
+          <option value="SDO">SDO</option>
+          <option value="San Juan">San Juan</option>
+          <option value="Cabugao 1">Cabugao 1</option>
+          <option value="Cabugao 2">Cabugao 2</option>
+          <option value="Laoag">Laoag</option>
+          <option value="Candon">Candon</option>
+          <option value="Tagudin">Tagudin</option>
+          <option value="Elyu">Elyu</option>
+        </select>
+      </div>
       <div id="regMsg" style="min-height:18px;font-size:0.8rem;text-align:center;margin-bottom:6px"></div>
       <button class="btn-login" onclick="doRegister()">Create Account</button>
       <div style="margin-top:12px;text-align:center">
