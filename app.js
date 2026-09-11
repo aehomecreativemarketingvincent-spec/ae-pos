@@ -245,7 +245,7 @@ async function doLogin() {
   try {
     const res = await gasRequest({ action: 'login', username: u, password: p });
     if (res.success) {
-      currentUser = { id: res.id, name: res.name, role: res.role, username: u };
+      currentUser = { id: res.id, name: res.name, role: res.role, username: u, branch: res.branch || '' };
       finishLogin();
     } else {
       showLoginErr(res.message || 'Invalid username or password.');
@@ -307,12 +307,15 @@ async function doRegister() {
   if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
 
   try {
+    const branch = document.getElementById('regBranch')?.value || '';
+    if (!branch) { setRegMsg('Please select your branch.','error'); return; }
     const res = await gasPost({
       action:   'addCashier',
       name:     name,
       username: user,
       password: pass,
-      role:     'agent',   // always agent — locked, cannot be changed by user
+      role:     'agent',
+      branch:   branch,
     });
 
     if (res.success) {
@@ -4602,6 +4605,10 @@ function audit_printAudit() {
 // Roles: admin/clerk = full mgmt; cashier = submit claims only
 // ═══════════════════════════════════════════════════════════
 
+// ── BRANCHES ──────────────────────────────────────────────
+const INC_BRANCHES      = ['Vigan', 'SDO', 'San Juan', 'Cabugao1', 'Cabugao2', 'Laoag', 'Candon', 'Tagudin', 'Elyu'];
+const INC_BRANCHES_DISP = ['Vigan', 'SDO', 'San Juan', 'Cabugao 1', 'Cabugao 2', 'Laoag', 'Candon', 'Tagudin', 'Elyu'];
+
 // ── STATE ─────────────────────────────────────────────────
 let inc_masterCache = [];   // Incentive Master List
 let inc_claimState  = { invoiceNo:'', product:null, qty:1, valid:false };
@@ -4853,7 +4860,12 @@ function inc_renderMasterTable(items, el) {
       '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.itemCode) + '</td>' +
       '<td><b>' + esc(m.description) + '</b></td>' +
       '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category) + '</td>' +
-      '<td class="fw-700 text-green" style="font-size:1rem">&#8369;' + parseFloat(m.incentiveAmount||0).toFixed(2) + '</td>' +
+      '<td style="font-size:0.75rem;min-width:180px">' + INC_BRANCHES.map(function(b,i){
+        return '<span style="display:inline-block;margin-right:6px;white-space:nowrap">' +
+          '<span style="color:var(--text3)">' + INC_BRANCHES_DISP[i] + ':</span> ' +
+          (m[b] ? '<b>&#8369;' + parseFloat(m[b]).toFixed(0) + '</b>' : '<span style="color:#ddd">&#8212;</span>') +
+        '</span>';
+      }).join('') + '</td>' +
       '<td>' + inc_statusBadge(m.status) + '</td>' +
       (canEdit ?
         '<td><div style="display:flex;gap:5px">' +
@@ -4866,16 +4878,76 @@ function inc_renderMasterTable(items, el) {
   target.innerHTML =
     '<div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:center">' +
       (canEdit ? '<button class="btn btn-primary" onclick="inc_openItemModal()">+ Add Item</button>' : '') +
+      (canEdit ? '<button class="btn btn-ghost" onclick="inc_triggerExcelUpload()">&#8593; Upload Excel/CSV</button>' : '') +
+      '<input type="file" id="inc_excel_input" accept=".xlsx,.xls,.csv" style="display:none" onchange="inc_handleExcelUpload(this)">' +
       '<div class="search-wrap" style="margin-bottom:0">' +
         '<span class="search-icon">&#128269;</span>' +
         '<input type="text" id="incMasterSearch" placeholder="Search item or barcode..." oninput="inc_filterMaster(this.value)" style="padding:8px 12px 8px 32px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
       '</div>' +
     '</div>' +
     '<div class="card"><div class="tbl-wrap"><table>' +
-      '<thead><tr><th>Barcode</th><th>Item Code</th><th>Description</th><th>Category</th><th>Incentive</th><th>Status</th><th>Action</th></tr></thead>' +
+      '<thead><tr><th>Barcode</th><th>Description</th><th>Category</th><th>Incentive per Branch</th><th>Status</th><th>Action</th></tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
     '</table></div></div>';
 }
+
+function inc_triggerExcelUpload() {
+  const inp = document.getElementById('inc_excel_input');
+  if (inp) { inp.value = ''; inp.click(); }
+}
+
+async function inc_handleExcelUpload(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  toast('Reading file...', 'info');
+  try {
+    if (typeof XLSX === 'undefined') {
+      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
+    }
+    const buf  = await file.arrayBuffer();
+    const wb   = XLSX.read(buf, { type:'array' });
+    const ws   = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { defval:'' });
+    if (!rows.length) { toast('No data rows found in file.', 'error'); return; }
+
+    // Normalize column names
+    const normalized = rows.map(function(r) {
+      const keys = Object.keys(r);
+      const get  = function(names) {
+        for (let n of names) {
+          const k = keys.find(k2 => k2.trim().toLowerCase() === n.toLowerCase());
+          if (k !== undefined) return String(r[k] || '').trim();
+        }
+        return '';
+      };
+      return {
+        barcode: get(['barcode','Barcode','BARCODE','bar_code','Bar Code']),
+        name:    get(['name','Name','NAME','product name','Product Name','description','Description','PRODUCT NAME']),
+      };
+    }).filter(function(r){ return r.name; });
+
+    if (!normalized.length) {
+      toast('No valid rows found. Make sure file has "Barcode" and "Name"/"Product Name" columns.', 'error');
+      return;
+    }
+
+    toast('Uploading ' + normalized.length + ' products...', 'info');
+    const res = await gasPost({
+      action:    'inc_bulkImportMaster',
+      rows:      JSON.stringify(normalized),
+      updatedBy: currentUser.name || currentUser.username,
+    });
+    if (res.success) {
+      toast('Done! Added: ' + res.added + '  Skipped (duplicates): ' + res.skipped, 'success');
+      inc_loadMasterList();
+    } else {
+      toast(res.message || 'Upload failed.', 'error');
+    }
+  } catch(e) {
+    toast('File read error: ' + e.message, 'error');
+  }
+}
+
 
 function inc_filterMaster(q) {
   const term    = (q||'').toLowerCase();
@@ -4912,61 +4984,92 @@ function inc_filterMaster(q) {
 function inc_openItemModal(id) {
   const isEdit = !!id;
   const m      = isEdit ? inc_masterCache.find(x => x.id === id) : null;
-  openModal(
-    (isEdit ? '<div class="modal-title">Edit Incentive Item</div>' : '<div class="modal-title">Add Incentive Item</div>') +
+  const title  = isEdit ? 'Edit Incentive Item' : 'Add Incentive Item';
+  let html =
+    '<div class="modal-title">' + title + '</div>' +
     '<div class="input-row">' +
-      '<div class="field" style="grid-column:1/-1"><label for="ii_desc">Product Description *</label><input id="ii_desc" name="ii_desc" value="' + esc(m ? m.description : '') + '" placeholder="e.g. Washing Machine XL"></div>' +
+      '<div class="field" style="grid-column:1/-1"><label for="ii_desc">Product Description *</label>' +
+        '<input id="ii_desc" name="ii_desc" value="' + esc(m ? m.description : '') + '" placeholder="e.g. Washing Machine XL"></div>' +
     '</div>' +
     '<div class="input-row">' +
-      '<div class="field"><label for="ii_barcode">Barcode</label><input id="ii_barcode" name="ii_barcode" value="' + esc(m ? m.barcode : '') + '" placeholder="e.g. 100001"></div>' +
-      '<div class="field"><label for="ii_code">Item Code</label><input id="ii_code" name="ii_code" value="' + esc(m ? m.itemCode : '') + '" placeholder="e.g. WM-001"></div>' +
+      '<div class="field"><label for="ii_barcode">Barcode</label>' +
+        '<input id="ii_barcode" name="ii_barcode" value="' + esc(m ? m.barcode : '') + '" placeholder="e.g. 100001"></div>' +
+      '<div class="field"><label for="ii_cat">Category</label>' +
+        '<input id="ii_cat" name="ii_cat" value="' + esc(m ? m.category : '') + '" placeholder="e.g. Appliances"></div>' +
     '</div>' +
+    '<div style="margin-bottom:8px;padding:10px 0 4px">' +
+      '<div style="font-size:0.82rem;font-weight:700;color:var(--text2);margin-bottom:3px">Incentive Amount per Branch (&#8369;)</div>' +
+      '<div style="font-size:0.75rem;color:var(--text3)">Leave blank if no incentive for that branch.</div>' +
+    '</div>';
+  // Branch amount fields — 3 per row
+  const branchPairs = [
+    ['Vigan','Vigan'], ['SDO','SDO'], ['San Juan','San Juan'],
+    ['Cabugao1','Cabugao 1'], ['Cabugao2','Cabugao 2'], ['Laoag','Laoag'],
+    ['Candon','Candon'], ['Tagudin','Tagudin'], ['Elyu','Elyu'],
+  ];
+  for (let bi = 0; bi < branchPairs.length; bi += 3) {
+    html += '<div class="input-row">';
+    for (let bj = bi; bj < Math.min(bi+3, branchPairs.length); bj++) {
+      const [bKey, bDisp] = branchPairs[bj];
+      const curVal = m && m[bKey] !== undefined && m[bKey] !== '' ? m[bKey] : '';
+      html +=
+        '<div class="field"><label for="ii_br_' + bKey + '">' + bDisp + ' (&#8369;)</label>' +
+          '<input id="ii_br_' + bKey + '" name="ii_br_' + bKey + '" type="number" min="0" ' +
+          'value="' + curVal + '" placeholder="0"></div>';
+    }
+    html += '</div>';
+  }
+  html +=
     '<div class="input-row">' +
-      '<div class="field"><label for="ii_cat">Category</label><input id="ii_cat" name="ii_cat" value="' + esc(m ? m.category : '') + '" placeholder="e.g. Appliances"></div>' +
-      '<div class="field"><label for="ii_amt">Incentive Amount (&#8369;) *</label><input id="ii_amt" name="ii_amt" type="number" min="0" value="' + (m ? m.incentiveAmount : '') + '" placeholder="e.g. 50"></div>' +
+      '<div class="field"><label for="ii_status">Status</label>' +
+        '<select id="ii_status" name="ii_status">' +
+          '<option value="Active"' + (m && m.status === 'Active' ? ' selected' : '') + '>Active</option>' +
+          '<option value="Inactive"' + (m && m.status === 'Inactive' ? ' selected' : '') + '>Inactive</option>' +
+        '</select></div>' +
     '</div>' +
-    '<div class="input-row">' +
-      '<div class="field"><label for="ii_status">Status</label><select id="ii_status" name="ii_status"><option value="Active"' + (m && m.status==='Active' ? ' selected' : '') + '>Active</option><option value="Inactive"' + (m && m.status==='Inactive' ? ' selected' : '') + '>Inactive</option></select></div>' +
-    '</div>' +
-    '<button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="inc_saveItemModal(\'' + (id||'') + '\')">' + (isEdit ? 'Update Item' : 'Add Item') + '</button>'
-  );
+    '<button class="btn btn-primary" style="width:100%;margin-top:8px" ' +
+      'onclick="inc_saveItemModal(\'' + (id || '') + '\')">' + (isEdit ? 'Update Item' : 'Add Item') + '</button>';
+  openModal(html);
 }
-
 async function inc_saveItemModal(id) {
   const desc = document.getElementById('ii_desc')?.value.trim();
-  const amt  = document.getElementById('ii_amt')?.value;
-  if (!desc) { toast('Product description is required.','error'); return; }
-  if (!amt || isNaN(parseFloat(amt))) { toast('Incentive amount is required.','error'); return; }
-
+  if (!desc) { toast('Product description is required.', 'error'); return; }
   const payload = {
-    action:          'inc_saveMasterItem',
-    id:              id || null,
-    barcode:         document.getElementById('ii_barcode')?.value.trim() || '',
-    itemCode:        document.getElementById('ii_code')?.value.trim() || '',
-    description:     desc,
-    category:        document.getElementById('ii_cat')?.value.trim() || '',
-    incentiveAmount: parseFloat(amt),
-    status:          document.getElementById('ii_status')?.value || 'Active',
-    updatedBy:       currentUser.name || currentUser.username,
+    action:      'inc_saveMasterItem',
+    id:          id || null,
+    barcode:     document.getElementById('ii_barcode')?.value.trim() || '',
+    category:    document.getElementById('ii_cat')?.value.trim() || '',
+    description: desc,
+    status:      document.getElementById('ii_status')?.value || 'Active',
+    updatedBy:   currentUser.name || currentUser.username,
   };
+  // Per-branch incentive amounts
+  payload['branch_Vigan'] = document.getElementById('ii_br_Vigan')?.value || '';
+  payload['branch_SDO'] = document.getElementById('ii_br_SDO')?.value || '';
+  payload['branch_San Juan'] = document.getElementById('ii_br_SanJuan')?.value || '';
+  payload['branch_Cabugao1'] = document.getElementById('ii_br_Cabugao1')?.value || '';
+  payload['branch_Cabugao2'] = document.getElementById('ii_br_Cabugao2')?.value || '';
+  payload['branch_Laoag'] = document.getElementById('ii_br_Laoag')?.value || '';
+  payload['branch_Candon'] = document.getElementById('ii_br_Candon')?.value || '';
+  payload['branch_Tagudin'] = document.getElementById('ii_br_Tagudin')?.value || '';
+  payload['branch_Elyu'] = document.getElementById('ii_br_Elyu')?.value || '';
   const btn = document.querySelector('#modalBox .btn-primary');
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+  if (btn) { btn.disabled = true; btn.textContent = id ? 'Updating...' : 'Saving...'; }
   try {
     const res = await gasPost(payload);
     if (res.success) {
-      toast(id ? 'Incentive item updated.' : 'Item added to master list.', 'success');
+      toast(id ? 'Item updated.' : 'Item added to master list.', 'success');
       closeModalDirect();
       inc_loadMasterList();
     } else {
-      toast(res.message || 'Error saving item.','error');
+      toast(res.message || 'Error saving.', 'error');
       if (btn) { btn.disabled = false; btn.textContent = id ? 'Update Item' : 'Add Item'; }
     }
   } catch(e) {
-    toast('Network error.','error');
+    toast('Network error.', 'error');
     if (btn) { btn.disabled = false; }
   }
 }
-
 async function inc_deleteMasterItem(id) {
   if (!confirm('Delete this incentive item? This cannot be undone.')) return;
   try {
@@ -5048,31 +5151,47 @@ function inc_openClaimModal() {
   inc_claimState = { invoiceNo:'', product:null, qty:1, saleType:'retail', valid:false };
   openModal(
     '<div class="modal-title">Add Incentive Claim</div>' +
-    '<div class="field"><label for="inc_invoice">Sales Invoice Number</label>' +
-      '<input id="inc_invoice" name="inc_invoice" placeholder="e.g. SI1782100366396" oninput="inc_invoiceInput()">' +
+
+    // SI Number — manual entry from receipt
+    '<div class="field">' +
+      '<label for="inc_invoice">Sales Invoice Number</label>' +
+      '<input id="inc_invoice" name="inc_invoice" placeholder="Type SI number from receipt e.g. SI1782100366396" oninput="inc_invoiceInput()">' +
+      '<div style="font-size:0.75rem;color:var(--text3);margin-top:4px">Copy from the official receipt given to the customer.</div>' +
     '</div>' +
+
+    // Sale Type
     '<div class="field"><label>Sale Type</label>' +
       '<div style="display:flex;gap:8px;margin-top:4px">' +
-        '<button id="inc_btn_retail" onclick="inc_setSaleType(\'retail\')" style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--green);background:var(--green);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Retail (100%)</button>' +
-        '<button id="inc_btn_wholesale" onclick="inc_setSaleType(\'wholesale\')" style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Wholesale (50%)</button>' +
+        '<button id="inc_btn_retail" onclick="inc_setSaleType(\'retail\')" ' +
+          'style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--green);background:var(--green);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Retail (100%)</button>' +
+        '<button id="inc_btn_wholesale" onclick="inc_setSaleType(\'wholesale\')" ' +
+          'style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Wholesale (50%)</button>' +
       '</div>' +
     '</div>' +
-    '<div class="field"><label for="inc_product">Product (Barcode or Description)</label>' +
-      '<input id="inc_product" name="inc_product" placeholder="Type barcode or product name..." oninput="inc_productSearch()" autocomplete="off">' +
+
+    // Product search from master list
+    '<div class="field"><label for="inc_product">Product (Barcode or Product Name)</label>' +
+      '<input id="inc_product" name="inc_product" placeholder="Search product from incentive list..." oninput="inc_productSearch()" autocomplete="off">' +
       '<div id="inc_dropdown" style="display:none;border:1.5px solid var(--border);border-radius:8px;margin-top:4px;background:white;max-height:200px;overflow-y:auto;box-shadow:var(--shadow2)"></div>' +
+      '<div style="font-size:0.75rem;color:var(--text3);margin-top:4px">Only products with active incentives will appear.</div>' +
     '</div>' +
+
+    // Qty
     '<div class="field" id="inc_qty_row" style="display:none"><label for="inc_qty">Quantity</label>' +
       '<input id="inc_qty" name="inc_qty" type="number" min="1" value="1" oninput="inc_qtyChanged()">' +
     '</div>' +
+
     '<div id="inc_valbox" style="display:none;border-radius:8px;padding:12px 14px;margin-top:10px;font-size:0.84rem"></div>' +
     '<div id="inc_summary" style="display:none;background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
     '<button class="btn btn-primary" id="inc_submit_btn" style="width:100%;margin-top:12px" disabled onclick="inc_submitClaim()">Submit Claim</button>'
   );
-  // Pre-load master cache for search
+  // Pre-load master cache
   if (!inc_masterCache.length) {
     gasRequest({ action:'inc_getMaster' }).then(r => { inc_masterCache = r.data || []; }).catch(()=>{});
   }
 }
+
+
 
 function inc_invoiceInput() {
   inc_claimState.invoiceNo = (document.getElementById('inc_invoice')?.value || '').trim();
@@ -5158,8 +5277,13 @@ function inc_updateSummary() {
   const m        = inc_claimState.product;
   const qty      = inc_claimState.qty;
   const isWhole  = inc_claimState.saleType === 'wholesale';
-  const baseAmt  = parseFloat(m.incentiveAmount);
-  const effAmt   = isWhole ? baseAmt * 0.5 : baseAmt;  // 50% if wholesale
+  // Get branch-specific incentive amount
+  const userBranch = currentUser.branch || '';
+  const branchKey  = 'branch_' + userBranch;
+  const baseAmt    = (m[branchKey] !== undefined && m[branchKey] !== '' && parseFloat(m[branchKey]) > 0)
+                       ? parseFloat(m[branchKey])
+                       : parseFloat(m.incentiveAmount || 0);
+  const effAmt     = isWhole ? baseAmt * 0.5 : baseAmt;
   const tot      = qty * effAmt;
   const el       = document.getElementById('inc_summary');
   if (!el) return;
@@ -5200,8 +5324,12 @@ async function inc_submitClaim() {
   const m        = inc_claimState.product;
   const qty      = inc_claimState.qty;
   const isWhole  = inc_claimState.saleType === 'wholesale';
-  const baseAmt  = parseFloat(m.incentiveAmount);
-  const effAmt   = isWhole ? baseAmt * 0.5 : baseAmt;
+  const userBranch = currentUser.branch || '';
+  const branchKey  = 'branch_' + userBranch;
+  const baseAmt    = (m[branchKey] !== undefined && m[branchKey] !== '' && parseFloat(m[branchKey]) > 0)
+                       ? parseFloat(m[branchKey])
+                       : parseFloat(m.incentiveAmount || 0);
+  const effAmt     = isWhole ? baseAmt * 0.5 : baseAmt;
   const btn = document.getElementById('inc_submit_btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
 
@@ -5215,6 +5343,7 @@ async function inc_submitClaim() {
     description:     m.description,
     qty:             qty,
     saleType:        inc_claimState.saleType || 'retail',
+    branch:          currentUser.branch || '',
     incentivePerUnit:effAmt,
     totalIncentive:  qty * effAmt,
   };
