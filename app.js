@@ -3,7 +3,7 @@
    ============================================= */
 
 // ─── CONFIG ───────────────────────────────────
-const GAS_URL = "https://script.google.com/macros/s/AKfycbx3XW5BujvDZuGFG1mGD2Lg84zNC8r3j4rN2AQTa9BA1Il8SjwqDY6C_vQL8uMMCN2YkA/exec";
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbx3XW5BujvDZuGFG1mGD2Lg84zNC8r3j4rN2AQTa9BA1Il8SjwqDY6C_vQL8uMMCN2YkA/exec";
 
 // ─── SAFE LOCALSTORAGE HELPERS ───────────────
 function lsGet(key, fallback) {
@@ -4861,11 +4861,13 @@ function inc_renderMasterTable(items, el) {
   const branch  = inc_activeBranch; // null = All view
 
   // ── Tab bar
+  const tabBase   = 'padding:6px 14px;border-radius:20px;border:1.5px solid var(--border);background:white;color:var(--text2);font-size:0.78rem;font-weight:600;font-family:var(--font-main);cursor:pointer;white-space:nowrap;margin-bottom:4px';
+  const tabActive = 'padding:6px 14px;border-radius:20px;border:1.5px solid var(--blue,#1e90ff);background:var(--blue,#1e90ff);color:white;font-size:0.78rem;font-weight:600;font-family:var(--font-main);cursor:pointer;white-space:nowrap;margin-bottom:4px';
   const tabsHtml =
-    '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px">' +
-      '<button class="inc-branch-tab' + (!branch ? ' active' : '') + '" onclick="inc_switchBranchTab(null)">All Branches</button>' +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">' +
+      '<button style="' + (!branch ? tabActive : tabBase) + '" onclick="inc_switchBranchTab(null)">All Branches</button>' +
       INC_BRANCHES.map(function(b, i) {
-        return '<button class="inc-branch-tab' + (branch===b ? ' active' : '') + '" ' +
+        return '<button style="' + (branch===b ? tabActive : tabBase) + '" ' +
           'onclick="inc_switchBranchTab(\'' + b + '\')">' + INC_BRANCHES_DISP[i] + '</button>';
       }).join('') +
     '</div>';
@@ -4972,6 +4974,11 @@ async function inc_saveBranchAmt(itemId, branch) {
   }
 }
 
+
+// ── EXCEL UPLOAD STATE ────────────────────────────────────
+let inc_importRows   = [];
+let inc_importCombos = [];
+
 function inc_triggerExcelUpload() {
   const inp = document.getElementById('inc_excel_input');
   if (inp) { inp.value = ''; inp.click(); }
@@ -4985,18 +4992,18 @@ async function inc_handleExcelUpload(input) {
     if (typeof XLSX === 'undefined') {
       await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
     }
-    const buf  = await file.arrayBuffer();
-    const wb   = XLSX.read(buf, { type:'array' });
-    const ws   = wb.Sheets[wb.SheetNames[0]];
-    const raw  = XLSX.utils.sheet_to_json(ws, { defval:'' });
-    if (!raw.length) { toast('No data rows found in file.', 'error'); return; }
+    const buf = await file.arrayBuffer();
+    const wb  = XLSX.read(buf, { type:'array' });
+    const ws  = wb.Sheets[wb.SheetNames[0]];
+    const raw = XLSX.utils.sheet_to_json(ws, { defval:'' });
+    if (!raw.length) { toast('No data found in file.', 'error'); return; }
 
     const normalized = raw.map(function(r) {
       const keys = Object.keys(r);
       function get(names) {
-        for (let n of names) {
+        for (const n of names) {
           const k = keys.find(function(k2){ return k2.trim().toLowerCase() === n.toLowerCase(); });
-          if (k !== undefined) return String(r[k] || '').trim();
+          if (k !== undefined) return String(r[k]||'').trim();
         }
         return '';
       }
@@ -5007,27 +5014,197 @@ async function inc_handleExcelUpload(input) {
     }).filter(function(r){ return r.name; });
 
     if (!normalized.length) {
-      toast('No valid rows found. Columns needed: "Barcode" and "Name" or "Product Name".', 'error');
+      toast('No valid rows. File needs "Barcode" and "Name" or "Product Name" columns.', 'error');
       return;
     }
-
-    // Show preview count
-    toast('Uploading ' + normalized.length + ' products...', 'info');
-    const res = await gasPost({
-      action:    'inc_bulkImportMaster',
-      rows:      JSON.stringify(normalized),
-      updatedBy: currentUser.name || currentUser.username,
-    });
-    if (res.success) {
-      toast('Done! Added: ' + res.added + '  Skipped (duplicates): ' + res.skipped, 'success');
-      await inc_loadMasterList();
-    } else {
-      toast(res.message || 'Upload failed.', 'error');
-    }
+    inc_importRows   = normalized;
+    inc_importCombos = [{ branch:'', category:'', amount:'' }];
+    inc_showImportPreview();
   } catch(e) {
     toast('File read error: ' + e.message, 'error');
   }
 }
+
+function inc_showImportPreview() {
+  const rows     = inc_importRows;
+  const existing = inc_masterCache;
+  const tagged   = rows.map(function(r) {
+    const isDup = existing.some(function(e) {
+      return (r.barcode && e.barcode === r.barcode) ||
+             e.description.toLowerCase() === r.name.toLowerCase();
+    });
+    return Object.assign({}, r, { dup: isDup });
+  });
+  const newCount = tagged.filter(function(r){ return !r.dup; }).length;
+  const dupCount = tagged.filter(function(r){ return r.dup;  }).length;
+
+  function buildCombos() {
+    return inc_importCombos.map(function(c, ci) {
+      const branchOpts = '<option value="">-- Branch --</option>' +
+        INC_BRANCHES.map(function(b,i){
+          return '<option value="' + b + '"' + (c.branch===b?' selected':'') + '>' + INC_BRANCHES_DISP[i] + '</option>';
+        }).join('');
+      return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">' +
+        '<select onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
+          'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;min-width:130px">' +
+          branchOpts + '</select>' +
+        '<input type="text" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
+          'oninput="inc_updateCombo(' + ci + ',\'category\',this.value)" ' +
+          'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;flex:1;min-width:120px">' +
+        '<div style="display:flex;align-items:center;gap:4px">' +
+          '<span style="font-weight:700">&#8369;</span>' +
+          '<input type="number" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
+            'oninput="inc_updateCombo(' + ci + ',\'amount\',this.value)" ' +
+            'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;width:100px">' +
+        '</div>' +
+        (inc_importCombos.length > 1
+          ? '<button onclick="inc_removeCombo(' + ci + ')" style="background:none;border:none;color:var(--red,#ef4444);font-size:1.1rem;cursor:pointer;padding:0 4px">&#10005;</button>'
+          : '') +
+      '</div>';
+    }).join('');
+  }
+
+  const previewRows = tagged.map(function(r, i) {
+    return '<tr style="' + (r.dup ? 'opacity:0.45' : '') + '">' +
+      '<td style="padding:8px 12px;font-family:var(--font-mono);font-size:0.78rem">' + esc(r.barcode||'—') + '</td>' +
+      '<td style="padding:8px 12px;font-size:0.85rem"><b>' + esc(r.name) + '</b></td>' +
+      '<td style="padding:8px 12px;text-align:center">' +
+        (r.dup
+          ? '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:700">DUPLICATE</span>'
+          : '<span style="background:#d1fae5;color:#065f46;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:700">NEW</span>') +
+      '</td>' +
+      '<td style="padding:8px 12px;text-align:center">' +
+        (!r.dup ? '<button onclick="inc_removeImportRow(' + i + ')" title="Remove" ' +
+          'style="background:none;border:none;color:var(--red,#ef4444);font-size:1rem;cursor:pointer">&#10005;</button>' : '') +
+      '</td>' +
+    '</tr>';
+  }).join('');
+
+  const html =
+    '<div class="modal-title">Import Incentive Items</div>' +
+    '<div style="display:flex;gap:10px;margin-bottom:14px">' +
+      '<div style="flex:1;background:#d1fae5;border-radius:8px;padding:10px 14px;text-align:center">' +
+        '<div style="font-size:1.4rem;font-weight:700;color:#065f46">' + newCount + '</div>' +
+        '<div style="font-size:0.73rem;color:#065f46">New Items</div>' +
+      '</div>' +
+      '<div style="flex:1;background:#fee2e2;border-radius:8px;padding:10px 14px;text-align:center">' +
+        '<div style="font-size:1.4rem;font-weight:700;color:#991b1b">' + dupCount + '</div>' +
+        '<div style="font-size:0.73rem;color:#991b1b">Duplicates (skipped)</div>' +
+      '</div>' +
+    '</div>' +
+    '<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:14px;margin-bottom:14px">' +
+      '<div style="font-size:0.82rem;font-weight:700;color:var(--text2);margin-bottom:6px">&#128176; Set Incentive Amounts ' +
+        '<span style="font-weight:400;color:var(--text3);font-size:0.78rem">(optional — can set later)</span></div>' +
+      '<div style="font-size:0.75rem;color:var(--text3);margin-bottom:10px">Branch + Category keyword + Amount — applies to all matching items on import.</div>' +
+      '<div id="inc_combos_wrap">' + buildCombos() + '</div>' +
+      '<button onclick="inc_addCombo()" ' +
+        'style="background:none;border:1.5px dashed var(--border);border-radius:7px;padding:6px 14px;font-size:0.8rem;color:var(--text3);cursor:pointer;font-family:var(--font-main);margin-top:6px;width:100%">' +
+        '+ Add Another Branch / Category' +
+      '</button>' +
+    '</div>' +
+    '<div style="font-size:0.82rem;font-weight:700;margin-bottom:8px">Preview (' + rows.length + ' items)</div>' +
+    '<div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px">' +
+      '<table style="width:100%;border-collapse:collapse">' +
+        '<thead><tr style="background:#f9fafb;border-bottom:1px solid var(--border)">' +
+          '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Barcode</th>' +
+          '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Name</th>' +
+          '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:center">Status</th>' +
+          '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:center">Remove</th>' +
+        '</tr></thead>' +
+        '<tbody>' + previewRows + '</tbody>' +
+      '</table>' +
+    '</div>' +
+    '<div style="display:flex;gap:10px;margin-top:14px">' +
+      '<button class="btn btn-ghost" style="flex:1" onclick="closeModalDirect()">Cancel</button>' +
+      '<button class="btn btn-primary" style="flex:2" onclick="inc_confirmImport()">Import ' + newCount + ' Items</button>' +
+    '</div>';
+
+  openModal(html);
+}
+
+function inc_updateCombo(idx, field, value) {
+  if (inc_importCombos[idx]) inc_importCombos[idx][field] = value;
+}
+
+function inc_addCombo() {
+  inc_importCombos.push({ branch:'', category:'', amount:'' });
+  inc_refreshCombos();
+}
+
+function inc_removeCombo(idx) {
+  inc_importCombos.splice(idx, 1);
+  inc_refreshCombos();
+}
+
+function inc_refreshCombos() {
+  const wrap = document.getElementById('inc_combos_wrap');
+  if (!wrap) return;
+  wrap.innerHTML = inc_importCombos.map(function(c, ci) {
+    const branchOpts = '<option value="">-- Branch --</option>' +
+      INC_BRANCHES.map(function(b,i){
+        return '<option value="' + b + '"' + (c.branch===b?' selected':'') + '>' + INC_BRANCHES_DISP[i] + '</option>';
+      }).join('');
+    return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">' +
+      '<select onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
+        'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;min-width:130px">' +
+        branchOpts + '</select>' +
+      '<input type="text" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
+        'oninput="inc_updateCombo(' + ci + ',\'category\',this.value)" ' +
+        'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;flex:1;min-width:120px">' +
+      '<div style="display:flex;align-items:center;gap:4px">' +
+        '<span style="font-weight:700">&#8369;</span>' +
+        '<input type="number" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
+          'oninput="inc_updateCombo(' + ci + ',\'amount\',this.value)" ' +
+          'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;width:100px">' +
+      '</div>' +
+      (inc_importCombos.length > 1
+        ? '<button onclick="inc_removeCombo(' + ci + ')" style="background:none;border:none;color:var(--red,#ef4444);font-size:1.1rem;cursor:pointer;padding:0 4px">&#10005;</button>'
+        : '') +
+    '</div>';
+  }).join('');
+}
+
+function inc_removeImportRow(idx) {
+  inc_importRows.splice(idx, 1);
+  inc_showImportPreview();
+}
+
+async function inc_confirmImport() {
+  const newRows = inc_importRows.filter(function(r) {
+    return !inc_masterCache.some(function(e) {
+      return (r.barcode && e.barcode === r.barcode) ||
+             e.description.toLowerCase() === r.name.toLowerCase();
+    });
+  });
+  if (!newRows.length) { toast('No new items to import.', 'warning'); return; }
+
+  const validCombos = inc_importCombos.filter(function(c){ return c.branch && c.amount; });
+  const btn = document.querySelector('#modalBox .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing...'; }
+
+  try {
+    const res = await gasPost({
+      action:    'inc_bulkImportMaster',
+      rows:      JSON.stringify(newRows),
+      combos:    JSON.stringify(validCombos),
+      updatedBy: currentUser.name || currentUser.username,
+    });
+    if (res.success) {
+      closeModalDirect();
+      const msg = 'Imported ' + res.added + ' item(s)!' +
+        (res.amountsSet ? ' Incentives set: ' + res.amountsSet + ' item(s).' : '');
+      toast(msg, 'success');
+      await inc_loadMasterList();
+    } else {
+      toast(res.message || 'Import failed.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Import'; }
+    }
+  } catch(e) {
+    toast('Network error: ' + e.message, 'error');
+    if (btn) btn.disabled = false;
+  }
+}
+
 
 function inc_filterMaster(q) {
   const term = (q || '').toLowerCase().trim();
