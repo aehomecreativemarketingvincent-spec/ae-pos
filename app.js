@@ -4526,8 +4526,10 @@ async function audit_exportExcel() {
   toast('Preparing Excel...', 'info');
   try {
     if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
+      try { await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js'); }
+      catch(e1) { await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js').catch(()=>{}); }
     }
+    if (typeof XLSX === 'undefined') { toast('Excel library failed to load.','error'); return; }
     const now    = new Date();
     const HEADER = ['Product Name','Category','POS Stock (Pcs)','Actual Count','Variance','Remarks','Date Counted','Counted By'];
     const data   = audit_current.map(function(r) {
@@ -4842,6 +4844,7 @@ let inc_activeBranch = null; // null = All view
 
 async function inc_loadMasterList(branch) {
   if (branch !== undefined) inc_activeBranch = branch;
+  else if (inc_activeBranch === undefined) inc_activeBranch = null;
   const el = document.getElementById('incContent');
   if (!el) return;
   el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
@@ -4875,8 +4878,7 @@ function inc_renderMasterTable(items, el) {
   // ── Toolbar
   const toolbar =
     '<div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center">' +
-      (canEdit ? '<button class="btn btn-primary" onclick="inc_openItemModal()">+ Add Item</button>' : '') +
-      (canEdit ? '<button class="btn btn-ghost" onclick="inc_triggerExcelUpload()">&#8593; Upload Excel/CSV</button>' : '') +
+            (canEdit ? '<button class="btn btn-ghost" onclick="inc_triggerExcelUpload()">&#8593; Upload Excel/CSV</button>' : '') +
       '<input type="file" id="inc_excel_input" accept=".xlsx,.xls,.csv" style="display:none" onchange="inc_handleExcelUpload(this)">' +
       '<div class="search-wrap" style="margin-bottom:0">' +
         '<span class="search-icon">&#128269;</span>' +
@@ -4956,21 +4958,27 @@ function inc_switchBranchTab(branch) {
 async function inc_saveBranchAmt(itemId, branch) {
   const inp = document.getElementById('inc_amt_' + itemId);
   const amt = inp ? inp.value.trim() : '';
-  const res = await gasPost({
-    action: 'inc_saveBranchAmount',
-    id:     itemId,
-    branch: branch,
-    amount: amt,
-  });
-  if (res.success) {
-    // Update local cache
-    const m = inc_masterCache.find(function(x){ return x.id === itemId; });
-    if (m) m[branch] = amt !== '' ? parseFloat(amt) : '';
-    toast('Amount saved!', 'success');
-    // Re-render to reflect update
-    inc_renderMasterTable(inc_masterCache);
-  } else {
-    toast(res.message || 'Error saving amount.', 'error');
+  const btn = inp ? inp.nextElementSibling : null;
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  try {
+    const res = await gasPost({
+      action: 'inc_saveBranchAmount',
+      id:     itemId,
+      branch: branch,
+      amount: amt,
+    });
+    if (res.success) {
+      const m = inc_masterCache.find(function(x){ return x.id === itemId; });
+      if (m) m[branch] = amt !== '' ? parseFloat(amt) : '';
+      toast('Amount saved!', 'success');
+      inc_renderMasterTable(inc_masterCache);
+    } else {
+      toast(res.message || 'Error saving amount.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
+  } catch(e) {
+    toast('Network error saving amount.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
   }
 }
 
@@ -4989,9 +4997,20 @@ async function inc_handleExcelUpload(input) {
   if (!file) return;
   toast('Reading file...', 'info');
   try {
+    // Ensure XLSX is loaded — try primary CDN then fallback
     if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
+      try {
+        await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
+      } catch(e1) {
+        try {
+          await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+        } catch(e2) {
+          toast('Could not load Excel library. Check your internet connection.', 'error');
+          return;
+        }
+      }
     }
+    if (typeof XLSX === 'undefined') { toast('Excel library failed to load.', 'error'); return; }
     const buf = await file.arrayBuffer();
     const wb  = XLSX.read(buf, { type:'array' });
     const ws  = wb.Sheets[wb.SheetNames[0]];
@@ -5268,7 +5287,7 @@ function inc_openItemModal(id) {
   const isEdit = !!id;
   const m = isEdit ? inc_masterCache.find(function(x){ return x.id === id; }) : null;
   let html =
-    '<div class="modal-title">' + (isEdit ? 'Edit Item' : 'Add Item') + '</div>' +
+    '<div class="modal-title">Edit Item</div>' +
     '<div class="input-row">' +
       '<div class="field" style="grid-column:1/-1"><label for="ii_desc">Product Description *</label>' +
         '<input id="ii_desc" name="ii_desc" value="' + esc(m ? m.description : '') + '" placeholder="e.g. Washing Machine XL"></div>' +
@@ -5288,7 +5307,7 @@ function inc_openItemModal(id) {
     '</div>' +
     '<p style="font-size:0.78rem;color:var(--text3);margin-top:4px">&#128161; Set incentive amounts per branch from the branch tabs in the master list.</p>' +
     '<button class="btn btn-primary" style="width:100%;margin-top:10px" ' +
-      'onclick="inc_saveItemModal(\'' + (id||'') + '\')">' + (isEdit ? 'Update Item' : 'Add Item') + '</button>';
+      'onclick="inc_saveItemModal(\'' + (id||'') + '\')">' + 'Update Item' + '</button>';
   openModal(html);
 }
 
