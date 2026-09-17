@@ -14,8 +14,29 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  if (e.request.url.includes('script.google.com')) return; // don't cache GAS
+  // Never intercept GAS, CDN scripts, or non-GET requests
+  const url = e.request.url;
+  if (url.includes('script.google.com')) return;
+  if (url.includes('cdn.sheetjs.com')) return;
+  if (url.includes('cdnjs.cloudflare.com')) return;
+  if (url.includes('cdn.jsdelivr.net')) return;
+  if (e.request.method !== 'GET') return;
+
   e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request))
+    fetch(e.request)
+      .then(function(res) {
+        // Only cache valid responses
+        if (!res || res.status !== 200 || res.type === 'opaque') return res;
+        return res;
+      })
+      .catch(function() {
+        return caches.match(e.request).then(function(cached) {
+          // Return cached version OR a fallback — never undefined
+          return cached || new Response('Network error', {
+            status: 503,
+            headers: { 'Content-Type': 'text/plain' }
+          });
+        });
+      })
   );
 });
