@@ -3,7 +3,7 @@
    ============================================= */
 
 // ─── CONFIG ───────────────────────────────────
-const GAS_URL = "https://script.google.com/macros/s/AKfycbx3XW5BujvDZuGFG1mGD2Lg84zNC8r3j4rN2AQTa9BA1Il8SjwqDY6C_vQL8uMMCN2YkA/exec";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzbdiqn_2POqByVcw_vTRS4wqhVj_4BsmHE9K55OOHxpTvbpP0F-y9CHTmRHv2eonsSJg/exec";
 
 // ─── SAFE LOCALSTORAGE HELPERS ───────────────
 function lsGet(key, fallback) {
@@ -4842,9 +4842,11 @@ async function inc_loadAllClaims() {
 // ── INCENTIVE MASTER LIST STATE ────────────────────────────
 let inc_activeBranch = null; // null = All view
 
+
+// ── MASTER LIST STATE ─────────────────────────────────────
 async function inc_loadMasterList(branch) {
   if (branch !== undefined) inc_activeBranch = branch;
-  else if (inc_activeBranch === undefined) inc_activeBranch = null;
+  if (inc_activeBranch === undefined) inc_activeBranch = null;
   const el = document.getElementById('incContent');
   if (!el) return;
   el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
@@ -4853,6 +4855,7 @@ async function inc_loadMasterList(branch) {
     inc_masterCache = res.data || [];
     inc_renderMasterTable(inc_masterCache, el);
   } catch(e) {
+    el.innerHTML = '<div class="no-data"><div class="no-data-text">Error loading. Check connection.</div></div>';
     toast('Error loading incentive list.', 'error');
   }
 }
@@ -4861,11 +4864,12 @@ function inc_renderMasterTable(items, el) {
   const target  = el || document.getElementById('incContent');
   if (!target) return;
   const canEdit = currentUser.role === 'admin';
-  const branch  = inc_activeBranch; // null = All view
+  const branch  = inc_activeBranch;
 
-  // ── Tab bar
-  const tabBase   = 'padding:6px 14px;border-radius:20px;border:1.5px solid var(--border);background:white;color:var(--text2);font-size:0.78rem;font-weight:600;font-family:var(--font-main);cursor:pointer;white-space:nowrap;margin-bottom:4px';
-  const tabActive = 'padding:6px 14px;border-radius:20px;border:1.5px solid var(--blue,#1e90ff);background:var(--blue,#1e90ff);color:white;font-size:0.78rem;font-weight:600;font-family:var(--font-main);cursor:pointer;white-space:nowrap;margin-bottom:4px';
+  // Tab styles
+  const tabBase   = 'padding:6px 14px;border-radius:20px;border:1.5px solid var(--border);background:white;color:var(--text2);font-size:0.78rem;font-weight:600;font-family:var(--font-main);cursor:pointer;white-space:nowrap';
+  const tabActive = 'padding:6px 14px;border-radius:20px;border:1.5px solid var(--blue,#1e90ff);background:var(--blue,#1e90ff);color:white;font-size:0.78rem;font-weight:600;font-family:var(--font-main);cursor:pointer;white-space:nowrap';
+
   const tabsHtml =
     '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">' +
       '<button style="' + (!branch ? tabActive : tabBase) + '" onclick="inc_switchBranchTab(null)">All Branches</button>' +
@@ -4875,10 +4879,9 @@ function inc_renderMasterTable(items, el) {
       }).join('') +
     '</div>';
 
-  // ── Toolbar
   const toolbar =
     '<div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center">' +
-            (canEdit ? '<button class="btn btn-ghost" onclick="inc_triggerExcelUpload()">&#8593; Upload Excel/CSV</button>' : '') +
+      (canEdit ? '<button class="btn btn-primary" onclick="inc_triggerExcelUpload()">Upload Excel/CSV</button>' : '') +
       '<input type="file" id="inc_excel_input" accept=".xlsx,.xls,.csv" style="display:none" onchange="inc_handleExcelUpload(this)">' +
       '<div class="search-wrap" style="margin-bottom:0">' +
         '<span class="search-icon">&#128269;</span>' +
@@ -4886,19 +4889,27 @@ function inc_renderMasterTable(items, el) {
           'oninput="inc_filterMaster(this.value)" ' +
           'style="padding:8px 12px 8px 32px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
       '</div>' +
+      (canEdit && branch ?
+        '<span style="font-size:0.78rem;color:var(--text3)">Viewing: <b>' + (INC_BRANCHES_DISP[INC_BRANCHES.indexOf(branch)] || branch) + '</b> — amounts set via Excel upload</span>' : '') +
     '</div>';
 
-  // ── Table
+  // ALL BRANCHES view
   let thead, rows;
   if (!branch) {
-    // ALL BRANCHES view — show all branch columns
-    const branchHeaders = INC_BRANCHES_DISP.map(function(d) { return '<th>' + d + '</th>'; }).join('');
-    thead = '<thead><tr><th>Barcode</th><th>Description</th><th>Category</th>' + branchHeaders + '<th>Status</th>' + (canEdit ? '<th></th>' : '') + '</tr></thead>';
+    const branchHeaders = INC_BRANCHES_DISP.map(function(d) { return '<th style="min-width:70px;text-align:center">' + d + '</th>'; }).join('');
+    thead = '<thead><tr>' +
+      '<th>Barcode</th><th>Description</th><th>Category</th>' +
+      branchHeaders +
+      '<th>Status</th>' + (canEdit ? '<th></th>' : '') +
+    '</tr></thead>';
+
     rows = items.map(function(m) {
       const branchCells = INC_BRANCHES.map(function(b) {
-        const amt = m[b] !== undefined && m[b] !== '' ? parseFloat(m[b]) : null;
-        return '<td class="amt-display" style="text-align:center;font-size:0.85rem">' +
-          (amt !== null ? '<b style="color:var(--green)">&#8369;' + amt.toFixed(0) + '</b>' : '<span style="color:#ddd">&#8212;</span>') +
+        const amt = (m[b] !== undefined && m[b] !== '' && m[b] !== null) ? parseFloat(m[b]) : null;
+        return '<td style="text-align:center;font-size:0.82rem">' +
+          (amt !== null && !isNaN(amt)
+            ? '<b style="color:var(--green)">&#8369;' + amt.toFixed(0) + '</b>'
+            : '<span style="color:#ddd">&#8212;</span>') +
         '</td>';
       }).join('');
       return '<tr>' +
@@ -4907,41 +4918,41 @@ function inc_renderMasterTable(items, el) {
         '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category || '—') + '</td>' +
         branchCells +
         '<td>' + inc_statusBadge(m.status) + '</td>' +
-        (canEdit ? '<td><div style="display:flex;gap:5px">' +
-          '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
-          '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
-        '</div></td>' : '') +
+        (canEdit ?
+          '<td><div style="display:flex;gap:5px">' +
+            '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
+            '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
+          '</div></td>' : '') +
       '</tr>';
-    }).join('') || '<tr><td colspan="' + (4 + INC_BRANCHES.length + (canEdit?1:0)) + '"><div class="no-data"><div class="no-data-text">No items yet.</div></div></td></tr>';
+    }).join('') || '<tr><td colspan="' + (4 + INC_BRANCHES.length + (canEdit?1:0)) + '" style="padding:24px;text-align:center;color:var(--text3)">No items yet. Upload an Excel file to add products.</td></tr>';
+
   } else {
-    // SINGLE BRANCH view — inline editable amount
+    // SINGLE BRANCH — read-only amounts (set via upload only)
     const branchDisp = INC_BRANCHES_DISP[INC_BRANCHES.indexOf(branch)] || branch;
-    thead = '<thead><tr><th>Barcode</th><th>Description</th><th>Category</th>' +
+    thead = '<thead><tr>' +
+      '<th>Barcode</th><th>Description</th><th>Category</th>' +
       '<th style="color:var(--accent)">Incentive (' + branchDisp + ')</th>' +
-      '<th>Status</th>' + (canEdit ? '<th>Set Amount</th>' : '') + '</tr></thead>';
+      '<th>Status</th>' + (canEdit ? '<th></th>' : '') +
+    '</tr></thead>';
+
     rows = items.map(function(m) {
-      const amt     = m[branch] !== undefined && m[branch] !== '' ? parseFloat(m[branch]) : null;
-      const amtDisp = amt !== null
+      const amt    = (m[branch] !== undefined && m[branch] !== '' && m[branch] !== null) ? parseFloat(m[branch]) : null;
+      const amtD   = (amt !== null && !isNaN(amt))
         ? '<b style="color:var(--green);font-size:1rem">&#8369;' + amt.toFixed(2) + '</b>'
         : '<span style="color:var(--text4)">Not set</span>';
-      const setBtn  = canEdit
-        ? '<td><div style="display:flex;gap:6px;align-items:center">' +
-            '<input type="number" min="0" placeholder="0.00" ' +
-              'id="inc_amt_' + m.id + '" ' +
-              'value="' + (amt !== null ? amt : '') + '" ' +
-              'style="width:90px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;font-family:var(--font-main);font-size:0.85rem">' +
-            '<button class="inv-btn inv-btn-in" onclick="inc_saveBranchAmt(\'' + m.id + '\',\'' + branch + '\')">Save</button>' +
-          '</div></td>'
-        : '';
       return '<tr>' +
         '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.barcode || '—') + '</td>' +
         '<td><b>' + esc(m.description) + '</b></td>' +
         '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category || '—') + '</td>' +
-        '<td>' + amtDisp + '</td>' +
+        '<td>' + amtD + '</td>' +
         '<td>' + inc_statusBadge(m.status) + '</td>' +
-        setBtn +
+        (canEdit ?
+          '<td><div style="display:flex;gap:5px">' +
+            '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
+            '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
+          '</div></td>' : '') +
       '</tr>';
-    }).join('') || '<tr><td colspan="' + (5 + (canEdit?1:0)) + '"><div class="no-data"><div class="no-data-text">No items yet.</div></div></td></tr>';
+    }).join('') || '<tr><td colspan="' + (5 + (canEdit?1:0)) + '" style="padding:24px;text-align:center;color:var(--text3)">No items. Upload an Excel file to add products.</td></tr>';
   }
 
   target.innerHTML = tabsHtml + toolbar +
@@ -4955,31 +4966,140 @@ function inc_switchBranchTab(branch) {
   inc_renderMasterTable(inc_masterCache);
 }
 
-async function inc_saveBranchAmt(itemId, branch) {
-  const inp = document.getElementById('inc_amt_' + itemId);
-  const amt = inp ? inp.value.trim() : '';
-  const btn = inp ? inp.nextElementSibling : null;
-  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+function inc_filterMaster(q) {
+  const term     = (q || '').toLowerCase().trim();
+  const filtered = term
+    ? inc_masterCache.filter(function(m) {
+        return (m.barcode      || '').toLowerCase().includes(term) ||
+               (m.description  || '').toLowerCase().includes(term) ||
+               (m.category     || '').toLowerCase().includes(term);
+      })
+    : inc_masterCache;
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  const tbody = el.querySelector('tbody');
+  if (!tbody) { inc_renderMasterTable(filtered); return; }
+  const canEdit = currentUser.role === 'admin';
+  const branch  = inc_activeBranch;
+  if (!branch) {
+    tbody.innerHTML = filtered.map(function(m) {
+      const branchCells = INC_BRANCHES.map(function(b) {
+        const amt = (m[b] !== undefined && m[b] !== '' && m[b] !== null) ? parseFloat(m[b]) : null;
+        return '<td style="text-align:center;font-size:0.82rem">' +
+          (amt !== null && !isNaN(amt)
+            ? '<b style="color:var(--green)">&#8369;' + amt.toFixed(0) + '</b>'
+            : '<span style="color:#ddd">&#8212;</span>') +
+        '</td>';
+      }).join('');
+      return '<tr>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.barcode||'—') + '</td>' +
+        '<td><b>' + esc(m.description) + '</b></td>' +
+        '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category||'—') + '</td>' +
+        branchCells +
+        '<td>' + inc_statusBadge(m.status) + '</td>' +
+        (canEdit ? '<td><div style="display:flex;gap:5px">' +
+          '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
+          '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
+        '</div></td>' : '') +
+      '</tr>';
+    }).join('') || '<tr><td colspan="' + (4+INC_BRANCHES.length+(canEdit?1:0)) + '" style="padding:24px;text-align:center;color:var(--text3)">No matching items.</td></tr>';
+  } else {
+    tbody.innerHTML = filtered.map(function(m) {
+      const amt  = (m[branch] !== undefined && m[branch] !== '' && m[branch] !== null) ? parseFloat(m[branch]) : null;
+      const amtD = (amt !== null && !isNaN(amt))
+        ? '<b style="color:var(--green)">&#8369;' + amt.toFixed(2) + '</b>'
+        : '<span style="color:var(--text4)">Not set</span>';
+      return '<tr>' +
+        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.barcode||'—') + '</td>' +
+        '<td><b>' + esc(m.description) + '</b></td>' +
+        '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category||'—') + '</td>' +
+        '<td>' + amtD + '</td>' +
+        '<td>' + inc_statusBadge(m.status) + '</td>' +
+        (canEdit ? '<td><div style="display:flex;gap:5px">' +
+          '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
+          '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
+        '</div></td>' : '') +
+      '</tr>';
+    }).join('') || '<tr><td colspan="' + (5+(canEdit?1:0)) + '" style="padding:24px;text-align:center;color:var(--text3)">No matching items.</td></tr>';
+  }
+}
+
+function inc_openItemModal(id) {
+  // Edit info only (barcode, description, category, status)
+  // Incentive amounts are managed via Excel upload
+  const m = id ? inc_masterCache.find(function(x){ return x.id === id; }) : null;
+  if (!m) return;
+  const html =
+    '<div class="modal-title">Edit Item</div>' +
+    '<div class="input-row">' +
+      '<div class="field" style="grid-column:1/-1"><label for="ii_desc">Product Description *</label>' +
+        '<input id="ii_desc" name="ii_desc" value="' + esc(m.description) + '" placeholder="e.g. Washing Machine XL"></div>' +
+    '</div>' +
+    '<div class="input-row">' +
+      '<div class="field"><label for="ii_barcode">Barcode</label>' +
+        '<input id="ii_barcode" name="ii_barcode" value="' + esc(m.barcode||'') + '" placeholder="e.g. 100001"></div>' +
+      '<div class="field"><label for="ii_cat">Category</label>' +
+        '<input id="ii_cat" name="ii_cat" value="' + esc(m.category||'') + '" placeholder="e.g. Appliances"></div>' +
+    '</div>' +
+    '<div class="input-row">' +
+      '<div class="field"><label for="ii_status">Status</label>' +
+        '<select id="ii_status" name="ii_status">' +
+          '<option value="Active"' + (m.status==='Active' ? ' selected' : '') + '>Active</option>' +
+          '<option value="Inactive"' + (m.status==='Inactive' ? ' selected' : '') + '>Inactive</option>' +
+        '</select></div>' +
+    '</div>' +
+    '<p style="font-size:0.78rem;color:var(--text3);margin-top:4px;padding:8px;background:#f9fafb;border-radius:6px">' +
+      'Incentive amounts are set via Excel upload. Use the Upload Excel/CSV button to set or update amounts per branch.' +
+    '</p>' +
+    '<button class="btn btn-primary" style="width:100%;margin-top:10px" ' +
+      'onclick="inc_saveItemModal(\'' + id + '\')">Update Item</button>';
+  openModal(html);
+}
+
+async function inc_saveItemModal(id) {
+  if (!id) return;
+  const desc = document.getElementById('ii_desc')?.value.trim();
+  if (!desc) { toast('Product description is required.', 'error'); return; }
+  // Preserve ALL existing branch amounts
+  const m = inc_masterCache.find(function(x){ return x.id === id; });
+  const payload = {
+    action:      'inc_saveMasterItem',
+    id:          id,
+    barcode:     document.getElementById('ii_barcode')?.value.trim() || '',
+    category:    document.getElementById('ii_cat')?.value.trim() || '',
+    description: desc,
+    status:      document.getElementById('ii_status')?.value || 'Active',
+    updatedBy:   currentUser.name || currentUser.username,
+  };
+  // Always preserve branch amounts — never blank them out on edit
+  INC_BRANCHES.forEach(function(b) {
+    payload['branch_' + b] = (m && m[b] !== undefined && m[b] !== '') ? m[b] : '';
+  });
+  const btn = document.querySelector('#modalBox .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Updating...'; }
   try {
-    const res = await gasPost({
-      action: 'inc_saveBranchAmount',
-      id:     itemId,
-      branch: branch,
-      amount: amt,
-    });
+    const res = await gasPost(payload);
     if (res.success) {
-      const m = inc_masterCache.find(function(x){ return x.id === itemId; });
-      if (m) m[branch] = amt !== '' ? parseFloat(amt) : '';
-      toast('Amount saved!', 'success');
-      inc_renderMasterTable(inc_masterCache);
+      toast('Item updated.', 'success');
+      closeModalDirect();
+      await inc_loadMasterList();
     } else {
-      toast(res.message || 'Error saving amount.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+      toast(res.message || 'Error saving.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Update Item'; }
     }
   } catch(e) {
-    toast('Network error saving amount.', 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    toast('Network error.', 'error');
+    if (btn) btn.disabled = false;
   }
+}
+
+async function inc_deleteMasterItem(id) {
+  if (!confirm('Delete this item? This cannot be undone.')) return;
+  try {
+    const res = await gasPost({ action:'inc_deleteMasterItem', id:id, caller_role: currentUser.role });
+    if (res.success) { toast('Item deleted.', 'success'); await inc_loadMasterList(); }
+    else toast(res.message || 'Error deleting.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
 }
 
 
@@ -4997,7 +5117,6 @@ async function inc_handleExcelUpload(input) {
   if (!file) return;
   toast('Reading file...', 'info');
   try {
-    // Ensure XLSX is loaded — try primary CDN then fallback
     if (typeof XLSX === 'undefined') {
       try {
         await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
@@ -5011,6 +5130,7 @@ async function inc_handleExcelUpload(input) {
       }
     }
     if (typeof XLSX === 'undefined') { toast('Excel library failed to load.', 'error'); return; }
+
     const buf = await file.arrayBuffer();
     const wb  = XLSX.read(buf, { type:'array' });
     const ws  = wb.Sheets[wb.SheetNames[0]];
@@ -5112,9 +5232,9 @@ function inc_showImportPreview() {
       '</div>' +
     '</div>' +
     '<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:14px;margin-bottom:14px">' +
-      '<div style="font-size:0.82rem;font-weight:700;color:var(--text2);margin-bottom:6px">&#128176; Set Incentive Amounts ' +
-        '<span style="font-weight:400;color:var(--text3);font-size:0.78rem">(optional — can set later)</span></div>' +
-      '<div style="font-size:0.75rem;color:var(--text3);margin-bottom:10px">Branch + Category keyword + Amount — applies to all matching items on import.</div>' +
+      '<div style="font-size:0.82rem;font-weight:700;color:var(--text2);margin-bottom:6px">Set Incentive Amounts ' +
+        '<span style="font-weight:400;color:var(--text3);font-size:0.78rem">(optional — can re-upload to update)</span></div>' +
+      '<div style="font-size:0.75rem;color:var(--text3);margin-bottom:10px">Select Branch + type Category keyword + enter Amount. Applies to all matching items.</div>' +
       '<div id="inc_combos_wrap">' + buildCombos() + '</div>' +
       '<button onclick="inc_addCombo()" ' +
         'style="background:none;border:1.5px dashed var(--border);border-radius:7px;padding:6px 14px;font-size:0.8rem;color:var(--text3);cursor:pointer;font-family:var(--font-main);margin-top:6px;width:100%">' +
@@ -5225,135 +5345,6 @@ async function inc_confirmImport() {
 }
 
 
-function inc_filterMaster(q) {
-  const term = (q || '').toLowerCase().trim();
-  const filtered = term
-    ? inc_masterCache.filter(function(m) {
-        return (m.barcode || '').toLowerCase().includes(term) ||
-               (m.description || '').toLowerCase().includes(term) ||
-               (m.category || '').toLowerCase().includes(term);
-      })
-    : inc_masterCache;
-  const el = document.getElementById('incContent');
-  if (!el) return;
-  const tbody = el.querySelector('tbody');
-  if (!tbody) { inc_renderMasterTable(filtered); return; }
-  // Re-render just table body
-  const tmp = document.createElement('div');
-  const canEdit  = currentUser.role === 'admin';
-  const branch   = inc_activeBranch;
-  if (!branch) {
-    tbody.innerHTML = filtered.map(function(m) {
-      const branchCells = INC_BRANCHES.map(function(b) {
-        const amt = m[b] !== undefined && m[b] !== '' ? parseFloat(m[b]) : null;
-        return '<td style="text-align:center;font-size:0.85rem">' +
-          (amt !== null ? '<b style="color:var(--green)">&#8369;' + amt.toFixed(0) + '</b>' : '<span style="color:#ddd">&#8212;</span>') +
-        '</td>';
-      }).join('');
-      return '<tr>' +
-        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.barcode||'—') + '</td>' +
-        '<td><b>' + esc(m.description) + '</b></td>' +
-        '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category||'—') + '</td>' +
-        branchCells +
-        '<td>' + inc_statusBadge(m.status) + '</td>' +
-        (canEdit ? '<td><div style="display:flex;gap:5px">' +
-          '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
-          '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
-        '</div></td>' : '') +
-      '</tr>';
-    }).join('') || '<tr><td colspan="' + (4+INC_BRANCHES.length+(canEdit?1:0)) + '"><div class="no-data"><div class="no-data-text">No matching items.</div></div></td></tr>';
-  } else {
-    tbody.innerHTML = filtered.map(function(m) {
-      const amt    = m[branch] !== undefined && m[branch] !== '' ? parseFloat(m[branch]) : null;
-      const amtD   = amt !== null ? '<b style="color:var(--green);font-size:1rem">&#8369;' + amt.toFixed(2) + '</b>' : '<span style="color:var(--text4)">Not set</span>';
-      const setBtn = canEdit ? '<td><div style="display:flex;gap:6px;align-items:center">' +
-          '<input type="number" min="0" placeholder="0.00" id="inc_amt_' + m.id + '" value="' + (amt!==null?amt:'') + '" ' +
-          'style="width:90px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;font-family:var(--font-main);font-size:0.85rem">' +
-          '<button class="inv-btn inv-btn-in" onclick="inc_saveBranchAmt(\'' + m.id + '\',\'' + branch + '\')">Save</button>' +
-        '</div></td>' : '';
-      return '<tr>' +
-        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(m.barcode||'—') + '</td>' +
-        '<td><b>' + esc(m.description) + '</b></td>' +
-        '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category||'—') + '</td>' +
-        '<td>' + amtD + '</td>' +
-        '<td>' + inc_statusBadge(m.status) + '</td>' +
-        setBtn +
-      '</tr>';
-    }).join('') || '<tr><td colspan="' + (5+(canEdit?1:0)) + '"><div class="no-data"><div class="no-data-text">No matching items.</div></div></td></tr>';
-  }
-}
-
-function inc_openItemModal(id) {
-  const isEdit = !!id;
-  const m = isEdit ? inc_masterCache.find(function(x){ return x.id === id; }) : null;
-  let html =
-    '<div class="modal-title">Edit Item</div>' +
-    '<div class="input-row">' +
-      '<div class="field" style="grid-column:1/-1"><label for="ii_desc">Product Description *</label>' +
-        '<input id="ii_desc" name="ii_desc" value="' + esc(m ? m.description : '') + '" placeholder="e.g. Washing Machine XL"></div>' +
-    '</div>' +
-    '<div class="input-row">' +
-      '<div class="field"><label for="ii_barcode">Barcode</label>' +
-        '<input id="ii_barcode" name="ii_barcode" value="' + esc(m ? m.barcode||'' : '') + '" placeholder="e.g. 100001"></div>' +
-      '<div class="field"><label for="ii_cat">Category</label>' +
-        '<input id="ii_cat" name="ii_cat" value="' + esc(m ? m.category||'' : '') + '" placeholder="e.g. Appliances"></div>' +
-    '</div>' +
-    '<div class="input-row">' +
-      '<div class="field"><label for="ii_status">Status</label>' +
-        '<select id="ii_status" name="ii_status">' +
-          '<option value="Active"' + (m && m.status==='Active' ? ' selected' : '') + '>Active</option>' +
-          '<option value="Inactive"' + (m && m.status==='Inactive' ? ' selected' : '') + '>Inactive</option>' +
-        '</select></div>' +
-    '</div>' +
-    '<p style="font-size:0.78rem;color:var(--text3);margin-top:4px">&#128161; Set incentive amounts per branch from the branch tabs in the master list.</p>' +
-    '<button class="btn btn-primary" style="width:100%;margin-top:10px" ' +
-      'onclick="inc_saveItemModal(\'' + (id||'') + '\')">' + 'Update Item' + '</button>';
-  openModal(html);
-}
-
-async function inc_saveItemModal(id) {
-  const desc = document.getElementById('ii_desc')?.value.trim();
-  if (!desc) { toast('Product description is required.', 'error'); return; }
-  const payload = {
-    action:      'inc_saveMasterItem',
-    id:          id || null,
-    barcode:     document.getElementById('ii_barcode')?.value.trim() || '',
-    category:    document.getElementById('ii_cat')?.value.trim() || '',
-    description: desc,
-    status:      document.getElementById('ii_status')?.value || 'Active',
-    updatedBy:   currentUser.name || currentUser.username,
-  };
-  // Preserve existing branch amounts if editing
-  if (id) {
-    const m = inc_masterCache.find(function(x){ return x.id === id; });
-    if (m) INC_BRANCHES.forEach(function(b){ payload['branch_' + b] = m[b] !== undefined ? m[b] : ''; });
-  }
-  const btn = document.querySelector('#modalBox .btn-primary');
-  if (btn) { btn.disabled = true; btn.textContent = id ? 'Updating...' : 'Saving...'; }
-  try {
-    const res = await gasPost(payload);
-    if (res.success) {
-      toast(id ? 'Item updated.' : 'Item added.', 'success');
-      closeModalDirect();
-      await inc_loadMasterList();
-    } else {
-      toast(res.message || 'Error saving.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = id ? 'Update Item' : 'Add Item'; }
-    }
-  } catch(e) {
-    toast('Network error.', 'error');
-    if (btn) btn.disabled = false;
-  }
-}
-
-async function inc_deleteMasterItem(id) {
-  if (!confirm('Delete this incentive item? This cannot be undone.')) return;
-  try {
-    const res = await gasPost({ action:'inc_deleteMasterItem', id, caller_role: currentUser.role });
-    if (res.success) { toast('Item deleted.','success'); inc_loadMasterList(); }
-    else toast(res.message || 'Error deleting.','error');
-  } catch(e) { toast('Network error.','error'); }
-}
 
 // ══════════════════════════════════════════════════════════
 // AGENT / CASHIER VIEW — Submit Claims
