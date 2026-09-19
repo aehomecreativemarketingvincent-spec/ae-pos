@@ -3,7 +3,7 @@
    ============================================= */
 
 // ─── CONFIG ───────────────────────────────────
-const GAS_URL = "https://script.google.com/macros/s/AKfycbx3XW5BujvDZuGFG1mGD2Lg84zNC8r3j4rN2AQTa9BA1Il8SjwqDY6C_vQL8uMMCN2YkA/exec";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbxbqmuYWoVthCT-aVs3qyuMwtqAntYWLMS5lOuEK23kLqQyV72Rhg0WcwxpxaOxLBzVAw/exec";
 
 // ─── SAFE LOCALSTORAGE HELPERS ───────────────
 function lsGet(key, fallback) {
@@ -4637,6 +4637,7 @@ async function inc_renderAdminPage() {
       '<button class="tab-btn active" onclick="inc_showTab(\'daily\',this)">Daily Report</button>' +
       '<button class="tab-btn" onclick="inc_showTab(\'all\',this)">All Claims</button>' +
       '<button class="tab-btn" onclick="inc_showTab(\'master\',this)">Incentive List</button>' +
+      '<button class="tab-btn" onclick="inc_showTab(\'setamounts\',this)">Set Branch Amounts</button>' +
     '</div>' +
     '<div id="incContent"></div>';
   inc_showTab('daily', document.querySelector('#incTabBar .tab-btn'));
@@ -4646,9 +4647,125 @@ function inc_showTab(tab, btn) {
   const tabBar = document.getElementById('incTabBar');
   if (tabBar) tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
-  if (tab === 'daily')  inc_loadDailyReport();
-  if (tab === 'all')    inc_loadAllClaims();
-  if (tab === 'master') inc_loadMasterList();
+  if (tab === 'daily')      inc_loadDailyReport();
+  if (tab === 'all')        inc_loadAllClaims();
+  if (tab === 'master')     inc_loadMasterList();
+  if (tab === 'setamounts') inc_renderSetAmounts();
+}
+
+// ── SET BRANCH AMOUNTS (simple panel) ─────────────────────
+async function inc_renderSetAmounts() {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+
+  // Load master cache if needed
+  if (!inc_masterCache.length) {
+    el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+    try {
+      const r = await gasRequest({ action:'inc_getMaster' });
+      inc_masterCache = r.data || [];
+    } catch(e) {
+      el.innerHTML = '<div class="no-data"><div class="no-data-text">Error loading products.</div></div>';
+      return;
+    }
+  }
+
+  const branchOpts = INC_BRANCHES.map(function(b,i){
+    return '<option value="' + b + '">' + INC_BRANCHES_DISP[i] + '</option>';
+  }).join('');
+
+  el.innerHTML =
+    '<div style="background:var(--surface,white);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:560px">' +
+      '<div style="font-size:1rem;font-weight:700;margin-bottom:6px">Set Incentive Amount by Branch</div>' +
+      '<div style="font-size:0.82rem;color:var(--text3);margin-bottom:20px">' +
+        'Select a branch, enter the incentive amount, and optionally filter by category keyword. ' +
+        'Leave category blank to apply to ALL active items in that branch.' +
+      '</div>' +
+
+      '<div class="form-row">' +
+        '<label>Branch *</label>' +
+        '<select id="sa_branch" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main)">' +
+          '<option value="">-- Select Branch --</option>' + branchOpts +
+        '</select>' +
+      '</div>' +
+
+      '<div class="form-row">' +
+        '<label>Category Keyword <span style="font-weight:400;color:var(--text3)">(optional — leave blank to apply to ALL items)</span></label>' +
+        '<input id="sa_category" type="text" placeholder="e.g. Aircon, Washing Machine, Refrigerator..." ' +
+          'style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main)">' +
+      '</div>' +
+
+      '<div class="form-row">' +
+        '<label>Incentive Amount (&#8369;) *</label>' +
+        '<input id="sa_amount" type="number" min="0" placeholder="e.g. 250" ' +
+          'style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main)">' +
+      '</div>' +
+
+      '<div id="sa_preview" style="margin-bottom:14px;display:none;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 14px;font-size:0.82rem;color:#0369a1"></div>' +
+
+      '<button class="btn btn-primary" style="width:100%" onclick="inc_applyBranchAmount()">Apply to Matching Items</button>' +
+      '<button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="inc_previewBranchAmount()">Preview Matching Items</button>' +
+    '</div>';
+}
+
+async function inc_previewBranchAmount() {
+  const branch   = document.getElementById('sa_branch')?.value;
+  const category = (document.getElementById('sa_category')?.value || '').trim().toLowerCase();
+  const el       = document.getElementById('sa_preview');
+  if (!branch) { toast('Please select a branch first.', 'warning'); return; }
+  if (!inc_masterCache.length) { toast('No products loaded.', 'warning'); return; }
+  const matching = inc_masterCache.filter(function(m) {
+    if (m.status === 'Inactive') return false;
+    if (!category) return true;
+    return (m.description || '').toLowerCase().indexOf(category) >= 0;
+  });
+  if (!el) return;
+  el.style.display = 'block';
+  if (!matching.length) {
+    el.textContent = 'No active items match "' + category + '".';
+    return;
+  }
+  el.innerHTML = '<b>' + matching.length + ' item(s)</b> will be updated — e.g.: ' +
+    matching.slice(0, 3).map(function(m){ return m.description; }).join(', ') +
+    (matching.length > 3 ? '...' : '');
+}
+
+async function inc_applyBranchAmount() {
+  const branch   = document.getElementById('sa_branch')?.value;
+  const category = (document.getElementById('sa_category')?.value || '').trim();
+  const amount   = document.getElementById('sa_amount')?.value;
+  if (!branch)  { toast('Please select a branch.', 'warning'); return; }
+  if (!amount || isNaN(parseFloat(amount))) { toast('Please enter a valid amount.', 'warning'); return; }
+
+  const btn = document.querySelector('#incContent .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Applying...'; }
+
+  try {
+    const res = await gasPost({
+      action:   'inc_setBranchAmounts',
+      branch:   branch,
+      category: category,
+      amount:   parseFloat(amount),
+    });
+    if (res.success) {
+      toast('Done! Updated ' + res.updated + ' item(s) in ' +
+        INC_BRANCHES_DISP[INC_BRANCHES.indexOf(branch)] + '.', 'success');
+      // Clear cache so master list reloads fresh
+      inc_masterCache = [];
+      // Reset form
+      if (document.getElementById('sa_amount'))   document.getElementById('sa_amount').value = '';
+      if (document.getElementById('sa_category')) document.getElementById('sa_category').value = '';
+      const prevEl = document.getElementById('sa_preview');
+      if (prevEl) prevEl.style.display = 'none';
+      if (btn) { btn.disabled = false; btn.textContent = 'Apply to Matching Items'; }
+    } else {
+      toast(res.message || 'Error applying amounts.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Apply to Matching Items'; }
+    }
+  } catch(e) {
+    toast('Network error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Apply to Matching Items'; }
+  }
 }
 
 // ── DAILY REPORT ──────────────────────────────────────────
