@@ -5255,7 +5255,8 @@ function inc_showImportPreview() {
     '</div>' +
     '<div style="display:flex;gap:10px;margin-top:14px">' +
       '<button class="btn btn-ghost" style="flex:1" onclick="closeModalDirect()">Cancel</button>' +
-      '<button class="btn btn-primary" style="flex:2" onclick="inc_confirmImport()">Import ' + newCount + ' Items</button>' +
+      '<button class="btn btn-primary" style="flex:2" onclick="inc_confirmImport()">' +
+      (newCount > 0 ? 'Import ' + newCount + ' Items' : 'Apply Incentive Amounts') + '</button>' +
     '</div>';
 
   openModal(html);
@@ -5309,34 +5310,44 @@ function inc_removeImportRow(idx) {
 }
 
 async function inc_confirmImport() {
-  const newRows = inc_importRows.filter(function(r) {
+  const allRows     = inc_importRows;
+  const validCombos = inc_importCombos.filter(function(c){ return c.branch && c.amount; });
+
+  const newRows = allRows.filter(function(r) {
     return !inc_masterCache.some(function(e) {
       return (r.barcode && e.barcode === r.barcode) ||
              e.description.toLowerCase() === r.name.toLowerCase();
     });
   });
-  if (!newRows.length) { toast('No new items to import.', 'warning'); return; }
 
-  const validCombos = inc_importCombos.filter(function(c){ return c.branch && c.amount; });
+  // Nothing to do at all
+  if (!newRows.length && !validCombos.length) {
+    toast('No new items and no incentive amounts to set.', 'warning');
+    return;
+  }
+
   const btn = document.querySelector('#modalBox .btn-primary');
-  if (btn) { btn.disabled = true; btn.textContent = 'Importing...'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Processing...'; }
 
   try {
+    // Always send ALL rows (inc. duplicates) + combos so GAS can apply amounts to existing items
     const res = await gasPost({
       action:    'inc_bulkImportMaster',
-      rows:      JSON.stringify(newRows),
+      rows:      JSON.stringify(allRows),
       combos:    JSON.stringify(validCombos),
       updatedBy: currentUser.name || currentUser.username,
     });
     if (res.success) {
       closeModalDirect();
-      const msg = 'Imported ' + res.added + ' item(s)!' +
-        (res.amountsSet ? ' Incentives set: ' + res.amountsSet + ' item(s).' : '');
+      let msg = '';
+      if (res.added)       msg += 'Added ' + res.added + ' new item(s). ';
+      if (res.amountsSet)  msg += 'Incentive amounts set for ' + res.amountsSet + ' item(s).';
+      if (!msg)            msg  = 'Done — no changes needed.';
       toast(msg, 'success');
       await inc_loadMasterList();
     } else {
       toast(res.message || 'Import failed.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'Import'; }
+      if (btn) { btn.disabled = false; btn.textContent = 'Confirm'; }
     }
   } catch(e) {
     toast('Network error: ' + e.message, 'error');
