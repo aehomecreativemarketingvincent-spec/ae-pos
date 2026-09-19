@@ -14,29 +14,23 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  // Never intercept GAS, CDN scripts, or non-GET requests
   const url = e.request.url;
+  // Skip — let browser handle these directly
+  if (e.request.method !== 'GET') return;
   if (url.includes('script.google.com')) return;
   if (url.includes('cdn.sheetjs.com')) return;
   if (url.includes('cdnjs.cloudflare.com')) return;
   if (url.includes('cdn.jsdelivr.net')) return;
-  if (e.request.method !== 'GET') return;
 
+  // Network first, fall back to cache
   e.respondWith(
-    fetch(e.request)
-      .then(function(res) {
-        // Only cache valid responses
-        if (!res || res.status !== 200 || res.type === 'opaque') return res;
-        return res;
-      })
-      .catch(function() {
-        return caches.match(e.request).then(function(cached) {
-          // Return cached version OR a fallback — never undefined
-          return cached || new Response('Network error', {
-            status: 503,
-            headers: { 'Content-Type': 'text/plain' }
-          });
-        });
-      })
+    fetch(e.request).catch(function() {
+      return caches.match(e.request).then(function(cached) {
+        if (cached) return cached;
+        // For navigation requests, return the cached index.html
+        if (e.request.mode === 'navigate') return caches.match('/index.html');
+        return undefined;
+      });
+    })
   );
 });
