@@ -4937,7 +4937,7 @@ function inc_renderMasterTable(items, el) {
 
     rows = items.map(function(m) {
       const amt    = (m[branch] !== undefined && m[branch] !== '' && m[branch] !== null) ? parseFloat(m[branch]) : null;
-      const amtD   = (amt !== null && !isNaN(amt))
+      const amtD   = (amt !== null && !isNaN(amt) && amt > 0)
         ? '<b style="color:var(--green);font-size:1rem">&#8369;' + amt.toFixed(2) + '</b>'
         : '<span style="color:var(--text4)">Not set</span>';
       return '<tr>' +
@@ -5151,6 +5151,13 @@ async function inc_handleExcelUpload(input) {
     }
     inc_importRows   = normalized;
     inc_importCombos = [{ branch:'', category:'', amount:'' }];
+    // Ensure master cache is loaded for duplicate detection
+    if (!inc_masterCache.length) {
+      try {
+        const mr = await gasRequest({ action:'inc_getMaster' });
+        inc_masterCache = mr.data || [];
+      } catch(e) { inc_masterCache = []; }
+    }
     inc_showImportPreview();
   } catch(e) {
     toast('File read error: ' + e.message, 'error');
@@ -5519,9 +5526,21 @@ function inc_validateClaim() {
     return;
   }
 
+  // Check branch-specific amount
+  const userBranch = currentUser.branch || '';
+  const branchAmt  = userBranch && product[userBranch] !== undefined && product[userBranch] !== ''
+                       ? parseFloat(product[userBranch]) : 0;
+  if (!branchAmt || isNaN(branchAmt)) {
+    inc_showValbox('warn','&#9888; No incentive amount set for your branch (' + userBranch + '). Contact admin.');
+    inc_claimState.valid = false;
+    document.getElementById('inc_submit_btn').disabled = true;
+    document.getElementById('inc_qty_row').style.display = 'none';
+    document.getElementById('inc_summary').style.display = 'none';
+    return;
+  }
   // Valid — show qty + summary
   inc_claimState.valid = true;
-  inc_showValbox('ok','&#10003; Item found &nbsp;&bull;&nbsp; &#10003; Incentive active');
+  inc_showValbox('ok','&#10003; Item found &nbsp;&bull;&nbsp; &#10003; Incentive: &#8369;' + branchAmt.toFixed(2) + ' (' + userBranch + ')');
   document.getElementById('inc_qty_row').style.display = 'flex';
   inc_claimState.qty = parseInt(document.getElementById('inc_qty')?.value) || 1;
   inc_updateSummary();
@@ -5539,10 +5558,10 @@ function inc_updateSummary() {
   const isWhole  = inc_claimState.saleType === 'wholesale';
   // Get branch-specific incentive amount
   const userBranch = currentUser.branch || '';
-  const branchKey  = 'branch_' + userBranch;
-  const baseAmt    = (m[branchKey] !== undefined && m[branchKey] !== '' && parseFloat(m[branchKey]) > 0)
-                       ? parseFloat(m[branchKey])
-                       : parseFloat(m.incentiveAmount || 0);
+  // Branch key matches column name in master list (e.g. 'Vigan', 'SDO')
+  const baseAmt    = (userBranch && m[userBranch] !== undefined && m[userBranch] !== '' && parseFloat(m[userBranch]) > 0)
+                       ? parseFloat(m[userBranch])
+                       : 0;
   const effAmt     = isWhole ? baseAmt * 0.5 : baseAmt;
   const tot      = qty * effAmt;
   const el       = document.getElementById('inc_summary');
@@ -5585,10 +5604,10 @@ async function inc_submitClaim() {
   const qty      = inc_claimState.qty;
   const isWhole  = inc_claimState.saleType === 'wholesale';
   const userBranch = currentUser.branch || '';
-  const branchKey  = 'branch_' + userBranch;
-  const baseAmt    = (m[branchKey] !== undefined && m[branchKey] !== '' && parseFloat(m[branchKey]) > 0)
-                       ? parseFloat(m[branchKey])
-                       : parseFloat(m.incentiveAmount || 0);
+  // Branch key matches column name in master list (e.g. 'Vigan', 'SDO')
+  const baseAmt    = (userBranch && m[userBranch] !== undefined && m[userBranch] !== '' && parseFloat(m[userBranch]) > 0)
+                       ? parseFloat(m[userBranch])
+                       : 0;
   const effAmt     = isWhole ? baseAmt * 0.5 : baseAmt;
   const btn = document.getElementById('inc_submit_btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
