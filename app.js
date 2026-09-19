@@ -4932,7 +4932,7 @@ function inc_renderMasterTable(items, el) {
     thead = '<thead><tr>' +
       '<th>Barcode</th><th>Description</th><th>Category</th>' +
       '<th style="color:var(--accent)">Incentive (' + branchDisp + ')</th>' +
-      '<th>Status</th>' + (canEdit ? '<th></th>' : '') +
+      '<th>Status</th>' +
     '</tr></thead>';
 
     rows = items.map(function(m) {
@@ -4946,13 +4946,9 @@ function inc_renderMasterTable(items, el) {
         '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category || '—') + '</td>' +
         '<td>' + amtD + '</td>' +
         '<td>' + inc_statusBadge(m.status) + '</td>' +
-        (canEdit ?
-          '<td><div style="display:flex;gap:5px">' +
-            '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
-            '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
-          '</div></td>' : '') +
+        '<td>' + inc_statusBadge(m.status) + '</td>' +
       '</tr>';
-    }).join('') || '<tr><td colspan="' + (5 + (canEdit?1:0)) + '" style="padding:24px;text-align:center;color:var(--text3)">No items. Upload an Excel file to add products.</td></tr>';
+    }).join('') || '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--text3)">No items. Upload an Excel file to add products.</td></tr>';
   }
 
   target.innerHTML = tabsHtml + toolbar +
@@ -5015,12 +5011,9 @@ function inc_filterMaster(q) {
         '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category||'—') + '</td>' +
         '<td>' + amtD + '</td>' +
         '<td>' + inc_statusBadge(m.status) + '</td>' +
-        (canEdit ? '<td><div style="display:flex;gap:5px">' +
-          '<button class="inv-btn inv-btn-edit" onclick="inc_openItemModal(\'' + esc(m.id) + '\')">Edit</button>' +
-          '<button class="inv-btn inv-btn-del"  onclick="inc_deleteMasterItem(\'' + esc(m.id) + '\')">Del</button>' +
-        '</div></td>' : '') +
+        '<td>' + inc_statusBadge(m.status) + '</td>' +
       '</tr>';
-    }).join('') || '<tr><td colspan="' + (5+(canEdit?1:0)) + '" style="padding:24px;text-align:center;color:var(--text3)">No matching items.</td></tr>';
+    }).join('') || '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--text3)">No matching items.</td></tr>';
   }
 }
 
