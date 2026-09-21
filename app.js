@@ -5504,7 +5504,8 @@ async function inc_confirmImport() {
 async function inc_renderAgentPage() {
   const pc = document.getElementById('pageContent');
   if (!pc) return;
-  // Always reload master cache fresh for agents
+  // Force-clear cache and reload fresh from GAS
+  inc_masterCache = [];
   try {
     const mr = await gasRequest({ action:'inc_getMaster' });
     inc_masterCache = mr.data || [];
@@ -5514,7 +5515,10 @@ async function inc_renderAgentPage() {
   pc.innerHTML =
     '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">' +
       '<div style="font-size:0.9rem;color:var(--text2)">Your Incentive Claims &mdash; ' + safeFormatDateOnly(today) + '</div>' +
-      '<button class="btn btn-primary" onclick="inc_openClaimModal()">+ Add Incentive Claim</button>' +
+      '<div style="display:flex;gap:8px">' +
+        '<button class="btn btn-ghost btn-sm" onclick="inc_renderAgentPage()" title="Refresh">&#8635; Refresh</button>' +
+        '<button class="btn btn-primary" onclick="inc_openClaimModal()">+ Add Incentive Claim</button>' +
+      '</div>' +
     '</div>' +
     '<div id="incAgentContent"><div class="loading-spinner"><div class="spinner"></div></div></div>';
 
@@ -5571,7 +5575,7 @@ function inc_setSaleType(type) {
   if (inc_claimState.valid) inc_updateSummary();
 }
 
-function inc_openClaimModal() {
+async function inc_openClaimModal() {
   inc_claimState = { invoiceNo:'', product:null, qty:1, saleType:'retail', valid:false };
   openModal(
     '<div class="modal-title">Add Incentive Claim</div>' +
@@ -5609,10 +5613,11 @@ function inc_openClaimModal() {
     '<div id="inc_summary" style="display:none;background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
     '<button class="btn btn-primary" id="inc_submit_btn" style="width:100%;margin-top:12px" disabled onclick="inc_submitClaim()">Submit Claim</button>'
   );
-  // Always reload master cache fresh so branch amounts are current
-  gasRequest({ action:'inc_getMaster' })
-    .then(function(r) { inc_masterCache = r.data || []; })
-    .catch(function() {});
+  // Always await fresh cache so branch amounts are current
+  try {
+    const fresh = await gasRequest({ action:'inc_getMaster' });
+    inc_masterCache = fresh.data || [];
+  } catch(e) { /* use existing cache if request fails */ }
 }
 
 
