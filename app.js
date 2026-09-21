@@ -5580,10 +5580,10 @@ function inc_openClaimModal() {
     '<div id="inc_summary" style="display:none;background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
     '<button class="btn btn-primary" id="inc_submit_btn" style="width:100%;margin-top:12px" disabled onclick="inc_submitClaim()">Submit Claim</button>'
   );
-  // Pre-load master cache
-  if (!inc_masterCache.length) {
-    gasRequest({ action:'inc_getMaster' }).then(r => { inc_masterCache = r.data || []; }).catch(()=>{});
-  }
+  // Always reload master cache fresh so branch amounts are current
+  gasRequest({ action:'inc_getMaster' })
+    .then(function(r) { inc_masterCache = r.data || []; })
+    .catch(function() {});
 }
 
 
@@ -5603,26 +5603,44 @@ function inc_productSearch() {
   const dd = document.getElementById('inc_dropdown');
   inc_claimState.product = null;
   inc_claimState.valid   = false;
-  document.getElementById('inc_submit_btn').disabled = true;
-  document.getElementById('inc_summary').style.display = 'none';
-  document.getElementById('inc_qty_row').style.display  = 'none';
-  if (!q || !dd) { if(dd) dd.style.display='none'; return; }
+  if (document.getElementById('inc_submit_btn')) document.getElementById('inc_submit_btn').disabled = true;
+  if (document.getElementById('inc_summary'))    document.getElementById('inc_summary').style.display = 'none';
+  if (document.getElementById('inc_qty_row'))    document.getElementById('inc_qty_row').style.display = 'none';
+  if (!q) { if(dd) dd.style.display = 'none'; return; }
 
-  const matches = inc_masterCache.filter(m =>
-    m.barcode.toLowerCase().includes(q) || m.description.toLowerCase().includes(q)
-  );
-  if (!matches.length) { dd.style.display='none'; return; }
+  // If cache not loaded yet — load then retry
+  if (!inc_masterCache.length) {
+    if (dd) { dd.style.display='block'; dd.innerHTML='<div style="padding:10px;color:var(--text3);font-size:0.82rem">Loading products...</div>'; }
+    gasRequest({ action:'inc_getMaster' }).then(function(r) {
+      inc_masterCache = r.data || [];
+      inc_productSearch();
+    }).catch(function(){});
+    return;
+  }
 
-  dd.innerHTML = matches.map(m => {
-    const active = m.status === 'Active';
-    return '<div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center"' +
-      ' onmouseover="this.style.background=\'var(--bg2,#f7f8fa)\'" onmouseout="this.style.background=\'\'"' +
-      ' onclick="inc_selectProduct(\'' + esc(m.id) + '\')">' +
-      '<div><div style="font-weight:600;font-size:0.85rem">' + esc(m.description) + '</div>' +
-      '<div style="font-size:0.73rem;color:var(--text3);font-family:var(--font-mono)">' + esc(m.barcode) + (m.itemCode ? ' &bull; ' + esc(m.itemCode) : '') + '</div></div>' +
-      '<div style="font-weight:700;font-size:0.9rem;color:' + (active ? 'var(--green)' : 'var(--red,#ef4444)') + '">' +
-        (active ? '&#8369;' + parseFloat(m.incentiveAmount).toFixed(2) : 'No Incentive') +
-      '</div></div>';
+  const matches = inc_masterCache.filter(function(m) {
+    if (m.status !== 'Active') return false;
+    return (m.barcode||'').toLowerCase().includes(q) ||
+           (m.description||'').toLowerCase().includes(q);
+  });
+  if (!matches.length || !dd) { if(dd) dd.style.display='none'; return; }
+
+  const userBranch = currentUser ? (currentUser.branch || '') : '';
+  dd.innerHTML = matches.map(function(m) {
+function inc_selectProduct(id) {
+  const m = inc_masterCache.find(function(x){ return x.id === id; });
+  if (!m) return;
+  const inp = document.getElementById('inc_product');
+  if (inp) inp.value = m.description;
+  const dd = document.getElementById('inc_dropdown');
+  if (dd) dd.style.display = 'none';
+  inc_claimState.product = m;
+  const ub = currentUser ? (currentUser.branch || '') : '';
+  console.log('[INC] Product:', m.description, '| Branch:', ub, '| Amount in cache:', m[ub]);
+  inc_validateClaim();
+}
+      '<div>' + amtDisp + '</div>' +
+    '</div>';
   }).join('');
   dd.style.display = 'block';
 }
