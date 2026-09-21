@@ -5630,11 +5630,13 @@ function inc_productSearch() {
   if (document.getElementById('inc_submit_btn')) document.getElementById('inc_submit_btn').disabled = true;
   if (document.getElementById('inc_summary'))    document.getElementById('inc_summary').style.display = 'none';
   if (document.getElementById('inc_qty_row'))    document.getElementById('inc_qty_row').style.display = 'none';
-  if (!q) { if(dd) dd.style.display = 'none'; return; }
+  if (!q) { if (dd) dd.style.display = 'none'; return; }
 
-  // If cache not loaded yet — load then retry
   if (!inc_masterCache.length) {
-    if (dd) { dd.style.display='block'; dd.innerHTML='<div style="padding:10px;color:var(--text3);font-size:0.82rem">Loading products...</div>'; }
+    if (dd) {
+      dd.style.display = 'block';
+      dd.innerHTML = '<div style="padding:10px;color:var(--text3);font-size:0.82rem">Loading products...</div>';
+    }
     gasRequest({ action:'inc_getMaster' }).then(function(r) {
       inc_masterCache = r.data || [];
       inc_productSearch();
@@ -5642,27 +5644,30 @@ function inc_productSearch() {
     return;
   }
 
-  const matches = inc_masterCache.filter(function(m) {
+  var userBranch = currentUser ? (currentUser.branch || '') : '';
+  var matches    = inc_masterCache.filter(function(m) {
     if (m.status !== 'Active') return false;
     return (m.barcode||'').toLowerCase().includes(q) ||
            (m.description||'').toLowerCase().includes(q);
   });
-  if (!matches.length || !dd) { if(dd) dd.style.display='none'; return; }
 
-  const userBranch = currentUser ? (currentUser.branch || '') : '';
+  if (!matches.length || !dd) { if (dd) dd.style.display = 'none'; return; }
+
   dd.innerHTML = matches.map(function(m) {
-function inc_selectProduct(id) {
-  const m = inc_masterCache.find(function(x){ return x.id === id; });
-  if (!m) return;
-  const inp = document.getElementById('inc_product');
-  if (inp) inp.value = m.description;
-  const dd = document.getElementById('inc_dropdown');
-  if (dd) dd.style.display = 'none';
-  inc_claimState.product = m;
-  const ub = currentUser ? (currentUser.branch || '') : '';
-  console.log('[INC] Product:', m.description, '| Branch:', ub, '| Amount in cache:', m[ub]);
-  inc_validateClaim();
-}
+    var raw      = userBranch ? m[userBranch] : null;
+    var branchAmt = (raw !== undefined && raw !== '' && raw !== null) ? parseFloat(raw) : null;
+    var amtDisp   = (branchAmt !== null && !isNaN(branchAmt) && branchAmt > 0)
+      ? '<b style="color:var(--green)">&#8369;' + branchAmt.toFixed(2) + '</b>'
+      : '<span style="color:var(--red,#ef4444);font-size:0.75rem">No amount set</span>';
+    return '<div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);' +
+             'display:flex;justify-content:space-between;align-items:center"' +
+             ' onmouseover="this.style.background=\'#f9fafb\'"' +
+             ' onmouseout="this.style.background=\'\'"' +
+             ' onclick="inc_selectProduct(\'' + esc(m.id) + '\')">' +
+      '<div>' +
+        '<div style="font-weight:600;font-size:0.85rem">' + esc(m.description) + '</div>' +
+        '<div style="font-size:0.73rem;color:var(--text3);font-family:var(--font-mono)">' + esc(m.barcode||'') + '</div>' +
+      '</div>' +
       '<div>' + amtDisp + '</div>' +
     '</div>';
   }).join('');
@@ -5670,13 +5675,15 @@ function inc_selectProduct(id) {
 }
 
 function inc_selectProduct(id) {
-  const m = inc_masterCache.find(x => x.id === id);
+  var m = inc_masterCache.find(function(x){ return x.id === id; });
   if (!m) return;
-  const inp = document.getElementById('inc_product');
+  var inp = document.getElementById('inc_product');
   if (inp) inp.value = m.description;
-  const dd = document.getElementById('inc_dropdown');
+  var dd = document.getElementById('inc_dropdown');
   if (dd) dd.style.display = 'none';
   inc_claimState.product = m;
+  var ub = currentUser ? (currentUser.branch || '') : '';
+  console.log('[INC] Selected:', m.description, '| Branch:', ub, '| Amount:', m[ub]);
   inc_validateClaim();
 }
 
