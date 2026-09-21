@@ -4999,6 +4999,7 @@ function inc_renderMasterTable(items, el) {
   const toolbar =
     '<div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center">' +
       (canEdit ? '<button class="btn btn-primary" onclick="inc_triggerExcelUpload()">Upload Excel/CSV</button>' : '') +
+      (canEdit ? '<button class="btn btn-ghost" onclick="inc_downloadTemplate()">Download Template</button>' : '') +
       '<input type="file" id="inc_excel_input" accept=".xlsx,.xls,.csv" style="display:none" onchange="inc_handleExcelUpload(this)">' +
       '<div class="search-wrap" style="margin-bottom:0">' +
         '<span class="search-icon">&#128269;</span>' +
@@ -5216,6 +5217,29 @@ async function inc_deleteMasterItem(id) {
 // ── EXCEL UPLOAD STATE ────────────────────────────────────
 let inc_importRows   = [];
 let inc_importCombos = [];
+
+function inc_downloadTemplate() {
+  // Build CSV template with required columns
+  const header = 'Barcode,Name';
+  const sample = [
+    '100001,Washing Machine XL',
+    '100002,Refrigerator 2 Door',
+    '100003,Aircon Split Type 1HP',
+    '100004,Electric Fan Stand',
+    '100005,Rice Cooker 1.8L',
+  ].join('\n');
+  const csv  = header + '\n' + sample;
+  const blob = new Blob([csv], { type:'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'AEHome_IncentiveItems_Template.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Template downloaded!', 'success');
+}
 
 function inc_triggerExcelUpload() {
   const inp = document.getElementById('inc_excel_input');
