@@ -5693,6 +5693,8 @@ function inc_selectProduct(id) {
   if (dd) dd.style.display = 'none';
   inc_claimState.product = m;
   var ub = currentUser ? (currentUser.branch || '') : '';
+  // Visible debug — remove after fixing
+  toast('Branch: ' + (ub||'EMPTY') + ' | Amount: ' + (m[ub] !== undefined ? m[ub] : 'KEY NOT FOUND') + ' | Keys: ' + Object.keys(m).filter(function(k){ return k !== 'id' && k !== 'barcode' && k !== 'description'; }).join(','), 'info');
   inc_validateClaim();
 }
 
