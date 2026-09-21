@@ -5688,10 +5688,6 @@ function inc_selectProduct(id) {
   if (dd) dd.style.display = 'none';
   inc_claimState.product = m;
   var ub = currentUser ? (currentUser.branch || '') : '';
-  // Debug — log full product object keys to see what branch keys exist
-  console.log('[INC] Branch from currentUser:', JSON.stringify(currentUser));
-  console.log('[INC] Product keys:', Object.keys(m).join(','));
-  console.log('[INC] Branch key lookup [' + ub + ']:', m[ub]);
   inc_validateClaim();
 }
 
@@ -5713,7 +5709,6 @@ function inc_validateClaim() {
 
   // Check branch-specific amount
   const userBranch = currentUser.branch || '';
-  console.log('[INC] validateClaim: branch=', userBranch, 'product[branch]=', product[userBranch], 'parsed=', parseFloat(product[userBranch]));
   const branchAmt  = userBranch && product[userBranch] !== undefined && product[userBranch] !== ''
                        ? parseFloat(product[userBranch]) : 0;
   if (!branchAmt || isNaN(branchAmt)) {
