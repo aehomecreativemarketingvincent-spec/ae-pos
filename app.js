@@ -5504,6 +5504,11 @@ async function inc_confirmImport() {
 async function inc_renderAgentPage() {
   const pc = document.getElementById('pageContent');
   if (!pc) return;
+  // Always reload master cache fresh for agents
+  try {
+    const mr = await gasRequest({ action:'inc_getMaster' });
+    inc_masterCache = mr.data || [];
+  } catch(e) { inc_masterCache = []; }
 
   const today = localDateStr(new Date());
   pc.innerHTML =
@@ -5683,7 +5688,10 @@ function inc_selectProduct(id) {
   if (dd) dd.style.display = 'none';
   inc_claimState.product = m;
   var ub = currentUser ? (currentUser.branch || '') : '';
-  console.log('[INC] Selected:', m.description, '| Branch:', ub, '| Amount:', m[ub]);
+  // Debug — log full product object keys to see what branch keys exist
+  console.log('[INC] Branch from currentUser:', JSON.stringify(currentUser));
+  console.log('[INC] Product keys:', Object.keys(m).join(','));
+  console.log('[INC] Branch key lookup [' + ub + ']:', m[ub]);
   inc_validateClaim();
 }
 
@@ -5705,6 +5713,7 @@ function inc_validateClaim() {
 
   // Check branch-specific amount
   const userBranch = currentUser.branch || '';
+  console.log('[INC] validateClaim: branch=', userBranch, 'product[branch]=', product[userBranch], 'parsed=', parseFloat(product[userBranch]));
   const branchAmt  = userBranch && product[userBranch] !== undefined && product[userBranch] !== ''
                        ? parseFloat(product[userBranch]) : 0;
   if (!branchAmt || isNaN(branchAmt)) {
