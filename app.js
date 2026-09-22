@@ -4621,7 +4621,7 @@ function audit_printAudit() {
 // ═══════════════════════════════════════════════════════════
 
 // ── BRANCHES ──────────────────────────────────────────────
-const INC_BRANCHES      = ['Vigan', 'SDO', 'San Juan', 'Cabugao1', 'Cabugao2', 'Laoag', 'Candon', 'Tagudin', 'Elyu'];
+const INC_BRANCHES      = ['Vigan','SDO','San Juan','Cabugao1','Cabugao2','Laoag','Candon','Tagudin','Elyu'];
 const INC_BRANCHES_DISP = ['Vigan', 'SDO', 'San Juan', 'Cabugao 1', 'Cabugao 2', 'Laoag', 'Candon', 'Tagudin', 'Elyu'];
 
 // ── STATE ─────────────────────────────────────────────────
