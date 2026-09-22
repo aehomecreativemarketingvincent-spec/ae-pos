@@ -3,7 +3,7 @@
    ============================================= */
 
 // ─── CONFIG ───────────────────────────────────
-const GAS_URL = "https://script.google.com/macros/s/AKfycbxbqmuYWoVthCT-aVs3qyuMwtqAntYWLMS5lOuEK23kLqQyV72Rhg0WcwxpxaOxLBzVAw/exec";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbyV3mAGgpQxiKDFmm5Jq7FGs4ah42r2Yb0c_StXQsftuwp5QmcjTacELHFoB_LIYXM8/exec";
 
 // ─── SAFE LOCALSTORAGE HELPERS ───────────────
 function lsGet(key, fallback) {
@@ -2989,6 +2989,12 @@ function openAddCashierModal() {
           <option value="agent">Sales Agent (Incentives only)</option>
           <option value="admin">Admin</option>
         </select>
+      </div></div>
+      <div class="input-row">
+        <div class="field" style="grid-column:1/-1">
+          <label for="c_branch">Branch <span style="color:var(--text3);font-weight:400">(required for Sales Agent)</span></label>
+          <select id="c_branch" name="c_branch"><option value=''>-- No Branch --</option><option value='Vigan'>Vigan</option><option value='SDO'>SDO</option><option value='San Juan'>San Juan</option><option value='Cabugao1'>Cabugao 1</option><option value='Cabugao2'>Cabugao 2</option><option value='Laoag'>Laoag</option><option value='Candon'>Candon</option><option value='Tagudin'>Tagudin</option><option value='Elyu'>Elyu</option></select>
+        </div>
       </div>
     </div>
 <button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="saveCashier()">Save User</button>`);
@@ -3015,6 +3021,12 @@ function openEditCashierModal(id) {
           </select>
         </div>
       </div>
+      <div class="input-row">
+        <div class="field" style="grid-column:1/-1">
+          <label for="c_branch">Branch <span style="color:var(--text3);font-weight:400">(required for Sales Agent)</span></label>
+          <select id="c_branch" name="c_branch"><option value=''>-- No Branch --</option><option value='Vigan' ${c.branch==='Vigan'?'selected':''}>Vigan</option><option value='SDO' ${c.branch==='SDO'?'selected':''}>SDO</option><option value='San Juan' ${c.branch==='San Juan'?'selected':''}>San Juan</option><option value='Cabugao1' ${c.branch==='Cabugao1'?'selected':''}>Cabugao 1</option><option value='Cabugao2' ${c.branch==='Cabugao2'?'selected':''}>Cabugao 2</option><option value='Laoag' ${c.branch==='Laoag'?'selected':''}>Laoag</option><option value='Candon' ${c.branch==='Candon'?'selected':''}>Candon</option><option value='Tagudin' ${c.branch==='Tagudin'?'selected':''}>Tagudin</option><option value='Elyu' ${c.branch==='Elyu'?'selected':''}>Elyu</option></select>
+        </div>
+      </div>
 <button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="saveCashier('${id}')">Update User</button>`);
   });
 }
@@ -3027,7 +3039,8 @@ async function saveCashier(id = null) {
  if (!name || !username) { toast('Name and username are required.', 'error'); return; }
  if (!id && !password) { toast('Password is required for new users.', 'error'); return; }
   try {
-    const res = await gasPost({ action: id ? 'updateCashier' : 'addCashier', id, name, username, password, role });
+    const branch = document.getElementById('c_branch')?.value || '';
+    const res = await gasPost({ action: id ? 'updateCashier' : 'addCashier', id, name, username, password, role, branch });
  if (res.success) { toast(id ? 'User updated!' : 'User added!', 'success'); closeModalDirect(); loadCashiers(); }
  else toast(res.message || 'Error.', 'error');
  } catch(e) { toast('Network error.', 'error'); }
@@ -5693,8 +5706,6 @@ function inc_selectProduct(id) {
   if (dd) dd.style.display = 'none';
   inc_claimState.product = m;
   var ub = currentUser ? (currentUser.branch || '') : '';
-  // Visible debug — remove after fixing
-  toast('Branch: ' + (ub||'EMPTY') + ' | Amount: ' + (m[ub] !== undefined ? m[ub] : 'KEY NOT FOUND') + ' | Keys: ' + Object.keys(m).filter(function(k){ return k !== 'id' && k !== 'barcode' && k !== 'description'; }).join(','), 'info');
   inc_validateClaim();
 }
 
@@ -5715,11 +5726,19 @@ function inc_validateClaim() {
   }
 
   // Check branch-specific amount
-  const userBranch = currentUser.branch || '';
-  const branchAmt  = userBranch && product[userBranch] !== undefined && product[userBranch] !== ''
-                       ? parseFloat(product[userBranch]) : 0;
+  const userBranch = currentUser ? (currentUser.branch || '') : '';
+  if (!userBranch) {
+    inc_showValbox('error','&#9747; Your account has no branch assigned. Ask your Admin to update your branch in User Management.');
+    inc_claimState.valid = false;
+    document.getElementById('inc_submit_btn').disabled = true;
+    document.getElementById('inc_qty_row').style.display = 'none';
+    document.getElementById('inc_summary').style.display = 'none';
+    return;
+  }
+  const rawAmt  = product[userBranch];
+  const branchAmt = (rawAmt !== undefined && rawAmt !== '' && rawAmt !== null) ? parseFloat(rawAmt) : 0;
   if (!branchAmt || isNaN(branchAmt)) {
-    inc_showValbox('warn','&#9888; No incentive amount set for your branch (' + userBranch + '). Contact admin.');
+    inc_showValbox('warn','&#9888; No incentive amount set for ' + userBranch + '. Ask Admin to set it via Set Branch Amounts.');
     inc_claimState.valid = false;
     document.getElementById('inc_submit_btn').disabled = true;
     document.getElementById('inc_qty_row').style.display = 'none';
