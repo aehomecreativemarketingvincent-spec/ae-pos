@@ -5517,12 +5517,15 @@ async function inc_confirmImport() {
 async function inc_renderAgentPage() {
   const pc = document.getElementById('pageContent');
   if (!pc) return;
-  // Force-clear cache and reload fresh from GAS
-  inc_masterCache = [];
-  try {
-    const mr = await gasRequest({ action:'inc_getMaster' });
-    inc_masterCache = mr.data || [];
-  } catch(e) { inc_masterCache = []; }
+  // Reload cache only if empty or older than 5 minutes
+  const now5 = Date.now();
+  if (!inc_masterCache.length || !window._incCacheTime || (now5 - window._incCacheTime) > 300000) {
+    try {
+      const mr = await gasRequest({ action:'inc_getMaster' });
+      inc_masterCache      = mr.data || [];
+      window._incCacheTime = Date.now();
+    } catch(e) { inc_masterCache = inc_masterCache.length ? inc_masterCache : []; }
+  }
 
   const today = localDateStr(new Date());
   pc.innerHTML =
@@ -5626,11 +5629,14 @@ async function inc_openClaimModal() {
     '<div id="inc_summary" style="display:none;background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
     '<button class="btn btn-primary" id="inc_submit_btn" style="width:100%;margin-top:12px" disabled onclick="inc_submitClaim()">Submit Claim</button>'
   );
-  // Always await fresh cache so branch amounts are current
-  try {
-    const fresh = await gasRequest({ action:'inc_getMaster' });
-    inc_masterCache = fresh.data || [];
-  } catch(e) { /* use existing cache if request fails */ }
+  // Refresh cache in background — don't block modal opening
+  gasRequest({ action:'inc_getMaster' })
+    .then(function(r) {
+      if (r.data && r.data.length) {
+        inc_masterCache      = r.data;
+        window._incCacheTime = Date.now();
+      }
+    }).catch(function(){});
 }
 
 
