@@ -2562,10 +2562,6 @@ async function handleImportFile(input) {
       const text = await file.text();
       processImportCSV(text, file.name);
     } else {
-      if (typeof XLSX === 'undefined') {
- if (preview) preview.innerHTML += '<div style="text-align:center;color:var(--text3);font-size:0.8rem">Loading Excel parser...</div>';
-        await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
-      }
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
@@ -3389,9 +3385,6 @@ async function downloadSummaryExcel(period, exportData) {
   }
   toast('Preparing Excel file...', 'info');
   try {
-    if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
-    }
 
     const rows  = buildSummaryRows(exportData);
     const now   = new Date();
@@ -3853,9 +3846,6 @@ function exportSalesCSVFromPage() {
 async function exportSalesExcel(rows, label) {
   toast('Preparing Excel...', 'info');
   try {
-    if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
-    }
     var HEADER = [
       '#', 'Transaction ID', 'Date', 'Time', 'Cashier',
       'Barcode', 'Stock No.', 'Product Name',
@@ -4538,11 +4528,6 @@ async function audit_exportExcel() {
   if (!audit_current || !audit_current.length) { toast('No data to export.', 'warning'); return; }
   toast('Preparing Excel...', 'info');
   try {
-    if (typeof XLSX === 'undefined') {
-      try { await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js'); }
-      catch(e1) { await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js').catch(()=>{}); }
-    }
-    if (typeof XLSX === 'undefined') { toast('Excel library failed to load.','error'); return; }
     const now    = new Date();
     const HEADER = ['Product Name','Category','POS Stock (Pcs)','Actual Count','Variance','Remarks','Date Counted','Counted By'];
     const data   = audit_current.map(function(r) {
@@ -5264,19 +5249,6 @@ async function inc_handleExcelUpload(input) {
   if (!file) return;
   toast('Reading file...', 'info');
   try {
-    if (typeof XLSX === 'undefined') {
-      try {
-        await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
-      } catch(e1) {
-        try {
-          await loadScript('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
-        } catch(e2) {
-          toast('Could not load Excel library. Check your internet connection.', 'error');
-          return;
-        }
-      }
-    }
-    if (typeof XLSX === 'undefined') { toast('Excel library failed to load.', 'error'); return; }
 
     const buf = await file.arrayBuffer();
     const wb  = XLSX.read(buf, { type:'array' });
@@ -5899,9 +5871,6 @@ async function inc_exportDailyExcel(date) {
   try {
     const res = await gasRequest({ action:'inc_getDailySummary', date:date });
     if (!res.success || !res.claims || !res.claims.length) { toast('No data to export.','warning'); return; }
-    if (typeof XLSX === 'undefined') {
-      await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js');
-    }
     const now = new Date();
     const HEADER = ['Employee','Invoice No.','Barcode','Description','Qty','Incentive/Unit','Total Incentive','Status'];
     const data = res.claims.map(c => [
