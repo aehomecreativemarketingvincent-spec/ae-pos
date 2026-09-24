@@ -1,76 +1,196 @@
-const CACHE  = 'ae-pos-v10';
-const ASSETS = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/app.js',
-  '/manifest.json',
-  '/icon-192.png',
-  '/icon-512.png',
-  '/favicon.ico',
-];
+const CACHE_NAME = 'ae-pos-v11';
 
-// Install — cache all assets
-self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(CACHE).then(c => {
+/*
+ * AE HOME POS SERVICE WORKER
+ * Runtime caching only.
+ * No aggressive pre-cache during install.
+ */
+
+// ================================
+// INSTALL
+// ================================
+self.addEventListener('install', event => {
+  console.log('[SW] Installing:', CACHE_NAME);
+
+  // Activate the new service worker immediately
+  event.waitUntil(self.skipWaiting());
+});
+
+
+// ================================
+// ACTIVATE
+// ================================
+self.addEventListener('activate', event => {
+  console.log('[SW] Activating:', CACHE_NAME);
+
+  event.waitUntil(
+    caches.keys().then(cacheNames => {
       return Promise.all(
-        ASSETS.map(url =>
-          c.add(url).catch(err => {
-            console.warn('[SW] Failed to cache:', url, err);
+        cacheNames
+          .filter(name => name !== CACHE_NAME)
+          .map(name => {
+            console.log('[SW] Removing old cache:', name);
+            return caches.delete(name);
           })
-        )
       );
+    }).then(() => {
+      return self.clients.claim();
     })
   );
-  self.skipWaiting();
 });
 
-// Activate — delete old caches
-self.addEventListener('activate', e => {
-  e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    )
-  );
-  self.clients.claim();
-});
 
-// Fetch — cache first for app assets, network first for GAS/CDN
-self.addEventListener('fetch', e => {
-  const url = e.request.url;
+// ================================
+// FETCH
+// ================================
+self.addEventListener('fetch', event => {
 
-  // Skip non-GET
-  if (e.request.method !== 'GET') return;
+  const request = event.request;
 
-  // Never intercept — let browser handle directly
-  if (url.includes('script.google.com'))       return;
-  if (url.includes('script.googleusercontent')) return;
-  if (url.includes('cdn.sheetjs.com'))          return;
-  if (url.includes('cdnjs.cloudflare.com'))     return;
-  if (url.includes('cdn.jsdelivr.net'))         return;
-  if (url.includes('fonts.googleapis.com'))     return;
-  if (url.includes('fonts.gstatic.com'))        return;
-  if (url.includes('googleapis.com'))           return;
+  // Only handle GET requests
+  if (request.method !== 'GET') {
+    return;
+  }
 
-  // For app shell assets — cache first, then network
-  e.respondWith(
-    caches.match(e.request).then(function(cached) {
-      if (cached) return cached;
+  const url = new URL(request.url);
 
-      // Not in cache — fetch from network and cache it
-      return fetch(e.request).then(function(res) {
-        if (!res || res.status !== 200 || res.type === 'opaque') return res;
-        const clone = res.clone();
-        caches.open(CACHE).then(function(c) { c.put(e.request, clone); });
-        return res;
-      }).catch(function() {
-        // Offline fallback — return index.html for navigation
-        if (e.request.mode === 'navigate') {
-          return caches.match('/index.html');
+  // ==========================================
+  // DO NOT INTERCEPT EXTERNAL / GOOGLE SERVICES
+  // ==========================================
+  if (
+    url.hostname.includes('script.google.com') ||
+    url.hostname.includes('script.googleusercontent.com') ||
+    url.hostname.includes('googleapis.com') ||
+    url.hostname.includes('gstatic.com') ||
+    url.hostname.includes('googleusercontent.com') ||
+    url.hostname.includes('google.com') ||
+    url.hostname.includes('cdn.jsdelivr.net') ||
+    url.hostname.includes('cdnjs.cloudflare.com') ||
+    url.hostname.includes('cdn.sheetjs.com') ||
+    url.hostname.includes('fonts.googleapis.com') ||
+    url.hostname.includes('fonts.gstatic.com')
+  ) {
+    return;
+  }
+
+  // ==========================================
+  // ONLY HANDLE SAME-ORIGIN REQUESTS
+  // ==========================================
+  if (url.origin !== self.location.origin) {
+    return;
+  }
+
+  // ==========================================
+  // NAVIGATION / HTML
+  // Network first, cache fallback
+  // ==========================================
+  if (request.mode === 'navigate') {
+
+    event.respondWith(
+      fetch(request)
+        .then(response => {
+
+          if (response && response.ok) {
+            const copy = response.clone();
+
+            caches.open(CACHE_NAME).then(cache => {
+              cache.put(request, copy).catch(() => {});
+            });
+          }
+
+          return response;
+        })
+        .catch(() => {
+
+          return caches.match(request).then(cached => {
+
+            if (cached) {
+              return cached;
+            }
+
+            // Last fallback
+            return caches.match('/').then(rootCached => {
+              return rootCached || new Response(
+                'AE Home POS is currently offline.',
+                {
+                  status: 503,
+                  headers: {
+                    'Content-Type': 'text/plain'
+                  }
+                }
+              );
+            });
+
+          });
+
+        })
+    );
+
+    return;
+  }
+
+
+  // ==========================================
+  // STATIC ASSETS
+  // Cache first, network fallback
+  // ==========================================
+  const destination = request.destination;
+
+  const cacheableTypes = [
+    'style',
+    'script',
+    'image',
+    'font',
+    'manifest'
+  ];
+
+  if (cacheableTypes.includes(destination)) {
+
+    event.respondWith(
+
+      caches.match(request).then(cached => {
+
+        if (cached) {
+          return cached;
         }
-        return new Response('', { status: 200 });
-      });
-    })
-  );
+
+        return fetch(request)
+          .then(response => {
+
+            if (
+              response &&
+              response.ok &&
+              response.type !== 'opaque'
+            ) {
+
+              const copy = response.clone();
+
+              caches.open(CACHE_NAME).then(cache => {
+                cache.put(request, copy).catch(() => {});
+              });
+
+            }
+
+            return response;
+          })
+          .catch(() => {
+
+            // Don't generate another error
+            return new Response('', {
+              status: 503
+            });
+
+          });
+
+      })
+
+    );
+
+    return;
+  }
+
+  // ==========================================
+  // EVERYTHING ELSE
+  // Let browser handle normally
+  // ==========================================
 });
