@@ -5382,8 +5382,12 @@ function inc_showImportPreview() {
   const existing = inc_masterCache;
   const tagged   = rows.map(function(r) {
     const isDup = existing.some(function(e) {
-      return (r.barcode && e.barcode === r.barcode) ||
-             e.description.toLowerCase() === r.name.toLowerCase();
+      const rb = String(r.barcode || '').trim();
+      const eb = String(e.barcode || '').trim();
+      const scientific = /^[-+]?\d+(?:\.\d+)?e[+-]?\d+$/i;
+      const usableBarcode = rb && !scientific.test(rb) && eb && !scientific.test(eb);
+      return (usableBarcode && eb === rb) ||
+             String(e.description || '').trim().toLowerCase() === String(r.name || '').trim().toLowerCase();
     });
     return Object.assign({}, r, { dup: isDup });
   });
@@ -5397,15 +5401,15 @@ function inc_showImportPreview() {
           return '<option value="' + b + '"' + (c.branch===b?' selected':'') + '>' + INC_BRANCHES_DISP[i] + '</option>';
         }).join('');
       return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">' +
-        '<select onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
+        '<select id="inc_branch_' + ci + '" name="inc_branch_' + ci + '" onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
           'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;min-width:130px">' +
           branchOpts + '</select>' +
-        '<input type="text" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
+        '<input type="text" id="inc_category_' + ci + '" name="inc_category_' + ci + '" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
           'oninput="inc_updateCombo(' + ci + ',\'category\',this.value)" ' +
           'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;flex:1;min-width:120px">' +
         '<div style="display:flex;align-items:center;gap:4px">' +
           '<span style="font-weight:700">&#8369;</span>' +
-          '<input type="number" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
+          '<input type="number" id="inc_amount_' + ci + '" name="inc_amount_' + ci + '" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
             'oninput="inc_updateCombo(' + ci + ',\'amount\',this.value)" ' +
             'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;width:100px">' +
         '</div>' +
@@ -5500,15 +5504,15 @@ function inc_refreshCombos() {
         return '<option value="' + b + '"' + (c.branch===b?' selected':'') + '>' + INC_BRANCHES_DISP[i] + '</option>';
       }).join('');
     return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">' +
-      '<select onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
+      '<select id="inc_branch_' + ci + '" name="inc_branch_' + ci + '" onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
         'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;min-width:130px">' +
         branchOpts + '</select>' +
-      '<input type="text" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
+      '<input type="text" id="inc_category_' + ci + '" name="inc_category_' + ci + '" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
         'oninput="inc_updateCombo(' + ci + ',\'category\',this.value)" ' +
         'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;flex:1;min-width:120px">' +
       '<div style="display:flex;align-items:center;gap:4px">' +
         '<span style="font-weight:700">&#8369;</span>' +
-        '<input type="number" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
+        '<input type="number" id="inc_amount_' + ci + '" name="inc_amount_' + ci + '" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
           'oninput="inc_updateCombo(' + ci + ',\'amount\',this.value)" ' +
           'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;width:100px">' +
       '</div>' +
@@ -5528,10 +5532,17 @@ async function inc_confirmImport() {
   const allRows     = inc_importRows;
   const validCombos = inc_importCombos.filter(function(c){ return c.branch && c.amount; });
 
+  // Duplicate detection: barcode is used only when it is a reliable TEXT barcode.
+  // Excel often converts long numeric barcodes to scientific notation (e.g. 1.99E+11),
+  // which can collapse different products into the same key. In that case, match by name.
   const newRows = allRows.filter(function(r) {
+    const rb = String(r.barcode || '').trim();
+    const scientific = /^[-+]?\d+(?:\.\d+)?e[+-]?\d+$/i;
     return !inc_masterCache.some(function(e) {
-      return (r.barcode && e.barcode === r.barcode) ||
-             e.description.toLowerCase() === r.name.toLowerCase();
+      const eb = String(e.barcode || '').trim();
+      const usableBarcode = rb && !scientific.test(rb) && eb && !scientific.test(eb);
+      return (usableBarcode && eb === rb) ||
+             String(e.description || '').trim().toLowerCase() === String(r.name || '').trim().toLowerCase();
     });
   });
 
@@ -5554,10 +5565,11 @@ async function inc_confirmImport() {
     });
     if (res.success) {
       closeModalDirect();
-      let msg = '';
-      if (res.added)       msg += 'Added ' + res.added + ' new item(s). ';
+      let msg = 'Processed ' + (res.processed || allRows.length) + ' item(s). ';
+      if (res.added)       msg += 'Added ' + res.added + ' new. ';
+      if (res.updated)     msg += 'Updated ' + res.updated + ' existing. ';
       if (res.amountsSet)  msg += 'Incentive amounts set for ' + res.amountsSet + ' item(s).';
-      if (!msg)            msg  = 'Done — no changes needed.';
+      if (!res.added && !res.updated && !res.amountsSet) msg += 'No changes needed.';
       toast(msg, 'success');
       await inc_loadMasterList();
     } else {
