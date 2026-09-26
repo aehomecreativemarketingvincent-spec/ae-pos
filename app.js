@@ -2658,42 +2658,101 @@ function processImportCSV(csvText, filename) {
 
 // Special bulk import via GET — splits product data into URL-safe chunks
 async function gasBulkImport(batch) {
-  // Normalize column name variants from Excel/CSV headers
+  // Keep the payload small enough for Google Apps Script web-app GET limits.
+  // IMPORTANT: category is included per row so Excel category assignment is preserved.
   const products = batch.map(p => ({
-    name:      String(p.name      || p.Name      || p.NAME      || '').trim(),
-    barcode:   String(p.barcode   || p.Barcode   || p.BARCODE   || p['Barcode']    || '').trim(),
-    qtyPcs:    String(p.qtypcs    || p.qtyPcs    || p['qty(pcs)']   || p['Qty Pcs']   || p['QTY PCS']   || '0'),
-    qtyPacks:  String(p.qtypacks  || p.qtyPacks  || p['qty(packs)'] || p['Qty Packs'] || p['QTY PACKS'] || '0'),
-    pricePer:  String(p.priceper  || p.pricePer  || p['price/pc']   || p['Price/Pc']  || p['PRICE/PC']  || '0'),
-    pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || p['Price/Pack']|| p['PRICE/PACK']|| '0'),
+    name:      String(p.name || p.Name || p.NAME || '').trim(),
+    barcode:   String(p.barcode || p.Barcode || p.BARCODE || '').trim(),
+    category:  String(p.category || p.Category || p.CATEGORY || '').trim(),
+    qtyPcs:    String(p.qtypcs || p.qtyPcs || p['qty(pcs)'] || p['Qty Pcs'] || p['QTY PCS'] || '0'),
+    qtyPacks:  String(p.qtypacks || p.qtyPacks || p['qty(packs)'] || p['Qty Packs'] || p['QTY PACKS'] || '0'),
+    pricePer:  String(p.priceper || p.pricePer || p['price/pc'] || p['Price/Pc'] || p['PRICE/PC'] || '0'),
+    pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || p['Price/Pack'] || p['PRICE/PACK'] || '0')
   })).filter(p => p.name);
 
-  // Use GET + base64 payload (same as gasPost) — avoids CORS block
+  if (!products.length) return { success: true, count: 0 };
+
   const payload = { action: 'bulkAddProducts', products: JSON.stringify(products) };
-  const json    = JSON.stringify(payload);
+  const json = JSON.stringify(payload);
   let encoded;
   try {
     encoded = btoa(unescape(encodeURIComponent(json)));
   } catch (e) {
-    const bytes  = new TextEncoder().encode(json);
+    const bytes = new TextEncoder().encode(json);
     const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
     encoded = btoa(binary);
   }
-  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
-  const ctrl  = new AbortController();
+
+  const url = GAS_URL + '?data=' + encodeURIComponent(encoded);
+  const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 60000);
+
   try {
-    const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
-    clearTimeout(timer);
+    const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
     const text = await res.text();
-    if (!text || !text.trim()) return { success: true, count: products.length };
-    try { return JSON.parse(text); }
-    catch(e) { return { success: true, count: products.length }; }
-  } catch(e) {
     clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Import timed out. Try a smaller batch.');
+
+    if (!text || !text.trim()) {
+      throw new Error('Empty server response. The batch was not confirmed as saved.');
+    }
+
+    let result;
+    try {
+      result = JSON.parse(text);
+    } catch (e) {
+      throw new Error('Invalid server response. The batch was not confirmed as saved.');
+    }
+
+    if (!result || result.success !== true) {
+      throw new Error((result && result.message) || 'Server rejected the batch.');
+    }
+
+    return result;
+  } catch (e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('Import timed out.');
     throw new Error('Import error: ' + e.message);
   }
+}
+
+function buildImportBatches(rows) {
+  // Google Apps Script web-app GET requests are URL-encoded. Use a conservative
+  // encoded payload size rather than a fixed row count. This prevents partial
+  // imports when product names/categories are long.
+  const MAX_ENCODED_CHARS = 5000;
+  const batches = [];
+  let current = [];
+
+  const encodedSize = arr => {
+    const payload = { action: 'bulkAddProducts', products: JSON.stringify(arr.map(p => ({
+      name: String(p.name || '').trim(),
+      barcode: String(p.barcode || '').trim(),
+      category: String(p.category || '').trim(),
+      qtyPcs: String(p.qtypcs || p.qtyPcs || p['qty(pcs)'] || '0'),
+      qtyPacks: String(p.qtypacks || p.qtyPacks || p['qty(packs)'] || '0'),
+      pricePer: String(p.priceper || p.pricePer || p['price/pc'] || '0'),
+      pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || '0')
+    }))) };
+    let b64;
+    try { b64 = btoa(unescape(encodeURIComponent(JSON.stringify(payload)))); }
+    catch (e) {
+      const bytes = new TextEncoder().encode(JSON.stringify(payload));
+      b64 = btoa(Array.from(bytes, b => String.fromCharCode(b)).join(''));
+    }
+    return encodeURIComponent(b64).length;
+  };
+
+  rows.forEach(row => {
+    const candidate = current.concat(row);
+    if (current.length && encodedSize(candidate) > MAX_ENCODED_CHARS) {
+      batches.push(current);
+      current = [row];
+    } else {
+      current = candidate;
+    }
+  });
+  if (current.length) batches.push(current);
+  return batches;
 }
 
 async function confirmImport() {
@@ -2716,12 +2775,10 @@ async function confirmImport() {
     preview.appendChild(statusEl);
   }
 
-  // ── BATCH IMPORT (15 per batch — URL-safe size) ──
-  const BATCH_SIZE = 15;
-  const batches = [];
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    batches.push(rows.slice(i, i + BATCH_SIZE));
-  }
+  // ── ADAPTIVE BATCH IMPORT ─────────────────────
+  // Do not use a fixed row count: long product names/categories can make a
+  // 15-row URL too large and cause only part of the file to reach GAS.
+  const batches = buildImportBatches(rows);
 
   let totalImported = 0;
   let failed = 0;
@@ -2752,16 +2809,10 @@ async function confirmImport() {
         console.warn('Batch ' + batchNum + ' failed:', res.message);
       }
     } catch(e) {
-      // Retry once after 2s
-      await new Promise(r => setTimeout(r, 2000));
-      try {
-        const res2 = await gasBulkImport(batch);
-        if (res2.success) totalImported += res2.count || batch.length;
-        else failed += batch.length;
-      } catch(e2) {
-        failed += batch.length;
-        console.warn('Batch ' + batchNum + ' retry also failed:', e2.message);
-      }
+      // Do not blindly retry an ambiguous write: if GAS actually saved the batch
+      // but the response was lost, retrying could create duplicate products.
+      failed += batch.length;
+      console.warn('Batch ' + batchNum + ' failed:', e.message);
     }
 
     // Small pause between batches to avoid GAS rate limit
