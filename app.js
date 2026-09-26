@@ -5253,13 +5253,13 @@ let inc_importCombos = [];
 
 function inc_downloadTemplate() {
   // Build CSV template with required columns
-  const header = 'Barcode,Name';
+  const header = 'Barcode,Name,Category';
   const sample = [
-    '100001,Washing Machine XL',
-    '100002,Refrigerator 2 Door',
-    '100003,Aircon Split Type 1HP',
-    '100004,Electric Fan Stand',
-    '100005,Rice Cooker 1.8L',
+    '100001,Washing Machine XL,Appliances',
+    '100002,Refrigerator 2 Door,Appliances',
+    '100003,Aircon Split Type 1HP,Aircon',
+    '100004,Electric Fan Stand,Appliances',
+    '100005,Rice Cooker 1.8L,Kitchen Appliances',
   ].join('\n');
   const csv  = header + '\n' + sample;
   const blob = new Blob([csv], { type:'text/csv' });
@@ -5302,12 +5302,13 @@ async function inc_handleExcelUpload(input) {
       }
       return {
         barcode: get(['barcode','Barcode','BARCODE','bar code','bar_code']),
-        name:    get(['name','Name','NAME','product name','Product Name','PRODUCT NAME','description','Description']),
+        name:     get(['name','Name','NAME','product name','Product Name','PRODUCT NAME','description','Description']),
+        category: get(['category','Category','CATEGORY','product category','Product Category','PRODUCT CATEGORY']),
       };
     }).filter(function(r){ return r.name; });
 
     if (!normalized.length) {
-      toast('No valid rows. File needs "Barcode" and "Name" or "Product Name" columns.', 'error');
+      toast('No valid rows. File needs a "Name" or "Product Name" column. Barcode and Category are optional.', 'error');
       return;
     }
     inc_importRows   = normalized;
@@ -5368,6 +5369,7 @@ function inc_showImportPreview() {
     return '<tr style="' + (r.dup ? 'opacity:0.45' : '') + '">' +
       '<td style="padding:8px 12px;font-family:var(--font-mono);font-size:0.78rem">' + esc(r.barcode||'—') + '</td>' +
       '<td style="padding:8px 12px;font-size:0.85rem"><b>' + esc(r.name) + '</b></td>' +
+      '<td style="padding:8px 12px;font-size:0.8rem;color:var(--text3)">' + esc(r.category || '—') + '</td>' +
       '<td style="padding:8px 12px;text-align:center">' +
         (r.dup
           ? '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:700">DUPLICATE</span>'
@@ -5395,7 +5397,7 @@ function inc_showImportPreview() {
     '<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:14px;margin-bottom:14px">' +
       '<div style="font-size:0.82rem;font-weight:700;color:var(--text2);margin-bottom:6px">Set Incentive Amounts ' +
         '<span style="font-weight:400;color:var(--text3);font-size:0.78rem">(optional — can re-upload to update)</span></div>' +
-      '<div style="font-size:0.75rem;color:var(--text3);margin-bottom:10px">Select Branch + type Category keyword + enter Amount. Applies to all matching items.</div>' +
+      '<div style="font-size:0.75rem;color:var(--text3);margin-bottom:10px">Category from the Excel file is saved to each product. Select Branch + Category + Amount only when setting incentive amounts.</div>' +
       '<div id="inc_combos_wrap">' + buildCombos() + '</div>' +
       '<button onclick="inc_addCombo()" ' +
         'style="background:none;border:1.5px dashed var(--border);border-radius:7px;padding:6px 14px;font-size:0.8rem;color:var(--text3);cursor:pointer;font-family:var(--font-main);margin-top:6px;width:100%">' +
@@ -5408,6 +5410,7 @@ function inc_showImportPreview() {
         '<thead><tr style="background:#f9fafb;border-bottom:1px solid var(--border)">' +
           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Barcode</th>' +
           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Name</th>' +
+           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Category</th>' +
           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:center">Status</th>' +
           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:center">Remove</th>' +
         '</tr></thead>' +
