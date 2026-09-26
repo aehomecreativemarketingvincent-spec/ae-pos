@@ -4652,31 +4652,34 @@ function inc_showTab(tab, btn) {
 }
 
 // ── SET BRANCH AMOUNTS (simple panel) ─────────────────────
+
+// ── SET BRANCH AMOUNTS ─────────────────────────────────────
 async function inc_renderSetAmounts() {
   const el = document.getElementById('incContent');
   if (!el) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
 
-  // Load master cache if needed
-  if (!inc_masterCache.length) {
-    el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
-    try {
-      const r = await gasRequest({ action:'inc_getMaster' });
-      inc_masterCache = r.data || [];
-    } catch(e) {
-      el.innerHTML = '<div class="no-data"><div class="no-data-text">Error loading products.</div></div>';
-      return;
-    }
-  }
+  // Load categories from Products sheet
+  let categories = [];
+  try {
+    const cr = await gasRequest({ action:'inc_getCategories' });
+    categories = cr.data || [];
+  } catch(e) { categories = []; }
 
   const branchOpts = INC_BRANCHES.map(function(b,i){
     return '<option value="' + b + '">' + INC_BRANCHES_DISP[i] + '</option>';
   }).join('');
 
+  const catOpts = '<option value="">-- All Categories --</option>' +
+    categories.map(function(c){
+      return '<option value="' + esc(c) + '">' + esc(c) + '</option>';
+    }).join('');
+
   el.innerHTML =
     '<div style="background:var(--surface,white);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:560px">' +
       '<div style="font-size:1rem;font-weight:700;margin-bottom:6px">Set Incentive Amount by Branch</div>' +
       '<div style="font-size:0.82rem;color:var(--text3);margin-bottom:20px">' +
-        'Select a branch, enter the incentive amount, and optionally filter by category keyword. ' +
+        'Select a branch and category, then enter the incentive amount. ' +
         'Leave category blank to apply to ALL active items in that branch.' +
       '</div>' +
 
@@ -4688,9 +4691,10 @@ async function inc_renderSetAmounts() {
       '</div>' +
 
       '<div class="form-row">' +
-        '<label>Category Keyword <span style="font-weight:400;color:var(--text3)">(optional — leave blank to apply to ALL items)</span></label>' +
-        '<input id="sa_category" type="text" placeholder="e.g. Aircon, Washing Machine, Refrigerator..." ' +
-          'style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main)">' +
+        '<label>Category <span style="font-weight:400;color:var(--text3)">(leave blank = apply to ALL active items)</span></label>' +
+        '<select id="sa_category" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main)">' +
+          catOpts +
+        '</select>' +
       '</div>' +
 
       '<div class="form-row">' +
@@ -4699,7 +4703,7 @@ async function inc_renderSetAmounts() {
           'style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main)">' +
       '</div>' +
 
-      '<div id="sa_preview" style="margin-bottom:14px;display:none;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 14px;font-size:0.82rem;color:#0369a1"></div>' +
+      '<div id="sa_preview" style="margin-bottom:14px;display:none;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 14px;font-size:0.82rem"></div>' +
 
       '<button class="btn btn-primary" style="width:100%" onclick="inc_applyBranchAmount()">Apply to Matching Items</button>' +
       '<button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="inc_previewBranchAmount()">Preview Matching Items</button>' +
@@ -4708,32 +4712,65 @@ async function inc_renderSetAmounts() {
 
 async function inc_previewBranchAmount() {
   const branch   = document.getElementById('sa_branch')?.value;
-  const category = (document.getElementById('sa_category')?.value || '').trim().toLowerCase();
+  const category = (document.getElementById('sa_category')?.value || '').trim();
   const el       = document.getElementById('sa_preview');
   if (!branch) { toast('Please select a branch first.', 'warning'); return; }
-  if (!inc_masterCache.length) { toast('No products loaded.', 'warning'); return; }
-  const matching = inc_masterCache.filter(function(m) {
-    if (m.status === 'Inactive') return false;
-    if (!category) return true;
-    return (m.description || '').toLowerCase().indexOf(category) >= 0;
+
+  // Load fresh master cache
+  try {
+    const r = await gasRequest({ action:'inc_getMaster' });
+    inc_masterCache = r.data || [];
+  } catch(e) {}
+
+  // Match using SAME logic as apply — category column, case-insensitive, exact match
+  const filterCat = category.toLowerCase().trim();
+  const matching  = inc_masterCache.filter(function(m) {
+    if ((m.status || '').toLowerCase() === 'inactive') return false;
+    if (!filterCat) return true; // blank = all active items
+    return (m.category || '').toLowerCase().trim() === filterCat;
   });
+
   if (!el) return;
   el.style.display = 'block';
+
   if (!matching.length) {
-    el.textContent = 'No active items match "' + category + '".';
+    el.style.cssText = 'display:block;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;padding:10px 14px;font-size:0.82rem;color:#991b1b';
+    el.innerHTML = '<b>No active items found</b>' +
+      (category ? ' with category <b>' + esc(category) + '</b>' : '') + '.';
     return;
   }
-  el.innerHTML = '<b>' + matching.length + ' item(s)</b> will be updated — e.g.: ' +
-    matching.slice(0, 3).map(function(m){ return m.description; }).join(', ') +
-    (matching.length > 3 ? '...' : '');
+
+  el.style.cssText = 'display:block;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 14px;font-size:0.82rem;color:#0369a1';
+  el.innerHTML =
+    '<b>' + matching.length + ' active item(s) will be updated</b>' +
+    (category ? ' — Category: <b>' + esc(category) + '</b>' : ' — All categories') +
+    '<div style="margin-top:8px;max-height:150px;overflow-y:auto">' +
+    matching.map(function(m) {
+      return '<div style="padding:2px 0;font-size:0.78rem">&#x2022; ' + esc(m.description) + '</div>';
+    }).join('') +
+    '</div>';
 }
 
 async function inc_applyBranchAmount() {
   const branch   = document.getElementById('sa_branch')?.value;
   const category = (document.getElementById('sa_category')?.value || '').trim();
   const amount   = document.getElementById('sa_amount')?.value;
+  const prevEl   = document.getElementById('sa_preview');
+
   if (!branch)  { toast('Please select a branch.', 'warning'); return; }
   if (!amount || isNaN(parseFloat(amount))) { toast('Please enter a valid amount.', 'warning'); return; }
+
+  // Check preview first — don't allow apply with 0 matches
+  const filterCat = category.toLowerCase().trim();
+  const matching  = inc_masterCache.filter(function(m) {
+    if ((m.status || '').toLowerCase() === 'inactive') return false;
+    if (!filterCat) return true;
+    return (m.category || '').toLowerCase().trim() === filterCat;
+  });
+  if (!matching.length) {
+    toast('No matching active items found. Run Preview first.', 'warning');
+    return;
+  }
 
   const btn = document.querySelector('#incContent .btn-primary');
   if (btn) { btn.disabled = true; btn.textContent = 'Applying...'; }
@@ -4748,12 +4785,9 @@ async function inc_applyBranchAmount() {
     if (res.success) {
       toast('Done! Updated ' + res.updated + ' item(s) in ' +
         INC_BRANCHES_DISP[INC_BRANCHES.indexOf(branch)] + '.', 'success');
-      // Clear cache so master list reloads fresh
       inc_masterCache = [];
-      // Reset form
+      window._incCacheTime = 0;
       if (document.getElementById('sa_amount'))   document.getElementById('sa_amount').value = '';
-      if (document.getElementById('sa_category')) document.getElementById('sa_category').value = '';
-      const prevEl = document.getElementById('sa_preview');
       if (prevEl) prevEl.style.display = 'none';
       if (btn) { btn.disabled = false; btn.textContent = 'Apply to Matching Items'; }
     } else {
@@ -4765,6 +4799,7 @@ async function inc_applyBranchAmount() {
     if (btn) { btn.disabled = false; btn.textContent = 'Apply to Matching Items'; }
   }
 }
+
 
 // ── DAILY REPORT ──────────────────────────────────────────
 async function inc_loadDailyReport(dateVal) {
