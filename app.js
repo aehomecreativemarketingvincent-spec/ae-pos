@@ -2658,101 +2658,42 @@ function processImportCSV(csvText, filename) {
 
 // Special bulk import via GET — splits product data into URL-safe chunks
 async function gasBulkImport(batch) {
-  // Keep the payload small enough for Google Apps Script web-app GET limits.
-  // IMPORTANT: category is included per row so Excel category assignment is preserved.
+  // Normalize column name variants from Excel/CSV headers
   const products = batch.map(p => ({
-    name:      String(p.name || p.Name || p.NAME || '').trim(),
-    barcode:   String(p.barcode || p.Barcode || p.BARCODE || '').trim(),
-    category:  String(p.category || p.Category || p.CATEGORY || '').trim(),
-    qtyPcs:    String(p.qtypcs || p.qtyPcs || p['qty(pcs)'] || p['Qty Pcs'] || p['QTY PCS'] || '0'),
-    qtyPacks:  String(p.qtypacks || p.qtyPacks || p['qty(packs)'] || p['Qty Packs'] || p['QTY PACKS'] || '0'),
-    pricePer:  String(p.priceper || p.pricePer || p['price/pc'] || p['Price/Pc'] || p['PRICE/PC'] || '0'),
-    pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || p['Price/Pack'] || p['PRICE/PACK'] || '0')
+    name:      String(p.name      || p.Name      || p.NAME      || '').trim(),
+    barcode:   String(p.barcode   || p.Barcode   || p.BARCODE   || p['Barcode']    || '').trim(),
+    qtyPcs:    String(p.qtypcs    || p.qtyPcs    || p['qty(pcs)']   || p['Qty Pcs']   || p['QTY PCS']   || '0'),
+    qtyPacks:  String(p.qtypacks  || p.qtyPacks  || p['qty(packs)'] || p['Qty Packs'] || p['QTY PACKS'] || '0'),
+    pricePer:  String(p.priceper  || p.pricePer  || p['price/pc']   || p['Price/Pc']  || p['PRICE/PC']  || '0'),
+    pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || p['Price/Pack']|| p['PRICE/PACK']|| '0'),
   })).filter(p => p.name);
 
-  if (!products.length) return { success: true, count: 0 };
-
+  // Use GET + base64 payload (same as gasPost) — avoids CORS block
   const payload = { action: 'bulkAddProducts', products: JSON.stringify(products) };
-  const json = JSON.stringify(payload);
+  const json    = JSON.stringify(payload);
   let encoded;
   try {
     encoded = btoa(unescape(encodeURIComponent(json)));
   } catch (e) {
-    const bytes = new TextEncoder().encode(json);
+    const bytes  = new TextEncoder().encode(json);
     const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
     encoded = btoa(binary);
   }
-
-  const url = GAS_URL + '?data=' + encodeURIComponent(encoded);
-  const ctrl = new AbortController();
+  const url   = GAS_URL + '?data=' + encodeURIComponent(encoded);
+  const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 60000);
-
   try {
-    const res = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    clearTimeout(timer);
     const text = await res.text();
+    if (!text || !text.trim()) return { success: true, count: products.length };
+    try { return JSON.parse(text); }
+    catch(e) { return { success: true, count: products.length }; }
+  } catch(e) {
     clearTimeout(timer);
-
-    if (!text || !text.trim()) {
-      throw new Error('Empty server response. The batch was not confirmed as saved.');
-    }
-
-    let result;
-    try {
-      result = JSON.parse(text);
-    } catch (e) {
-      throw new Error('Invalid server response. The batch was not confirmed as saved.');
-    }
-
-    if (!result || result.success !== true) {
-      throw new Error((result && result.message) || 'Server rejected the batch.');
-    }
-
-    return result;
-  } catch (e) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('Import timed out.');
+    if (e.name === 'AbortError') throw new Error('Import timed out. Try a smaller batch.');
     throw new Error('Import error: ' + e.message);
   }
-}
-
-function buildImportBatches(rows) {
-  // Google Apps Script web-app GET requests are URL-encoded. Use a conservative
-  // encoded payload size rather than a fixed row count. This prevents partial
-  // imports when product names/categories are long.
-  const MAX_ENCODED_CHARS = 5000;
-  const batches = [];
-  let current = [];
-
-  const encodedSize = arr => {
-    const payload = { action: 'bulkAddProducts', products: JSON.stringify(arr.map(p => ({
-      name: String(p.name || '').trim(),
-      barcode: String(p.barcode || '').trim(),
-      category: String(p.category || '').trim(),
-      qtyPcs: String(p.qtypcs || p.qtyPcs || p['qty(pcs)'] || '0'),
-      qtyPacks: String(p.qtypacks || p.qtyPacks || p['qty(packs)'] || '0'),
-      pricePer: String(p.priceper || p.pricePer || p['price/pc'] || '0'),
-      pricePack: String(p.pricepack || p.pricePack || p['price/pack'] || '0')
-    }))) };
-    let b64;
-    try { b64 = btoa(unescape(encodeURIComponent(JSON.stringify(payload)))); }
-    catch (e) {
-      const bytes = new TextEncoder().encode(JSON.stringify(payload));
-      b64 = btoa(Array.from(bytes, b => String.fromCharCode(b)).join(''));
-    }
-    return encodeURIComponent(b64).length;
-  };
-
-  rows.forEach(row => {
-    const candidate = current.concat(row);
-    if (current.length && encodedSize(candidate) > MAX_ENCODED_CHARS) {
-      batches.push(current);
-      current = [row];
-    } else {
-      current = candidate;
-    }
-  });
-  if (current.length) batches.push(current);
-  return batches;
 }
 
 async function confirmImport() {
@@ -2775,10 +2716,12 @@ async function confirmImport() {
     preview.appendChild(statusEl);
   }
 
-  // ── ADAPTIVE BATCH IMPORT ─────────────────────
-  // Do not use a fixed row count: long product names/categories can make a
-  // 15-row URL too large and cause only part of the file to reach GAS.
-  const batches = buildImportBatches(rows);
+  // ── BATCH IMPORT (15 per batch — URL-safe size) ──
+  const BATCH_SIZE = 15;
+  const batches = [];
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    batches.push(rows.slice(i, i + BATCH_SIZE));
+  }
 
   let totalImported = 0;
   let failed = 0;
@@ -2809,10 +2752,16 @@ async function confirmImport() {
         console.warn('Batch ' + batchNum + ' failed:', res.message);
       }
     } catch(e) {
-      // Do not blindly retry an ambiguous write: if GAS actually saved the batch
-      // but the response was lost, retrying could create duplicate products.
-      failed += batch.length;
-      console.warn('Batch ' + batchNum + ' failed:', e.message);
+      // Retry once after 2s
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const res2 = await gasBulkImport(batch);
+        if (res2.success) totalImported += res2.count || batch.length;
+        else failed += batch.length;
+      } catch(e2) {
+        failed += batch.length;
+        console.warn('Batch ' + batchNum + ' retry also failed:', e2.message);
+      }
     }
 
     // Small pause between batches to avoid GAS rate limit
@@ -5303,14 +5252,13 @@ let inc_importRows   = [];
 let inc_importCombos = [];
 
 function inc_downloadTemplate() {
-  // Build CSV template with required columns
   const header = 'Barcode,Name,Category';
   const sample = [
     '100001,Washing Machine XL,Appliances',
     '100002,Refrigerator 2 Door,Appliances',
     '100003,Aircon Split Type 1HP,Aircon',
     '100004,Electric Fan Stand,Appliances',
-    '100005,Rice Cooker 1.8L,Kitchen Appliances',
+    '100005,Rice Cooker 1.8L,Appliances',
   ].join('\n');
   const csv  = header + '\n' + sample;
   const blob = new Blob([csv], { type:'text/csv' });
@@ -5322,7 +5270,7 @@ function inc_downloadTemplate() {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  toast('Template downloaded!', 'success');
+  toast('Template downloaded! Columns: Barcode, Name, Category', 'success');
 }
 
 function inc_triggerExcelUpload() {
@@ -5352,14 +5300,14 @@ async function inc_handleExcelUpload(input) {
         return '';
       }
       return {
-        barcode: get(['barcode','Barcode','BARCODE','bar code','bar_code']),
+        barcode:  get(['barcode','Barcode','BARCODE','bar code','bar_code']),
         name:     get(['name','Name','NAME','product name','Product Name','PRODUCT NAME','description','Description']),
-        category: get(['category','Category','CATEGORY','product category','Product Category','PRODUCT CATEGORY']),
+        category: get(['category','Category','CATEGORY','cat','Cat']),
       };
     }).filter(function(r){ return r.name; });
 
     if (!normalized.length) {
-      toast('No valid rows. File needs a "Name" or "Product Name" column. Barcode and Category are optional.', 'error');
+      toast('No valid rows. File needs "Barcode" and "Name" or "Product Name" columns.', 'error');
       return;
     }
     inc_importRows   = normalized;
@@ -5382,12 +5330,8 @@ function inc_showImportPreview() {
   const existing = inc_masterCache;
   const tagged   = rows.map(function(r) {
     const isDup = existing.some(function(e) {
-      const rb = String(r.barcode || '').trim();
-      const eb = String(e.barcode || '').trim();
-      const scientific = /^[-+]?\d+(?:\.\d+)?e[+-]?\d+$/i;
-      const usableBarcode = rb && !scientific.test(rb) && eb && !scientific.test(eb);
-      return (usableBarcode && eb === rb) ||
-             String(e.description || '').trim().toLowerCase() === String(r.name || '').trim().toLowerCase();
+      return (r.barcode && e.barcode === r.barcode) ||
+             e.description.toLowerCase() === r.name.toLowerCase();
     });
     return Object.assign({}, r, { dup: isDup });
   });
@@ -5401,15 +5345,15 @@ function inc_showImportPreview() {
           return '<option value="' + b + '"' + (c.branch===b?' selected':'') + '>' + INC_BRANCHES_DISP[i] + '</option>';
         }).join('');
       return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">' +
-        '<select id="inc_branch_' + ci + '" name="inc_branch_' + ci + '" onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
+        '<select onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
           'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;min-width:130px">' +
           branchOpts + '</select>' +
-        '<input type="text" id="inc_category_' + ci + '" name="inc_category_' + ci + '" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
+        '<input type="text" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
           'oninput="inc_updateCombo(' + ci + ',\'category\',this.value)" ' +
           'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;flex:1;min-width:120px">' +
         '<div style="display:flex;align-items:center;gap:4px">' +
           '<span style="font-weight:700">&#8369;</span>' +
-          '<input type="number" id="inc_amount_' + ci + '" name="inc_amount_' + ci + '" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
+          '<input type="number" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
             'oninput="inc_updateCombo(' + ci + ',\'amount\',this.value)" ' +
             'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;width:100px">' +
         '</div>' +
@@ -5424,7 +5368,7 @@ function inc_showImportPreview() {
     return '<tr style="' + (r.dup ? 'opacity:0.45' : '') + '">' +
       '<td style="padding:8px 12px;font-family:var(--font-mono);font-size:0.78rem">' + esc(r.barcode||'—') + '</td>' +
       '<td style="padding:8px 12px;font-size:0.85rem"><b>' + esc(r.name) + '</b></td>' +
-      '<td style="padding:8px 12px;font-size:0.8rem;color:var(--text3)">' + esc(r.category || '—') + '</td>' +
+      '<td style="padding:8px 12px;font-size:0.8rem;color:var(--text3)">' + esc(r.category||'—') + '</td>' +
       '<td style="padding:8px 12px;text-align:center">' +
         (r.dup
           ? '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:10px;font-size:0.72rem;font-weight:700">DUPLICATE</span>'
@@ -5452,7 +5396,7 @@ function inc_showImportPreview() {
     '<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:14px;margin-bottom:14px">' +
       '<div style="font-size:0.82rem;font-weight:700;color:var(--text2);margin-bottom:6px">Set Incentive Amounts ' +
         '<span style="font-weight:400;color:var(--text3);font-size:0.78rem">(optional — can re-upload to update)</span></div>' +
-      '<div style="font-size:0.75rem;color:var(--text3);margin-bottom:10px">Category from the Excel file is saved to each product. Select Branch + Category + Amount only when setting incentive amounts.</div>' +
+      '<div style="font-size:0.75rem;color:var(--text3);margin-bottom:10px">Select Branch + type Category keyword + enter Amount. Applies to all matching items.</div>' +
       '<div id="inc_combos_wrap">' + buildCombos() + '</div>' +
       '<button onclick="inc_addCombo()" ' +
         'style="background:none;border:1.5px dashed var(--border);border-radius:7px;padding:6px 14px;font-size:0.8rem;color:var(--text3);cursor:pointer;font-family:var(--font-main);margin-top:6px;width:100%">' +
@@ -5465,7 +5409,7 @@ function inc_showImportPreview() {
         '<thead><tr style="background:#f9fafb;border-bottom:1px solid var(--border)">' +
           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Barcode</th>' +
           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Name</th>' +
-           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Category</th>' +
+          '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:left">Category</th>' +
           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:center">Status</th>' +
           '<th style="padding:8px 12px;font-size:0.73rem;color:var(--text3);text-align:center">Remove</th>' +
         '</tr></thead>' +
@@ -5504,15 +5448,15 @@ function inc_refreshCombos() {
         return '<option value="' + b + '"' + (c.branch===b?' selected':'') + '>' + INC_BRANCHES_DISP[i] + '</option>';
       }).join('');
     return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">' +
-      '<select id="inc_branch_' + ci + '" name="inc_branch_' + ci + '" onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
+      '<select onchange="inc_updateCombo(' + ci + ',\'branch\',this.value)" ' +
         'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;min-width:130px">' +
         branchOpts + '</select>' +
-      '<input type="text" id="inc_category_' + ci + '" name="inc_category_' + ci + '" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
+      '<input type="text" placeholder="Category (e.g. Aircon)" value="' + (c.category||'') + '" ' +
         'oninput="inc_updateCombo(' + ci + ',\'category\',this.value)" ' +
         'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;flex:1;min-width:120px">' +
       '<div style="display:flex;align-items:center;gap:4px">' +
         '<span style="font-weight:700">&#8369;</span>' +
-        '<input type="number" id="inc_amount_' + ci + '" name="inc_amount_' + ci + '" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
+        '<input type="number" min="0" placeholder="Amount" value="' + (c.amount||'') + '" ' +
           'oninput="inc_updateCombo(' + ci + ',\'amount\',this.value)" ' +
           'style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);font-size:0.83rem;width:100px">' +
       '</div>' +
@@ -5532,17 +5476,10 @@ async function inc_confirmImport() {
   const allRows     = inc_importRows;
   const validCombos = inc_importCombos.filter(function(c){ return c.branch && c.amount; });
 
-  // Duplicate detection: barcode is used only when it is a reliable TEXT barcode.
-  // Excel often converts long numeric barcodes to scientific notation (e.g. 1.99E+11),
-  // which can collapse different products into the same key. In that case, match by name.
   const newRows = allRows.filter(function(r) {
-    const rb = String(r.barcode || '').trim();
-    const scientific = /^[-+]?\d+(?:\.\d+)?e[+-]?\d+$/i;
     return !inc_masterCache.some(function(e) {
-      const eb = String(e.barcode || '').trim();
-      const usableBarcode = rb && !scientific.test(rb) && eb && !scientific.test(eb);
-      return (usableBarcode && eb === rb) ||
-             String(e.description || '').trim().toLowerCase() === String(r.name || '').trim().toLowerCase();
+      return (r.barcode && e.barcode === r.barcode) ||
+             e.description.toLowerCase() === r.name.toLowerCase();
     });
   });
 
@@ -5565,11 +5502,10 @@ async function inc_confirmImport() {
     });
     if (res.success) {
       closeModalDirect();
-      let msg = 'Processed ' + (res.processed || allRows.length) + ' item(s). ';
-      if (res.added)       msg += 'Added ' + res.added + ' new. ';
-      if (res.updated)     msg += 'Updated ' + res.updated + ' existing. ';
+      let msg = '';
+      if (res.added)       msg += 'Added ' + res.added + ' new item(s). ';
       if (res.amountsSet)  msg += 'Incentive amounts set for ' + res.amountsSet + ' item(s).';
-      if (!res.added && !res.updated && !res.amountsSet) msg += 'No changes needed.';
+      if (!msg)            msg  = 'Done — no changes needed.';
       toast(msg, 'success');
       await inc_loadMasterList();
     } else {
