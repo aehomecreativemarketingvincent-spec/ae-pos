@@ -304,22 +304,22 @@ async function doRegister() {
   if (user.length < 3)    { setRegMsg('Username must be at least 3 characters.','error'); return; }
   if (!/^[a-z0-9._]+$/.test(user)) { setRegMsg('Username: letters, numbers, dots, underscores only.','error'); return; }
   if (!pass)              { setRegMsg('Password is required.','error'); return; }
-  if (pass.length < 4)    { setRegMsg('Password must be at least 4 characters.','error'); return; }
+  if (pass.length < 6)    { setRegMsg('Password must be at least 6 characters.','error'); return; }
   if (pass !== pass2)     { setRegMsg('Passwords do not match.','error'); return; }
+  const branchSel = document.getElementById('regBranch')?.value || '';
+  if (!branchSel)         { setRegMsg('Please select your branch.','error'); return; }
 
   setRegMsg('Creating account...','');
   const btn = document.querySelector('#registerPanel .btn-login');
   if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
 
   try {
-    const branch = document.getElementById('regBranch')?.value || '';
-    if (!branch) { setRegMsg('Please select your branch.','error'); return; }
+    const branch = branchSel;
     const res = await gasPost({
-      action:   'addCashier',
+      action:   'registerAgent',
       name:     name,
       username: user,
       password: pass,
-      role:     'agent',
       branch:   branch,
     });
 
@@ -4655,7 +4655,7 @@ const INC_BRANCHES_DISP = ['Vigan', 'SDO', 'San Juan', 'Cabugao 1', 'Cabugao 2',
 
 // ── STATE ─────────────────────────────────────────────────
 let inc_masterCache = [];   // Incentive Master List
-let inc_claimState  = { invoiceNo:'', product:null, qty:1, valid:false };
+let inc_claimState  = { invoiceNo:'', saleType:'retail', items:[], cats:[], orTaken:false, orTimer:null };
 let inc_rejectId    = null;
 
 // ── MAIN PAGE ROUTER ──────────────────────────────────────
@@ -4875,7 +4875,7 @@ async function inc_viewEmployeeDay(employeeId, date) {
       '<tr>' +
         '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
         '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.barcode) + '</td>' +
-        '<td><b>' + esc(c.description) + '</b></td>' +
+        '<td><b>' + esc(c.description) + '</b>' + (c.category ? '<div style="font-size:0.72rem;color:var(--text3)">' + esc(c.category) + '</div>' : '') + '</td>' +
         '<td style="text-align:center">' + (c.qty||1) + '</td>' +
         '<td>&#8369;' + parseFloat(c.incentivePerUnit||0).toFixed(2) + '</td>' +
         '<td class="fw-700 text-green">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
@@ -5545,7 +5545,7 @@ async function inc_loadAgentClaims(date) {
     const rows = claims.slice().reverse().map(c =>
       '<tr>' +
         '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
-        '<td><b>' + esc(c.description) + '</b></td>' +
+        '<td><b>' + esc(c.description) + '</b>' + (c.category ? '<div style="font-size:0.72rem;color:var(--text3)">' + esc(c.category) + '</div>' : '') + '</td>' +
         '<td style="text-align:center">' + (c.qty||1) + '</td>' +
         '<td>&#8369;' + parseFloat(c.incentivePerUnit||0).toFixed(2) + '</td>' +
         '<td class="fw-700 text-green">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
@@ -5559,7 +5559,7 @@ async function inc_loadAgentClaims(date) {
         '<div><div style="font-size:0.75rem;opacity:.7">TODAY\'S INCENTIVE</div><div style="font-size:2rem;font-weight:700;font-family:var(--font-mono)">&#8369;' + total.toFixed(2) + '</div><div style="font-size:0.78rem;opacity:.6">' + claims.length + ' claim(s)</div></div>' +
       '</div>' +
       '<div class="card"><div class="tbl-wrap"><table>' +
-        '<thead><tr><th>Invoice</th><th>Item</th><th>Qty</th><th>&#8369;/Unit</th><th>Total</th><th>Status</th><th>Time</th></tr></thead>' +
+        '<thead><tr><th>OR No.</th><th>Item</th><th>Qty</th><th>&#8369;/Unit</th><th>Total</th><th>Status</th><th>Time</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
       '</table></div></div>';
   } catch(e) {
@@ -5567,228 +5567,181 @@ async function inc_loadAgentClaims(date) {
   }
 }
 
-// ── CLAIM MODAL ───────────────────────────────────────────
+// ── CLAIM MODAL (one OR number -> many items, amount by category) ─────
+function inc_money(n) { return '&#8369;' + (parseFloat(n) || 0).toFixed(2); }
+
+function inc_catAmount(catName) {
+  const c = (inc_claimState.cats || []).find(x => x.category === catName);
+  return c ? c.amount : 0;
+}
+
+function inc_btnStyle(active, color) {
+  return 'flex:1;padding:9px;border-radius:8px;border:2px solid ' + (active ? color : 'var(--border)') +
+         ';background:' + (active ? color : 'white') + ';color:' + (active ? 'white' : 'var(--text2)') +
+         ';font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
+}
+
 function inc_setSaleType(type) {
   inc_claimState.saleType = type;
   const btnR = document.getElementById('inc_btn_retail');
   const btnW = document.getElementById('inc_btn_wholesale');
-  if (btnR && btnW) {
-    if (type === 'retail') {
-      btnR.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:2px solid var(--green);background:var(--green);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
-      btnW.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
-    } else {
-      btnW.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:2px solid var(--amber,#d97706);background:var(--amber,#d97706);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
-      btnR.style.cssText = 'flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem';
-    }
-  }
-  if (inc_claimState.valid) inc_updateSummary();
+  if (btnR) btnR.style.cssText = inc_btnStyle(type === 'retail',    'var(--green)');
+  if (btnW) btnW.style.cssText = inc_btnStyle(type === 'wholesale', 'var(--amber,#d97706)');
+  inc_refreshTotals();
 }
 
 async function inc_openClaimModal() {
-  inc_claimState = { invoiceNo:'', product:null, qty:1, saleType:'retail', valid:false };
+  inc_claimState = { invoiceNo:'', saleType:'retail', items:[{ description:'', category:'', qty:1 }], cats:[], orTaken:false, orTimer:null };
   openModal(
     '<div class="modal-title">Add Incentive Claim</div>' +
 
-    // SI Number — manual entry from receipt
     '<div class="field">' +
-      '<label for="inc_invoice">Sales Invoice Number</label>' +
-      '<input id="inc_invoice" name="inc_invoice" placeholder="Type SI number from receipt e.g. SI1782100366396" oninput="inc_invoiceInput()">' +
-      '<div style="font-size:0.75rem;color:var(--text3);margin-top:4px">Copy from the official receipt given to the customer.</div>' +
+      '<label for="inc_invoice">Official Receipt (OR) Number</label>' +
+      '<input id="inc_invoice" name="inc_invoice" placeholder="Type the OR number from the receipt" oninput="inc_orInput()" autocomplete="off">' +
+      '<div id="inc_or_msg" style="font-size:0.75rem;margin-top:4px;color:var(--text3)">One OR can only be claimed once. Put all your items under the same OR here.</div>' +
     '</div>' +
 
-    // Sale Type
     '<div class="field"><label>Sale Type</label>' +
       '<div style="display:flex;gap:8px;margin-top:4px">' +
-        '<button id="inc_btn_retail" onclick="inc_setSaleType(\'retail\')" ' +
-          'style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--green);background:var(--green);color:white;font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Retail (100%)</button>' +
-        '<button id="inc_btn_wholesale" onclick="inc_setSaleType(\'wholesale\')" ' +
-          'style="flex:1;padding:9px;border-radius:8px;border:2px solid var(--border);background:white;color:var(--text2);font-weight:700;font-family:var(--font-main);cursor:pointer;font-size:0.85rem">Wholesale (50%)</button>' +
+        '<button type="button" id="inc_btn_retail" onclick="inc_setSaleType(\'retail\')" style="' + inc_btnStyle(true, 'var(--green)') + '">Retail (100%)</button>' +
+        '<button type="button" id="inc_btn_wholesale" onclick="inc_setSaleType(\'wholesale\')" style="' + inc_btnStyle(false, 'var(--amber,#d97706)') + '">Wholesale (50%)</button>' +
       '</div>' +
     '</div>' +
 
-    // Product search from master list
-    '<div class="field"><label for="inc_product">Product (Barcode or Product Name)</label>' +
-      '<input id="inc_product" name="inc_product" placeholder="Search product from incentive list..." oninput="inc_productSearch()" autocomplete="off">' +
-      '<div id="inc_dropdown" style="display:none;border:1.5px solid var(--border);border-radius:8px;margin-top:4px;background:white;max-height:200px;overflow-y:auto;box-shadow:var(--shadow2)"></div>' +
-      '<div style="font-size:0.75rem;color:var(--text3);margin-top:4px">Only products with active incentives will appear.</div>' +
-    '</div>' +
-
-    // Qty
-    '<div class="field" id="inc_qty_row" style="display:none"><label for="inc_qty">Quantity</label>' +
-      '<input id="inc_qty" name="inc_qty" type="number" min="1" value="1" oninput="inc_qtyChanged()">' +
-    '</div>' +
+    '<div style="font-size:0.78rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin:14px 0 6px">Items sold under this OR</div>' +
+    '<div id="inc_items"></div>' +
+    '<button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="inc_addItemRow()">+ Add another item</button>' +
 
     '<div id="inc_valbox" style="display:none;border-radius:8px;padding:12px 14px;margin-top:10px;font-size:0.84rem"></div>' +
-    '<div id="inc_summary" style="display:none;background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
+    '<div id="inc_summary" style="background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
     '<button class="btn btn-primary" id="inc_submit_btn" style="width:100%;margin-top:12px" disabled onclick="inc_submitClaim()">Submit Claim</button>'
   );
-  // Refresh cache in background — don't block modal opening
-  gasRequest({ action:'inc_getMaster' })
-    .then(function(r) {
-      if (r.data && r.data.length) {
-        inc_masterCache      = r.data;
-        window._incCacheTime = Date.now();
+  inc_renderItems();
+  inc_refreshTotals();
+  try {
+    const res = await gasRequest({ action: 'inc_getClaimCategories' });
+    if (res.success) {
+      inc_claimState.cats = res.data || [];
+      if (!inc_claimState.cats.length) {
+        inc_showValbox('warn', 'No incentive categories have an amount set for ' + esc(res.branch || 'your branch') + ' yet. Ask your Admin to set the amounts.');
       }
-    }).catch(function(){});
-}
-
-
-
-function inc_invoiceInput() {
-  inc_claimState.invoiceNo = (document.getElementById('inc_invoice')?.value || '').trim();
-  inc_claimState.product   = null;
-  inc_claimState.valid     = false;
-  document.getElementById('inc_submit_btn').disabled = true;
-  document.getElementById('inc_summary').style.display = 'none';
-  document.getElementById('inc_qty_row').style.display  = 'none';
-  inc_showValbox('','');
-}
-
-function inc_productSearch() {
-  const q  = (document.getElementById('inc_product')?.value || '').toLowerCase().trim();
-  const dd = document.getElementById('inc_dropdown');
-  inc_claimState.product = null;
-  inc_claimState.valid   = false;
-  if (document.getElementById('inc_submit_btn')) document.getElementById('inc_submit_btn').disabled = true;
-  if (document.getElementById('inc_summary'))    document.getElementById('inc_summary').style.display = 'none';
-  if (document.getElementById('inc_qty_row'))    document.getElementById('inc_qty_row').style.display = 'none';
-  if (!q) { if (dd) dd.style.display = 'none'; return; }
-
-  if (!inc_masterCache.length) {
-    if (dd) {
-      dd.style.display = 'block';
-      dd.innerHTML = '<div style="padding:10px;color:var(--text3);font-size:0.82rem">Loading products...</div>';
+      inc_renderItems();
+      inc_refreshTotals();
+    } else {
+      inc_showValbox('error', esc(res.message || 'Could not load categories.'));
     }
-    gasRequest({ action:'inc_getMaster' }).then(function(r) {
-      inc_masterCache = r.data || [];
-      inc_productSearch();
-    }).catch(function(){});
-    return;
+  } catch(e) {
+    inc_showValbox('error', 'Network error while loading categories. Close and try again.');
   }
+}
 
-  var userBranch = currentUser ? (currentUser.branch || '') : '';
-  var matches    = inc_masterCache.filter(function(m) {
-    if (m.status !== 'Active') return false;
-    return (m.barcode||'').toLowerCase().includes(q) ||
-           (m.description||'').toLowerCase().includes(q);
-  });
-
-  if (!matches.length || !dd) { if (dd) dd.style.display = 'none'; return; }
-
-  dd.innerHTML = matches.map(function(m) {
-    var raw      = userBranch ? m[userBranch] : null;
-    var branchAmt = (raw !== undefined && raw !== '' && raw !== null) ? parseFloat(raw) : null;
-    var amtDisp   = (branchAmt !== null && !isNaN(branchAmt) && branchAmt > 0)
-      ? '<b style="color:var(--green)">&#8369;' + branchAmt.toFixed(2) + '</b>'
-      : '<span style="color:var(--red,#ef4444);font-size:0.75rem">No amount set</span>';
-    return '<div style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);' +
-             'display:flex;justify-content:space-between;align-items:center"' +
-             ' onmouseover="this.style.background=\'#f9fafb\'"' +
-             ' onmouseout="this.style.background=\'\'"' +
-             ' onclick="inc_selectProduct(\'' + esc(m.id) + '\')">' +
-      '<div>' +
-        '<div style="font-weight:600;font-size:0.85rem">' + esc(m.description) + '</div>' +
-        '<div style="font-size:0.73rem;color:var(--text3);font-family:var(--font-mono)">' + esc(m.barcode||'') + '</div>' +
+function inc_renderItems() {
+  const box = document.getElementById('inc_items');
+  if (!box) return;
+  const cats = inc_claimState.cats || [];
+  box.innerHTML = inc_claimState.items.map(function(it, i) {
+    const opts = '<option value="">Select category</option>' + cats.map(function(c) {
+      return '<option value="' + esc(c.category) + '"' + (c.category === it.category ? ' selected' : '') + '>' +
+             esc(c.category) + ' (&#8369;' + c.amount.toFixed(2) + ')</option>';
+    }).join('');
+    return '<div style="border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
+        '<b style="font-size:0.8rem;color:var(--text2)">Item ' + (i + 1) + '</b>' +
+        (inc_claimState.items.length > 1
+          ? '<button type="button" class="btn btn-ghost btn-sm" onclick="inc_removeItemRow(' + i + ')">Remove</button>' : '') +
       '</div>' +
-      '<div>' + amtDisp + '</div>' +
+      '<div class="field"><label>Item name</label>' +
+        '<input type="text" maxlength="120" placeholder="Type the item sold" value="' + esc(it.description) + '" oninput="inc_itemChanged(' + i + ',\'description\',this.value)" autocomplete="off"></div>' +
+      '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">' +
+        '<div class="field" style="flex:2;min-width:150px"><label>Category</label>' +
+          '<select onchange="inc_itemChanged(' + i + ',\'category\',this.value)">' + opts + '</select></div>' +
+        '<div class="field" style="flex:1;min-width:80px"><label>Qty</label>' +
+          '<input type="number" min="1" max="1000" value="' + (parseInt(it.qty) || 1) + '" oninput="inc_itemChanged(' + i + ',\'qty\',this.value)"></div>' +
+      '</div>' +
+      '<div id="inc_line_' + i + '" style="margin-top:8px;font-size:0.82rem"></div>' +
     '</div>';
   }).join('');
-  dd.style.display = 'block';
 }
 
-function inc_selectProduct(id) {
-  var m = inc_masterCache.find(function(x){ return x.id === id; });
-  if (!m) return;
-  var inp = document.getElementById('inc_product');
-  if (inp) inp.value = m.description;
-  var dd = document.getElementById('inc_dropdown');
-  if (dd) dd.style.display = 'none';
-  inc_claimState.product = m;
-  var ub = currentUser ? (currentUser.branch || '') : '';
-  inc_validateClaim();
+function inc_addItemRow() {
+  if (inc_claimState.items.length >= 30) { toast('Maximum of 30 items per OR.', 'warning'); return; }
+  inc_claimState.items.push({ description:'', category:'', qty:1 });
+  inc_renderItems();
+  inc_refreshTotals();
 }
 
-function inc_validateClaim() {
-  const inv     = inc_claimState.invoiceNo;
-  const product = inc_claimState.product;
-  if (!inv)     { inc_showValbox('warn','Please enter a Sales Invoice number first.'); return; }
-  if (!product) { inc_showValbox('',''); return; }
+function inc_removeItemRow(i) {
+  if (inc_claimState.items.length <= 1) return;
+  inc_claimState.items.splice(i, 1);
+  inc_renderItems();
+  inc_refreshTotals();
+}
 
-  // No active incentive
-  if (product.status !== 'Active') {
-    inc_showValbox('error','&#9747; <b>' + esc(product.description) + '</b> has no active incentive. Cannot claim.');
-    inc_claimState.valid = false;
-    document.getElementById('inc_submit_btn').disabled = true;
-    document.getElementById('inc_qty_row').style.display = 'none';
-    document.getElementById('inc_summary').style.display = 'none';
-    return;
+function inc_itemChanged(i, field, val) {
+  const it = inc_claimState.items[i];
+  if (!it) return;
+  it[field] = (field === 'qty') ? (Math.max(1, parseInt(val) || 1)) : val;
+  inc_refreshTotals();   // only updates text below the inputs, never re-renders them (keeps focus)
+}
+
+function inc_orInput() {
+  inc_claimState.invoiceNo = (document.getElementById('inc_invoice')?.value || '').trim();
+  inc_claimState.orTaken   = false;
+  const msg = document.getElementById('inc_or_msg');
+  if (msg) { msg.style.color = 'var(--text3)'; msg.textContent = 'One OR can only be claimed once. Put all your items under the same OR here.'; }
+  clearTimeout(inc_claimState.orTimer);
+  if (inc_claimState.invoiceNo) {
+    inc_claimState.orTimer = setTimeout(inc_checkOR, 500);
   }
-
-  // Check branch-specific amount
-  const userBranch = currentUser ? (currentUser.branch || '') : '';
-  if (!userBranch) {
-    inc_showValbox('error','&#9747; Your account has no branch assigned. Ask your Admin to update your branch in User Management.');
-    inc_claimState.valid = false;
-    document.getElementById('inc_submit_btn').disabled = true;
-    document.getElementById('inc_qty_row').style.display = 'none';
-    document.getElementById('inc_summary').style.display = 'none';
-    return;
-  }
-  const rawAmt  = product[userBranch];
-  const branchAmt = (rawAmt !== undefined && rawAmt !== '' && rawAmt !== null) ? parseFloat(rawAmt) : 0;
-  if (!branchAmt || isNaN(branchAmt)) {
-    inc_showValbox('warn','&#9888; No incentive amount set for ' + userBranch + '. Ask Admin to set it via Set Branch Amounts.');
-    inc_claimState.valid = false;
-    document.getElementById('inc_submit_btn').disabled = true;
-    document.getElementById('inc_qty_row').style.display = 'none';
-    document.getElementById('inc_summary').style.display = 'none';
-    return;
-  }
-  // Valid — show qty + summary
-  inc_claimState.valid = true;
-  inc_showValbox('ok','&#10003; Item found &nbsp;&bull;&nbsp; &#10003; Incentive: &#8369;' + branchAmt.toFixed(2) + ' (' + userBranch + ')');
-  document.getElementById('inc_qty_row').style.display = 'flex';
-  inc_claimState.qty = parseInt(document.getElementById('inc_qty')?.value) || 1;
-  inc_updateSummary();
+  inc_refreshTotals();
 }
 
-function inc_qtyChanged() {
-  const q = Math.max(1, parseInt(document.getElementById('inc_qty')?.value) || 1);
-  inc_claimState.qty = q;
-  if (inc_claimState.valid) inc_updateSummary();
+async function inc_checkOR() {
+  const orNo = inc_claimState.invoiceNo;
+  if (!orNo) return;
+  try {
+    const res = await gasRequest({ action: 'inc_checkOR', orNo: orNo });
+    if (orNo !== inc_claimState.invoiceNo) return;   // user kept typing
+    const msg = document.getElementById('inc_or_msg');
+    if (res.success && res.taken) {
+      inc_claimState.orTaken = true;
+      if (msg) { msg.style.color = 'var(--red,#ef4444)'; msg.textContent = 'This OR is already recorded in the system. It cannot be claimed again.'; }
+    } else if (res.success && msg) {
+      msg.style.color = 'var(--green,#059669)'; msg.textContent = 'OR number is available.';
+    }
+    inc_refreshTotals();
+  } catch(e) {}
 }
 
-function inc_updateSummary() {
-  const m        = inc_claimState.product;
-  const qty      = inc_claimState.qty;
-  const isWhole  = inc_claimState.saleType === 'wholesale';
-  // Get branch-specific incentive amount
-  const userBranch = currentUser.branch || '';
-  // Branch key matches column name in master list (e.g. 'Vigan', 'SDO')
-  const baseAmt    = (userBranch && m[userBranch] !== undefined && m[userBranch] !== '' && parseFloat(m[userBranch]) > 0)
-                       ? parseFloat(m[userBranch])
-                       : 0;
-  const effAmt     = isWhole ? baseAmt * 0.5 : baseAmt;
-  const tot      = qty * effAmt;
-  const el       = document.getElementById('inc_summary');
-  if (!el) return;
-  el.style.display = 'block';
-  const typeLabel = isWhole
-    ? '<span style="background:#fffbeb;color:#92400e;padding:1px 7px;border-radius:10px;font-size:0.72rem;font-weight:700">WHOLESALE &mdash; 50%</span>'
-    : '<span style="background:#d1fae5;color:#065f46;padding:1px 7px;border-radius:10px;font-size:0.72rem;font-weight:700">RETAIL &mdash; 100%</span>';
-  el.innerHTML =
-    '<div style="font-size:0.73rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:8px">Claim Summary</div>' +
-    '<table style="width:100%;font-size:0.85rem">' +
-      '<tr><td style="color:var(--text3);padding:2px 0;width:120px">Invoice</td><td style="font-weight:600">' + esc(inc_claimState.invoiceNo) + '</td></tr>' +
-      '<tr><td style="color:var(--text3);padding:2px 0">Item</td><td style="font-weight:600">' + esc(m.description) + '</td></tr>' +
-      '<tr><td style="color:var(--text3);padding:2px 0">Barcode</td><td style="font-family:var(--font-mono);font-size:0.8rem">' + esc(m.barcode) + '</td></tr>' +
-      '<tr><td style="color:var(--text3);padding:2px 0">Sale Type</td><td>' + typeLabel + '</td></tr>' +
-      '<tr><td style="color:var(--text3);padding:2px 0">Qty</td><td style="font-weight:600">' + qty + '</td></tr>' +
-      '<tr><td style="color:var(--text3);padding:2px 0">Base Incentive</td><td>&#8369;' + baseAmt.toFixed(2) + '</td></tr>' +
-      '<tr><td style="color:var(--text3);padding:2px 0">Effective/unit</td><td style="font-weight:600;color:var(--blue,#1e90ff)">&#8369;' + effAmt.toFixed(2) + (isWhole ? ' <span style="font-size:0.72rem;color:var(--amber,#d97706)">(50%)</span>' : '') + '</td></tr>' +
-      '<tr><td style="color:var(--text3);padding:2px 0">TOTAL</td><td style="font-weight:700;font-size:1.05rem;color:var(--green)">&#8369;' + tot.toFixed(2) + '</td></tr>' +
-    '</table>';
-  document.getElementById('inc_submit_btn').disabled = false;
+function inc_refreshTotals() {
+  const isWhole = inc_claimState.saleType === 'wholesale';
+  let grand = 0, ready = true;
+  inc_claimState.items.forEach(function(it, i) {
+    const base = inc_catAmount(it.category);
+    const eff  = isWhole ? base * 0.5 : base;
+    const tot  = eff * (parseInt(it.qty) || 1);
+    const line = document.getElementById('inc_line_' + i);
+    if (!String(it.description || '').trim() || !it.category || !base) ready = false;
+    if (it.category && base) grand += tot;
+    if (line) {
+      line.innerHTML = (it.category && base)
+        ? 'Incentive: <b>' + inc_money(eff) + '</b> &times; ' + (parseInt(it.qty) || 1) +
+          ' = <b style="color:var(--green)">' + inc_money(tot) + '</b>' + (isWhole ? ' <span style="color:var(--amber,#d97706)">(50%)</span>' : '')
+        : '<span style="color:var(--text3)">Choose a category to see the incentive amount.</span>';
+    }
+  });
+  const sum = document.getElementById('inc_summary');
+  if (sum) {
+    sum.innerHTML =
+      '<div style="font-size:0.73rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:8px">Claim Summary</div>' +
+      '<table style="width:100%;font-size:0.85rem">' +
+        '<tr><td style="color:var(--text3);padding:2px 0;width:120px">OR Number</td><td style="font-weight:600">' + (esc(inc_claimState.invoiceNo) || '-') + '</td></tr>' +
+        '<tr><td style="color:var(--text3);padding:2px 0">Items</td><td style="font-weight:600">' + inc_claimState.items.length + '</td></tr>' +
+        '<tr><td style="color:var(--text3);padding:2px 0">TOTAL</td><td style="font-weight:700;font-size:1.05rem;color:var(--green)">' + inc_money(grand) + '</td></tr>' +
+      '</table>';
+  }
+  const btn = document.getElementById('inc_submit_btn');
+  if (btn) btn.disabled = !(ready && inc_claimState.invoiceNo && !inc_claimState.orTaken);
 }
 
 function inc_showValbox(type, msg) {
@@ -5805,42 +5758,31 @@ function inc_showValbox(type, msg) {
 }
 
 async function inc_submitClaim() {
-  if (!inc_claimState.valid || !inc_claimState.product) return;
-  const m        = inc_claimState.product;
-  const qty      = inc_claimState.qty;
-  const isWhole  = inc_claimState.saleType === 'wholesale';
-  const userBranch = currentUser.branch || '';
-  // Branch key matches column name in master list (e.g. 'Vigan', 'SDO')
-  const baseAmt    = (userBranch && m[userBranch] !== undefined && m[userBranch] !== '' && parseFloat(m[userBranch]) > 0)
-                       ? parseFloat(m[userBranch])
-                       : 0;
-  const effAmt     = isWhole ? baseAmt * 0.5 : baseAmt;
   const btn = document.getElementById('inc_submit_btn');
+  if (!inc_claimState.invoiceNo || inc_claimState.orTaken) return;
   if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
 
+  // Only names, categories and quantities are sent; the server works out the amounts.
   const payload = {
-    action:          'inc_submitClaim',
-    claimDate:       new Date().toISOString(),
-    employeeId:      currentUser.id || currentUser.username,
-    employeeName:    currentUser.name || currentUser.username,
-    invoiceNo:       inc_claimState.invoiceNo,
-    barcode:         m.barcode,
-    description:     m.description,
-    qty:             qty,
-    saleType:        inc_claimState.saleType || 'retail',
-    branch:          currentUser.branch || '',
-    incentivePerUnit:effAmt,
-    totalIncentive:  qty * effAmt,
+    action:    'inc_submitClaim',
+    invoiceNo: inc_claimState.invoiceNo,
+    saleType:  inc_claimState.saleType || 'retail',
+    items:     inc_claimState.items.map(it => ({
+      description: String(it.description || '').trim(),
+      category:    it.category,
+      qty:         parseInt(it.qty) || 1,
+    })),
   };
 
   try {
     const res = await gasPost(payload);
     if (res.success) {
-      toast('Incentive claim submitted! &#8369;' + (qty * effAmt).toFixed(2), 'success');
+      toast('Incentive claim submitted! &#8369;' + (parseFloat(res.totalIncentive) || 0).toFixed(2) + ' (' + (res.count || payload.items.length) + ' item/s)', 'success');
       closeModalDirect();
       inc_loadAgentClaims(localDateStr(new Date()));
     } else {
       toast(res.message || 'Error submitting claim.', 'error');
+      if (/already recorded/i.test(res.message || '')) { inc_claimState.orTaken = true; inc_checkOR(); }
       if (btn) { btn.disabled = false; btn.textContent = 'Submit Claim'; }
     }
   } catch(e) {
