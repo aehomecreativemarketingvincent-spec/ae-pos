@@ -1490,3 +1490,16 @@ tbody tr:last-child td { border-bottom: none; }
 /* ---- SIDEBAR OVERLAY (class form) ---- */
 .sidebar-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 199; display: none; }
 .sidebar-overlay.show { display: block; }
+
+
+/* ── Login: link-style button + register panel select ── */
+.btn-link {
+  width: 100%; margin-top: 10px; padding: 8px; background: none; border: none;
+  color: var(--blue); font-family: inherit; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+}
+.btn-link:hover { text-decoration: underline; }
+#registerPanel .form-group select {
+  width: 100%; padding: 11px 12px; border: 1.5px solid var(--border); border-radius: 8px;
+  font-family: inherit; font-size: 0.9rem; background: #fff; outline: none;
+}
+#registerPanel .form-group select:focus { border-color: var(--blue); }
