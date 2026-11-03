@@ -4655,7 +4655,38 @@ const INC_BRANCHES_DISP = ['Vigan', 'SDO', 'San Juan', 'Cabugao 1', 'Cabugao 2',
 
 // ── STATE ─────────────────────────────────────────────────
 let inc_masterCache = [];   // Incentive Master List
-let inc_claimState  = { invoiceNo:'', saleType:'retail', items:[], cats:[], prods:[], orTaken:false, orTimer:null };
+let inc_claimState  = { invoiceNo:'', saleType:'retail', items:[], cats:[], prods:[], orTaken:false, orItems:[], orTimer:null };
+function inc_normItem(v) { return String(v || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+// 0..1 similarity between two item names (Levenshtein on normalised text)
+function inc_similarity(a, b) {
+  a = inc_normItem(a); b = inc_normItem(b);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (Math.min(a.length, b.length) >= 5 && (a.includes(b) || b.includes(a))) return 0.9;
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return 1 - prev[n] / Math.max(m, n);
+}
+
+// per item (normalised name) totals for the lines already claimed under the OR being typed
+function inc_orAggregate() {
+  const agg = {};
+  (inc_claimState.orItems || []).forEach(function(x) {
+    const k = inc_normItem(x.description);
+    const e = agg[k] || (agg[k] = { name: x.description, claimed: 0, total: 0, who: [] });
+    e.claimed += parseInt(x.qty) || 1;
+    e.total = Math.max(e.total, parseInt(x.qtyOnOR) || 0);
+    if (e.who.indexOf(x.employeeName) < 0) e.who.push(x.employeeName);
+  });
+  Object.keys(agg).forEach(k => { agg[k].total = Math.max(agg[k].total, agg[k].claimed); agg[k].remaining = agg[k].total - agg[k].claimed; });
+  return agg;
+}
 let inc_rejectId    = null;
 
 // ── MAIN PAGE ROUTER ──────────────────────────────────────
@@ -5000,6 +5031,56 @@ async function inc_viewAllItemsDay(date) {
 let inc_allFilter = { from: '', to: '', category: '', status: '' };
 let inc_allClaimsCache = [];
 let inc_allCatNames = [];
+let inc_allGroup = false;   // group claims by OR number
+
+function inc_toggleGroup() { inc_allGroup = !inc_allGroup; inc_renderAllClaims(); }
+
+function inc_normOR(v) { return String(v || '').toUpperCase().replace(/[\s\-_.#]/g, ''); }
+
+// rows grouped under one header per OR number; flags look-alike item names claimed by different agents
+function inc_groupedRowsHtml(claims) {
+  const groups = {}, order = [];
+  claims.forEach(function(c) {
+    const k = inc_normOR(c.invoiceNo);
+    if (!groups[k]) { groups[k] = { or: c.invoiceNo, lines: [] }; order.push(k); }
+    groups[k].lines.push(c);
+  });
+  return order.map(function(k) {
+    const g = groups[k];
+    const lines = g.lines.slice().sort((a, b) => String(a.claimDate).localeCompare(String(b.claimDate)));
+    const total = lines.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+    const agents = Array.from(new Set(lines.map(c => c.employeeName)));
+    // possible duplicates: different names that look alike, claimed by different agents
+    const flagged = {};
+    for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) {
+      const a = lines[i], b = lines[j];
+      if (a.employeeName === b.employeeName) continue;
+      if (String(a.status).toLowerCase() === 'rejected' || String(b.status).toLowerCase() === 'rejected') continue;
+      const na = inc_normItem(a.description), nb = inc_normItem(b.description);
+      if (na !== nb && inc_similarity(a.description, b.description) >= 0.8) { flagged[a.id] = true; flagged[b.id] = true; }
+    }
+    const head = '<tr style="background:var(--bg2,#f1f5f9)"><td colspan="9" style="padding:10px 14px">' +
+      '<b style="font-family:var(--font-mono)">OR ' + esc(g.or) + '</b>' +
+      ' &nbsp;&bull;&nbsp; ' + lines.length + ' item(s) &nbsp;&bull;&nbsp; ' + agents.length + ' agent(s): ' + esc(agents.join(', ')) +
+      ' &nbsp;&bull;&nbsp; <b class="text-green">&#8369;' + total.toFixed(2) + '</b></td></tr>';
+    const body = lines.map(function(c) {
+      const q = parseInt(c.qty || 1), oq = parseInt(c.qtyOnOR) || q;
+      return '<tr>' +
+        '<td style="font-size:0.78rem">' + safeFormatDateTime(c.claimDate) + '</td>' +
+        '<td><b>' + esc(c.employeeName) + '</b></td>' +
+        '<td>' + esc(inc_branchDisp(c.branch)) + '</td>' +
+        '<td style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text3)">' + esc(c.invoiceNo) + '</td>' +
+        '<td>' + esc(c.description) + (c.category ? '<div style="font-size:0.72rem;color:var(--text3)">' + esc(c.category) + '</div>' : '') +
+          (flagged[c.id] ? '<div style="font-size:0.72rem;color:var(--amber,#d97706);font-weight:700">&#9888; Possible duplicate</div>' : '') + '</td>' +
+        '<td style="text-align:center">' + q + (oq > q ? '<div style="font-size:0.7rem;color:var(--text3)">of ' + oq + '</div>' : '') + '</td>' +
+        '<td class="fw-700">&#8369;' + parseFloat(c.totalIncentive || 0).toFixed(2) + '</td>' +
+        '<td>' + inc_statusBadge(c.status) + '</td>' +
+        '<td>' + inc_actionBtns(c) + '</td>' +
+      '</tr>';
+    }).join('');
+    return head + body;
+  }).join('') || '<tr><td colspan="9"><div class="no-data"><div class="no-data-text">No claims match these filters.</div></div></td></tr>';
+}
 
 async function inc_loadAllClaims() {
   const el = document.getElementById('incContent');
@@ -5094,7 +5175,7 @@ function inc_renderAllClaims() {
       '<td>' + esc(inc_branchDisp(c.branch)) + '</td>' +
       '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
       '<td>' + esc(c.description) + (c.category ? '<div style="font-size:0.72rem;color:var(--text3)">' + esc(c.category) + '</div>' : '') + '</td>' +
-      '<td style="text-align:center">' + (c.qty||1) + '</td>' +
+      '<td style="text-align:center">' + (c.qty||1) + ((parseInt(c.qtyOnOR) || 0) > (parseInt(c.qty) || 1) ? '<div style="font-size:0.7rem;color:var(--text3)">of ' + c.qtyOnOR + '</div>' : '') + '</td>' +
       '<td class="fw-700">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
       '<td>' + inc_statusBadge(c.status) + '</td>' +
       '<td>' + inc_actionBtns(c) + '</td>' +
@@ -5117,6 +5198,7 @@ function inc_renderAllClaims() {
       '<button class="btn btn-ghost btn-sm" onclick="inc_allPreset(\'month\')">This month</button>' +
       '<button class="btn btn-ghost btn-sm" onclick="inc_allPreset(\'today\')">Today</button>' +
       '<button class="btn btn-ghost btn-sm" onclick="inc_allPreset(\'all\')">All dates</button>' +
+      '<button class="btn ' + (inc_allGroup ? 'btn-primary' : 'btn-ghost') + ' btn-sm" onclick="inc_toggleGroup()">' + (inc_allGroup ? 'Grouped by OR' : 'Group by OR') + '</button>' +
       '<button class="btn btn-ghost btn-sm" onclick="inc_loadAllClaims()" title="Reload">&#8635; Refresh</button>' +
       '<button class="btn btn-success btn-sm" onclick="inc_exportFilteredClaims()">Export Excel</button>' +
     '</div>' +
@@ -5127,7 +5209,7 @@ function inc_renderAllClaims() {
     (catChips ? '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' + catChips + '</div>' : '') +
     '<div class="card"><div class="tbl-wrap" style="max-height:60vh;overflow-y:auto"><table>' +
       '<thead><tr><th>Date</th><th>Employee</th><th>Branch</th><th>OR No.</th><th>Item</th><th>Qty</th><th>Total</th><th>Status</th><th>Action</th></tr></thead>' +
-      '<tbody>' + rows + '</tbody>' +
+      '<tbody>' + (inc_allGroup ? inc_groupedRowsHtml(claims) : rows) + '</tbody>' +
     '</table></div></div>';
 }
 
@@ -5998,14 +6080,14 @@ function inc_setSaleType(type) {
 }
 
 async function inc_openClaimModal() {
-  inc_claimState = { invoiceNo:'', saleType:'retail', items:[{ description:'', category:'', qty:1 }], cats:[], prods:[], orTaken:false, orTimer:null };
+  inc_claimState = { invoiceNo:'', saleType:'retail', items:[{ description:'', category:'', qty:1, qtyOnOR:1, orAuto:true }], cats:[], prods:[], orTaken:false, orItems:[], orTimer:null };
   openModal(
     '<div class="modal-title">Add Incentive Claim</div>' +
 
     '<div class="field">' +
       '<label for="inc_invoice">Official Receipt (OR) Number</label>' +
       '<input id="inc_invoice" name="inc_invoice" placeholder="Type the OR number from the receipt" oninput="inc_orInput()" autocomplete="off">' +
-      '<div id="inc_or_msg" style="font-size:0.75rem;margin-top:4px;color:var(--text3)">One OR can only be claimed once. Put all your items under the same OR here.</div>' +
+      '<div id="inc_or_msg" style="font-size:0.75rem;margin:4px 0 10px;color:var(--text3)">Several agents can share one OR. Add only the items YOU assisted; an item already claimed under this OR cannot be claimed again.</div>' +
     '</div>' +
 
     '<div class="field"><label>Sale Type</label>' +
@@ -6066,8 +6148,10 @@ function inc_renderItems() {
       '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">' +
         '<div class="field" style="flex:2;min-width:150px"><label>Category</label>' +
           '<select id="inc_catsel_' + i + '" onchange="inc_itemChanged(' + i + ',\'category\',this.value)">' + opts + '</select></div>' +
-        '<div class="field" style="flex:1;min-width:80px"><label>Qty</label>' +
+        '<div class="field" style="flex:1;min-width:80px"><label>My qty</label>' +
           '<input type="number" min="1" max="1000" value="' + (parseInt(it.qty) || 1) + '" oninput="inc_itemChanged(' + i + ',\'qty\',this.value)"></div>' +
+        '<div class="field" style="flex:1;min-width:90px"><label title="Total pieces of this item on the OR, for all agents">Qty on OR</label>' +
+          '<input type="number" min="1" max="1000" id="inc_oq_' + i + '" value="' + (parseInt(it.qtyOnOR) || 1) + '" oninput="inc_itemChanged(' + i + ',\'qtyOnOR\',this.value)"></div>' +
       '</div>' +
       '<div id="inc_line_' + i + '" style="margin-top:8px;font-size:0.82rem"></div>' +
     '</div>';
@@ -6076,7 +6160,7 @@ function inc_renderItems() {
 
 function inc_addItemRow() {
   if (inc_claimState.items.length >= 30) { toast('Maximum of 30 items per OR.', 'warning'); return; }
-  inc_claimState.items.push({ description:'', category:'', qty:1 });
+  inc_claimState.items.push({ description:'', category:'', qty:1, qtyOnOR:1, orAuto:true });
   inc_renderItems();
   inc_refreshTotals();
 }
@@ -6091,7 +6175,9 @@ function inc_removeItemRow(i) {
 function inc_itemChanged(i, field, val) {
   const it = inc_claimState.items[i];
   if (!it) return;
-  it[field] = (field === 'qty') ? (Math.max(1, parseInt(val) || 1)) : val;
+  it[field] = (field === 'qty' || field === 'qtyOnOR') ? (Math.max(1, parseInt(val) || 1)) : val;
+  if (field === 'qtyOnOR') it.orAuto = false;           // agent typed it himself
+  if (field === 'qty' && it.orAuto) it.qtyOnOR = it.qty; // default: all pieces on the OR are mine
   // typed name matches a known product -> pick its category (agent can still change it)
   if (field === 'description' && !it.category) {
     const hit = (inc_claimState.prods || []).find(p => p.productName.toLowerCase() === String(val).trim().toLowerCase());
@@ -6107,8 +6193,9 @@ function inc_itemChanged(i, field, val) {
 function inc_orInput() {
   inc_claimState.invoiceNo = (document.getElementById('inc_invoice')?.value || '').trim();
   inc_claimState.orTaken   = false;
+  inc_claimState.orItems   = [];
   const msg = document.getElementById('inc_or_msg');
-  if (msg) { msg.style.color = 'var(--text3)'; msg.textContent = 'One OR can only be claimed once. Put all your items under the same OR here.'; }
+  if (msg) { msg.style.color = 'var(--text3)'; msg.textContent = 'Several agents can share one OR. Add only the items YOU assisted; an item already claimed under this OR cannot be claimed again.'; }
   clearTimeout(inc_claimState.orTimer);
   if (inc_claimState.invoiceNo) {
     inc_claimState.orTimer = setTimeout(inc_checkOR, 500);
@@ -6123,11 +6210,17 @@ async function inc_checkOR() {
     const res = await gasRequest({ action: 'inc_checkOR', orNo: orNo });
     if (orNo !== inc_claimState.invoiceNo) return;   // user kept typing
     const msg = document.getElementById('inc_or_msg');
-    if (res.success && res.taken) {
-      inc_claimState.orTaken = true;
-      if (msg) { msg.style.color = 'var(--red,#ef4444)'; msg.textContent = 'This OR is already recorded in the system. It cannot be claimed again.'; }
-    } else if (res.success && msg) {
-      msg.style.color = 'var(--green,#059669)'; msg.textContent = 'OR number is available.';
+    if (!res.success) return;
+    inc_claimState.orItems = res.items || [];
+    if (msg) {
+      if (inc_claimState.orItems.length) {
+        msg.style.color = 'var(--amber,#d97706)';
+        msg.innerHTML = 'This OR already has <b>' + inc_claimState.orItems.length + '</b> claimed item(s). You can add other items sold under it:<br>' +
+          inc_claimState.orItems.map(i => '&bull; ' + esc(i.description) + ' &times;' + (parseInt(i.qty) || 1) + (parseInt(i.qtyOnOR) > (parseInt(i.qty) || 1) ? ' (of ' + i.qtyOnOR + ' on OR)' : '') + ' &mdash; <i>' + esc(i.employeeName) + '</i>').join('<br>');
+      } else {
+        msg.style.color = 'var(--green,#059669)';
+        msg.textContent = 'OR number is available. No items claimed under it yet.';
+      }
     }
     inc_refreshTotals();
   } catch(e) {}
@@ -6136,18 +6229,54 @@ async function inc_checkOR() {
 function inc_refreshTotals() {
   const isWhole = inc_claimState.saleType === 'wholesale';
   let grand = 0, ready = true;
+  const agg = inc_orAggregate();
+  const seenNames = {};
   inc_claimState.items.forEach(function(it, i) {
     const base = inc_catAmount(it.category);
     const eff  = isWhole ? base * 0.5 : base;
-    const tot  = eff * (parseInt(it.qty) || 1);
+    const qty  = parseInt(it.qty) || 1;
+    const tot  = eff * qty;
     const line = document.getElementById('inc_line_' + i);
+    const oq   = document.getElementById('inc_oq_' + i);
     if (!String(it.description || '').trim() || !it.category || !base) ready = false;
-    if (it.category && base) grand += tot;
+
+    const nk = inc_normItem(it.description);
+    const ex = nk ? agg[nk] : null;
+    let err = '', warn = '', info = '';
+
+    if (ex) {
+      // the OR already has this item: its total is fixed, my qty must fit what is left
+      it.qtyOnOR = ex.total;
+      if (oq) { oq.value = ex.total; oq.disabled = true; }
+      if (ex.remaining <= 0)       err = 'Fully claimed (' + ex.claimed + ' of ' + ex.total + ') by ' + ex.who.join(', ') + '. Remove this item.';
+      else if (qty > ex.remaining) err = 'Only ' + ex.remaining + ' of ' + ex.total + ' left under this OR (claimed by ' + ex.who.join(', ') + ').';
+      else                         info = ex.claimed + ' of ' + ex.total + ' already claimed by ' + ex.who.join(', ') + '. ' + ex.remaining + ' left.';
+    } else {
+      if (oq) oq.disabled = false;
+      if (it.orAuto) { it.qtyOnOR = qty; if (oq) oq.value = qty; }
+      if ((parseInt(it.qtyOnOR) || 1) < qty) err = 'Qty on OR cannot be less than your qty.';
+      // similar (but not identical) to an item somebody already claimed under this OR
+      if (nk) {
+        let best = null;
+        Object.keys(agg).forEach(function(k) { const sc = inc_similarity(it.description, agg[k].name); if (sc >= 0.8 && (!best || sc > best.sc)) best = { sc: sc, e: agg[k] }; });
+        if (best) warn = 'Looks similar to "' + best.e.name + '" already claimed by ' + best.e.who.join(', ') + '. Make sure this is a different item.';
+      }
+    }
+    if (nk && seenNames[nk]) err = 'This item is listed twice. Combine it into one line.';
+    if (nk) seenNames[nk] = true;
+
+    if (err) ready = false;
+    if (it.category && base && !err) grand += tot;
     if (line) {
-      line.innerHTML = (it.category && base)
-        ? 'Incentive: <b>' + inc_money(eff) + '</b> &times; ' + (parseInt(it.qty) || 1) +
+      let html = '';
+      if (err)  html += '<div style="color:var(--red,#ef4444);font-weight:600">' + esc(err) + '</div>';
+      if (info) html += '<div style="color:var(--blue,#1e90ff)">' + esc(info) + '</div>';
+      if (warn) html += '<div style="color:var(--amber,#d97706)">&#9888; ' + esc(warn) + '</div>';
+      html += (it.category && base)
+        ? 'Incentive: <b>' + inc_money(eff) + '</b> &times; ' + qty +
           ' = <b style="color:var(--green)">' + inc_money(tot) + '</b>' + (isWhole ? ' <span style="color:var(--amber,#d97706)">(50%)</span>' : '')
         : '<span style="color:var(--text3)">Choose a category to see the incentive amount.</span>';
+      line.innerHTML = html;
     }
   });
   const sum = document.getElementById('inc_summary');
@@ -6191,6 +6320,7 @@ async function inc_submitClaim() {
       description: String(it.description || '').trim(),
       category:    it.category,
       qty:         parseInt(it.qty) || 1,
+      qtyOnOR:     parseInt(it.qtyOnOR) || parseInt(it.qty) || 1,
     })),
   };
 
@@ -6202,7 +6332,7 @@ async function inc_submitClaim() {
       inc_loadAgentClaims(localDateStr(new Date()));
     } else {
       toast(res.message || 'Error submitting claim.', 'error');
-      if (/already recorded/i.test(res.message || '')) { inc_claimState.orTaken = true; inc_checkOR(); }
+      if (/claimed|left to claim|listed twice/i.test(res.message || '')) { inc_checkOR(); }
       if (btn) { btn.disabled = false; btn.textContent = 'Submit Claim'; }
     }
   } catch(e) {
