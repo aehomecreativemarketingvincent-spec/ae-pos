@@ -4787,6 +4787,44 @@ async function inc_applyBranchAmount() {
 }
 
 // ── DAILY REPORT ──────────────────────────────────────────
+// ── BRANCH FILTER (admin / clerk incentive screens) ─────────
+let inc_branchFilter = '';   // '' = all branches
+
+function inc_branchDisp(b) {
+  const i = INC_BRANCHES.indexOf(b);
+  return i >= 0 ? INC_BRANCHES_DISP[i] : (b || '-');
+}
+
+function inc_filterByBranch(list) {
+  return inc_branchFilter ? (list || []).filter(c => String(c.branch || '') === inc_branchFilter) : (list || []);
+}
+
+function inc_branchSelectHtml(onchangeJs) {
+  return '<select id="incBranchFilter" onchange="' + onchangeJs + '" ' +
+    'style="padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main);background:#fff">' +
+    '<option value="">All Branches</option>' +
+    INC_BRANCHES.map(function(b, i) {
+      return '<option value="' + b + '"' + (b === inc_branchFilter ? ' selected' : '') + '>' + INC_BRANCHES_DISP[i] + '</option>';
+    }).join('') + '</select>';
+}
+
+function inc_setBranchFilter(val, reloadFn) {
+  inc_branchFilter = val || '';
+  reloadFn();
+}
+
+// group (already filtered) claims into per-employee rows
+function inc_summarize(claims) {
+  const byEmp = {};
+  claims.forEach(function(c) {
+    const k = c.employeeId;
+    if (!byEmp[k]) byEmp[k] = { employeeId: c.employeeId, employeeName: c.employeeName, branch: c.branch || '', total: 0, count: 0 };
+    byEmp[k].total += parseFloat(c.totalIncentive || 0);
+    byEmp[k].count++;
+  });
+  return Object.keys(byEmp).map(k => byEmp[k]);
+}
+
 async function inc_loadDailyReport(dateVal) {
   const el = document.getElementById('incContent');
   if (!el) return;
@@ -4798,16 +4836,16 @@ async function inc_loadDailyReport(dateVal) {
         'onchange="inc_loadDailyReport(this.value)" ' +
         'style="padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
       '<button class="btn btn-ghost btn-sm" onclick="inc_loadDailyReport(\'' + today + '\')">Today</button>' +
-      '<button class="btn btn-ghost btn-sm" onclick="inc_exportDailyExcel(\'' + d + '\')">Export Excel</button>' +
+      inc_branchSelectHtml("inc_setBranchFilter(this.value, function(){ inc_loadDailyReport(document.getElementById('incDatePicker').value); })") +
     '</div>' +
     '<div class="loading-spinner"><div class="spinner"></div></div>';
 
   try {
     const res = await gasRequest({ action:'inc_getDailySummary', date:d });
     if (!res.success) { toast(res.message || 'Error loading report.','error'); return; }
-    const summary    = res.summary || [];
-    const claims     = res.claims  || [];
-    const grandTotal = res.grandTotal || 0;
+    const claims     = inc_filterByBranch(res.claims || []);
+    const summary    = inc_summarize(claims);
+    const grandTotal = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
 
     if (!summary.length) {
       el.innerHTML += '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No incentive claims for ' + d + '</div></div>';
@@ -4816,14 +4854,29 @@ async function inc_loadDailyReport(dateVal) {
         '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">' +
           '<input type="date" id="incDatePicker" value="' + d + '" onchange="inc_loadDailyReport(this.value)" style="padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
           '<button class="btn btn-ghost btn-sm" onclick="inc_loadDailyReport(\'' + today + '\')">Today</button>' +
+          inc_branchSelectHtml("inc_setBranchFilter(this.value, function(){ inc_loadDailyReport(document.getElementById('incDatePicker').value); })") +
         '</div>' +
-        '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No incentive claims for ' + d + '</div></div>';
+        '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No incentive claims for ' + d + (inc_branchFilter ? ' in ' + esc(inc_branchDisp(inc_branchFilter)) : '') + '</div></div>';
       return;
+    }
+
+    // per-branch totals (only when viewing all branches)
+    let branchChips = '';
+    if (!inc_branchFilter) {
+      const bt = {};
+      claims.forEach(c => { const b = c.branch || ''; bt[b] = (bt[b] || 0) + parseFloat(c.totalIncentive || 0); });
+      branchChips = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' +
+        Object.keys(bt).sort().map(b =>
+          '<div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:8px 14px;min-width:110px">' +
+            '<div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase">' + esc(b ? inc_branchDisp(b) : 'No branch') + '</div>' +
+            '<div style="font-weight:700;font-family:var(--font-mono)">&#8369;' + bt[b].toFixed(2) + '</div></div>'
+        ).join('') + '</div>';
     }
 
     const empRows = summary.map(s =>
       '<tr>' +
         '<td><b>' + esc(s.employeeName) + '</b></td>' +
+        '<td>' + esc(inc_branchDisp(s.branch)) + '</td>' +
         '<td style="text-align:center">' + s.count + '</td>' +
         '<td class="fw-700 text-green" style="font-size:1rem">&#8369;' + parseFloat(s.total).toFixed(2) + '</td>' +
         '<td><button class="btn btn-ghost btn-sm" onclick="inc_viewEmployeeDay(\'' + esc(s.employeeId) + '\',\'' + d + '\')">View Items</button></td>' +
@@ -4834,23 +4887,25 @@ async function inc_loadDailyReport(dateVal) {
       '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">' +
         '<input type="date" id="incDatePicker" value="' + d + '" onchange="inc_loadDailyReport(this.value)" style="padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main)">' +
         '<button class="btn btn-ghost btn-sm" onclick="inc_loadDailyReport(\'' + today + '\')">Today</button>' +
+        inc_branchSelectHtml("inc_setBranchFilter(this.value, function(){ inc_loadDailyReport(document.getElementById('incDatePicker').value); })") +
         '<button class="btn btn-ghost btn-sm" onclick="inc_viewAllItemsDay(\'' + d + '\')">View All Items</button>' +
         '<button class="btn btn-success btn-sm" onclick="inc_exportDailyExcel(\'' + d + '\')">Export Excel</button>' +
       '</div>' +
+      branchChips +
       '<div class="card">' +
         '<div class="card-hdr" style="padding:14px 18px;border-bottom:1px solid var(--border)">' +
-          '<span style="font-weight:700">Employee Incentive Summary</span>' +
+          '<span style="font-weight:700">Employee Incentive Summary' + (inc_branchFilter ? ' &mdash; ' + esc(inc_branchDisp(inc_branchFilter)) : '') + '</span>' +
           '<span style="font-size:0.8rem;color:var(--text3)">' + safeFormatDateOnly(d) + '</span>' +
         '</div>' +
         '<div class="tbl-wrap"><table>' +
-          '<thead><tr><th>Employee</th><th>Claims</th><th>Total Incentive</th><th></th></tr></thead>' +
+          '<thead><tr><th>Employee</th><th>Branch</th><th>Claims</th><th>Total Incentive</th><th></th></tr></thead>' +
           '<tbody>' + empRows + '</tbody>' +
         '</table></div>' +
       '</div>' +
       '<div style="background:var(--text1,#111);color:white;border-radius:10px;padding:16px 22px;display:flex;justify-content:space-between;align-items:center;margin-top:4px">' +
         '<div>' +
           '<div style="font-size:0.75rem;opacity:.6">GRAND TOTAL INCENTIVE RECEIVABLE</div>' +
-          '<div style="font-size:0.72rem;opacity:.45">' + safeFormatDateOnly(d) + ' &bull; ' + summary.length + ' employee(s)</div>' +
+          '<div style="font-size:0.72rem;opacity:.45">' + safeFormatDateOnly(d) + ' &bull; ' + summary.length + ' employee(s)' + (inc_branchFilter ? ' &bull; ' + esc(inc_branchDisp(inc_branchFilter)) : '') + '</div>' +
         '</div>' +
         '<div style="font-size:1.8rem;font-weight:700;font-family:var(--font-mono)">&#8369;' + parseFloat(grandTotal).toFixed(2) + '</div>' +
       '</div>';
@@ -4908,27 +4963,28 @@ async function inc_viewAllItemsDay(date) {
   el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
   try {
     const res    = await gasRequest({ action:'inc_getDailySummary', date:date });
-    const claims = res.claims || [];
-    const grand  = res.grandTotal || 0;
+    const claims = inc_filterByBranch(res.claims || []);
+    const grand  = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
 
     const rows = claims.map(c =>
       '<tr>' +
         '<td><b>' + esc(c.employeeName) + '</b></td>' +
+        '<td>' + esc(inc_branchDisp(c.branch)) + '</td>' +
         '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
         '<td>' + esc(c.description) + '</td>' +
         '<td style="text-align:center">' + (c.qty||1) + '</td>' +
         '<td class="fw-700 text-green">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
         '<td>' + inc_statusBadge(c.status) + '</td>' +
       '</tr>'
-    ).join('') || '<tr><td colspan="6"><div class="no-data"><div class="no-data-text">No items.</div></div></td></tr>';
+    ).join('') || '<tr><td colspan="7"><div class="no-data"><div class="no-data-text">No items.</div></div></td></tr>';
 
     el.innerHTML =
       '<div class="back-link" onclick="inc_loadDailyReport(\'' + date + '\')" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--text3);font-size:0.82rem;margin-bottom:16px">' +
         '&#8592; Back to Daily Report' +
       '</div>' +
-      '<div style="font-size:0.95rem;font-weight:700;margin-bottom:12px">All Items &mdash; ' + safeFormatDateOnly(date) + '</div>' +
+      '<div style="font-size:0.95rem;font-weight:700;margin-bottom:12px">All Items &mdash; ' + safeFormatDateOnly(date) + (inc_branchFilter ? ' &mdash; ' + esc(inc_branchDisp(inc_branchFilter)) : '') + '</div>' +
       '<div class="card"><div class="tbl-wrap"><table>' +
-        '<thead><tr><th>Employee</th><th>Invoice</th><th>Item</th><th>Qty</th><th>Incentive</th><th>Status</th></tr></thead>' +
+        '<thead><tr><th>Employee</th><th>Branch</th><th>OR No.</th><th>Item</th><th>Qty</th><th>Incentive</th><th>Status</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
       '</table></div></div>' +
       '<div style="background:var(--text1,#111);color:white;border-radius:10px;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;margin-top:8px">' +
@@ -4947,12 +5003,13 @@ async function inc_loadAllClaims() {
   el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
   try {
     const res    = await gasRequest({ action:'inc_getClaims' });
-    const claims = (res.data || []).slice().reverse();
+    const claims = inc_filterByBranch(res.data || []).slice().reverse();
 
     const rows = claims.map(c =>
       '<tr>' +
         '<td style="font-size:0.78rem">' + safeFormatDateTime(c.claimDate) + '</td>' +
         '<td><b>' + esc(c.employeeName) + '</b></td>' +
+        '<td>' + esc(inc_branchDisp(c.branch)) + '</td>' +
         '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
         '<td>' + esc(c.description) + '</td>' +
         '<td style="text-align:center">' + (c.qty||1) + '</td>' +
@@ -4960,11 +5017,16 @@ async function inc_loadAllClaims() {
         '<td>' + inc_statusBadge(c.status) + '</td>' +
         '<td>' + inc_actionBtns(c) + '</td>' +
       '</tr>'
-    ).join('') || '<tr><td colspan="8"><div class="no-data"><div class="no-data-text">No claims yet.</div></div></td></tr>';
+    ).join('') || '<tr><td colspan="9"><div class="no-data"><div class="no-data-text">No claims' + (inc_branchFilter ? ' for ' + esc(inc_branchDisp(inc_branchFilter)) : ' yet') + '.</div></div></td></tr>';
 
+    const total = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
     el.innerHTML =
+      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">' +
+        inc_branchSelectHtml("inc_setBranchFilter(this.value, inc_loadAllClaims)") +
+        '<span style="font-size:0.82rem;color:var(--text3)">' + claims.length + ' claim(s) &bull; Total &#8369;' + total.toFixed(2) + '</span>' +
+      '</div>' +
       '<div class="card"><div class="tbl-wrap" style="max-height:65vh;overflow-y:auto"><table>' +
-        '<thead><tr><th>Date</th><th>Employee</th><th>Invoice</th><th>Item</th><th>Qty</th><th>Total</th><th>Status</th><th>Action</th></tr></thead>' +
+        '<thead><tr><th>Date</th><th>Employee</th><th>Branch</th><th>OR No.</th><th>Item</th><th>Qty</th><th>Total</th><th>Status</th><th>Action</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
       '</table></div></div>';
   } catch(e) {
@@ -6061,40 +6123,40 @@ async function inc_exportDailyExcel(date) {
   toast('Preparing Excel...','info');
   try {
     const res = await gasRequest({ action:'inc_getDailySummary', date:date });
-    if (!res.success || !res.claims || !res.claims.length) { toast('No data to export.','warning'); return; }
+    const claims = inc_filterByBranch(res.claims || []);
+    if (!res.success || !claims.length) { toast('No data to export.','warning'); return; }
     const now = new Date();
-    const HEADER = ['Employee','Invoice No.','Barcode','Description','Qty','Incentive/Unit','Total Incentive','Status'];
-    const data = res.claims.map(c => [
-      c.employeeName, c.invoiceNo, c.barcode, c.description,
+    const summary    = inc_summarize(claims);
+    const grandTotal = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+    const HEADER = ['Employee','Branch','OR No.','Category','Description','Qty','Incentive/Unit','Total Incentive','Status'];
+    const data = claims.map(c => [
+      c.employeeName, inc_branchDisp(c.branch), c.invoiceNo, c.category || '', c.description,
       parseInt(c.qty||1), parseFloat(c.incentivePerUnit||0), parseFloat(c.totalIncentive||0), c.status
     ]);
-    // Summary section
-    const summaryRows = res.summary.map(s => [s.employeeName, '', '', 'SUBTOTAL', '', '', s.total, '']);
+    const summaryRows = summary.map(s => [s.employeeName, inc_branchDisp(s.branch), '', '', 'SUBTOTAL', '', '', s.total, '']);
 
     const sheet_data = [
       ['AE HOME POS \u2014 Incentive Daily Report'],
       ['Date:', safeFormatDateOnly(date)],
+      ['Branch:', inc_branchFilter ? inc_branchDisp(inc_branchFilter) : 'All Branches'],
       ['Generated:', now.toLocaleString('en-PH')],
       [],
       HEADER,
       ...data,
       [],
       ['EMPLOYEE SUMMARY'],
-      ['Employee','','','','','','Total Incentive',''],
+      ['Employee','Branch','','','','','','Total Incentive',''],
       ...summaryRows,
       [],
-      ['','','','','','','Grand Total:', res.grandTotal],
+      ['','','','','','','','Grand Total:', grandTotal],
     ];
 
     const ws = XLSX.utils.aoa_to_sheet(sheet_data);
-    for (var c2 = 0; c2 < HEADER.length; c2++) {
-      var addr = XLSX.utils.encode_cell({r:4, c:c2});
-      if (ws[addr]) ws[addr].s = { font:{bold:true}, fill:{patternType:'solid',fgColor:{rgb:'FFD966'}} };
-    }
-    ws['!cols'] = [{wch:22},{wch:18},{wch:12},{wch:30},{wch:6},{wch:14},{wch:16},{wch:10}];
+    ws['!cols'] = [{wch:22},{wch:12},{wch:16},{wch:16},{wch:30},{wch:6},{wch:14},{wch:16},{wch:10}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Incentive Report');
-    XLSX.writeFile(wb, 'IncentiveReport_' + date + '.xlsx');
+    const tag = inc_branchFilter ? '_' + inc_branchFilter.replace(/\s+/g, '') : '';
+    XLSX.writeFile(wb, 'IncentiveReport_' + date + tag + '.xlsx');
     toast('Excel downloaded!','success');
   } catch(e) { toast('Export failed: '+e.message,'error'); }
 }
