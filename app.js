@@ -45,6 +45,8 @@ let currentPage = 'dashboard';
 let cart = [];
 let activeUsers = {};   // { sessionId: { name, role, loginTime } }
 let mySessionId = null;
+let authToken = null;      // server-issued session token (sent with every request)
+let _authErrorShown = false;
 
 // ─── ROLE CONFIG ──────────────────────────────
 const ROLE_NAV = {
@@ -183,12 +185,22 @@ document.addEventListener('DOMContentLoaded', () => {
   startClock();
   loadCartFromStorage();
   const saved = lsGet('ae_session', null);
-  if (saved) {
+  const savedToken = lsGet('ae_token', null);
+  if (saved && savedToken) {
     try {
       currentUser = saved;
+      // Restore the server-issued token so requests stay authorised after refresh
+      authToken   = savedToken;
+      mySessionId = savedToken;
+      // Show the app screen (previously only initApp() ran, leaving the login screen visible)
+      document.getElementById('loginScreen').classList.add('hidden');
+      document.getElementById('loginScreen').classList.remove('active');
+      document.getElementById('appScreen').classList.remove('hidden');
       initApp();
-    } catch(e) { showLogin(); }
+      startSessionPoller();
+    } catch(e) { currentUser = null; showLogin(); }
   } else {
+    lsDel('ae_session'); lsDel('ae_session_id'); lsDel('ae_token');
     showLogin();
   }
   registerSW();
@@ -234,19 +246,12 @@ async function doLogin() {
   errEl.classList.add('hidden');
   if (!u || !p) { showLoginErr('Please enter username and password.'); return; }
 
-  // Admin hardcoded
-  if (u === 'admin' && p === 'admin123') {
-    currentUser = { id: 'admin', name: 'Administrator', role: 'admin', username: 'admin' };
-    finishLogin();
-    return;
-  }
-
   showLoginErr('Checking credentials...');
   try {
-    const res = await gasRequest({ action: 'login', username: u, password: p });
-    if (res.success) {
+    const res = await gasRequest({ action: 'login', username: u, password: p, device: navigator.userAgent.substring(0, 80) });
+    if (res.success && res.token) {
       currentUser = { id: res.id, name: res.name, role: res.role, username: u, branch: res.branch || '' };
-      finishLogin();
+      finishLogin(res.token);
     } else {
       showLoginErr(res.message || 'Invalid username or password.');
     }
@@ -340,32 +345,34 @@ async function doRegister() {
 
 function showLoginErr(msg) {
   const el = document.getElementById('loginError');
+  el.removeAttribute('style'); // clear amber "kicked" styling from a previous message
  el.textContent = msg;
   el.classList.remove('hidden');
 }
 
-function enterViewerMode() {
-  currentUser = { id: 'viewer', name: 'Viewer', role: 'viewer', username: 'viewer' };
-  finishLogin();
+async function enterViewerMode() {
+  showLoginErr('Opening viewer mode...');
+  try {
+    const res = await gasRequest({ action: 'loginViewer' });
+    if (res.success && res.token) {
+      currentUser = { id: 'viewer', name: 'Viewer', role: 'viewer', username: 'viewer' };
+      finishLogin(res.token);
+    } else {
+      showLoginErr(res.message || 'Could not open viewer mode.');
+    }
+  } catch(e) {
+    showLoginErr('Connection error. Check GAS URL or network.');
+  }
 }
 
-function finishLogin() {
-  mySessionId = 'sess_' + Date.now();
+function finishLogin(token) {
+  authToken   = token;
+  mySessionId = token;
+  _authErrorShown = false;
   lsSet('ae_session', currentUser);
-  lsSet('ae_session_id', mySessionId);
+  lsSet('ae_token', token);
+  lsDel('ae_session_id');
   trackActiveUser(true);
-  // Register session in GAS (for cross-device single session)
-  if (currentUser.role !== 'viewer') {
-    gasPost({
-      action: 'registerSession',
-      userId: currentUser.id || currentUser.username,
-      sessionId: mySessionId,
-      username: currentUser.username,
-      name: currentUser.name,
-      role: currentUser.role,
-      device: navigator.userAgent.substring(0, 80)
-    }).catch(() => {}); // silent fail
-  }
   document.getElementById('loginError').classList.add('hidden');
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('loginScreen').classList.remove('active');
@@ -380,12 +387,13 @@ function doLogout(showConfirm = true) {
   stopSessionPoller();
   trackActiveUser(false);
   // Unregister session from GAS
-  if (currentUser && currentUser.role !== 'viewer' && mySessionId) {
-    gasPost({ action: 'unregisterSession', userId: currentUser.id || currentUser.username, sessionId: mySessionId }).catch(() => {});
+  if (authToken) {
+    gasPost({ action: 'logout' }).catch(() => {});
   }
   currentUser = null;
   mySessionId = null;
-  lsDel('ae_session'); lsDel('ae_session_id');
+  authToken = null;
+  lsDel('ae_session'); lsDel('ae_session_id'); lsDel('ae_token');
   cart = [];
   saveCartToStorage();
   document.getElementById('appScreen').classList.add('hidden');
@@ -407,7 +415,7 @@ function startSessionPoller() {
       const res = await gasRequest({
         action: 'checkSession',
         userId: currentUser.id || currentUser.username,
-        sessionId: mySessionId
+        sessionId: authToken
       });
       if (res.valid === false) {
         // Session was invalidated — another device logged in!
@@ -425,12 +433,14 @@ function stopSessionPoller() {
   }
 }
 
-function showSessionKicked() {
+function showSessionKicked(message) {
   // Force logout with notification
+  stopSessionPoller();
   trackActiveUser(false);
   currentUser = null;
   mySessionId = null;
-  lsDel('ae_session'); lsDel('ae_session_id');
+  authToken = null;
+  lsDel('ae_session'); lsDel('ae_session_id'); lsDel('ae_token');
   cart = [];
   saveCartToStorage();
   document.getElementById('appScreen').classList.add('hidden');
@@ -440,7 +450,7 @@ function showSessionKicked() {
   // Show kicked message
   const errEl = document.getElementById('loginError');
   if (errEl) {
-    errEl.textContent = '⚠️ You were logged out because this account was used on another device.';
+    errEl.textContent = message || 'You were logged out because this account was used on another device.';
     errEl.classList.remove('hidden');
     errEl.style.background = '#fff7e0';
     errEl.style.borderColor = '#f59e0b';
@@ -598,17 +608,31 @@ function renderPage(page) {
   }
 }
 
+// ─── AUTH ERROR HANDLING ─────────────────────
+// Server says the token is missing / expired: return to the login screen once.
+function handleAuthError(res) {
+  if (res && res.authError && currentUser && !_authErrorShown) {
+    _authErrorShown = true;
+    setTimeout(() => showSessionKicked(res.message || 'Session expired. Please log in again.'), 0);
+  }
+  return res;
+}
+
 // ─── GAS REQUEST ─────────────────────────────
 async function gasRequest(params, timeoutMs = 30000) {
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const url  = GAS_URL + '?' + new URLSearchParams(params);
+    const full = Object.assign({}, params);
+    if (authToken && full.token === undefined) full.token = authToken;
+    const url  = GAS_URL + '?' + new URLSearchParams(full);
     const res  = await fetch(url, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
     const text = await res.text();
     clearTimeout(timer);
-    try { return JSON.parse(text); }
+    let out;
+    try { out = JSON.parse(text); }
     catch (e) { throw new Error('Invalid server response'); }
+    return handleAuthError(out);
   } catch (e) {
     clearTimeout(timer);
     if (e.name === 'AbortError') throw new Error('Request timed out. Check your connection.');
@@ -621,6 +645,7 @@ async function gasPost(payload, timeoutMs = 45000) {
   // POST is blocked by CORS. Solution: GET + base64 payload in URL param.
   // We check for e.parameter.data (not e.parameter.method) in doGet
   // so it works even if params survive the redirect.
+  if (authToken && payload.token === undefined) payload = Object.assign({}, payload, { token: authToken });
   const json = JSON.stringify(payload);
   let encoded;
   try {
@@ -638,8 +663,10 @@ async function gasPost(payload, timeoutMs = 45000) {
     clearTimeout(timer);
     const text = await res.text();
     if (!text || !text.trim()) return { success: true };
-    try { return JSON.parse(text); }
+    let out;
+    try { out = JSON.parse(text); }
     catch (e) { return { success: true }; }
+    return handleAuthError(out);
   } catch (e) {
     clearTimeout(timer);
     if (e.name === 'AbortError') throw new Error('Save timed out. Please try again.');
@@ -648,6 +675,15 @@ async function gasPost(payload, timeoutMs = 45000) {
 }
 
 // gasPostWithResult removed (unused)
+
+// Safe string for use inside inline onclick='...' handlers (handles apostrophes/quotes)
+function jsq(str) {
+  return String(str == null ? '' : str)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;')
+    .replace(/\r?\n/g, ' ');
+}
 
 // ─── TOAST ────────────────────────────────────
 function toast(msg, type = 'info', duration = 3500) {
@@ -658,7 +694,8 @@ function toast(msg, type = 'info', duration = 3500) {
   iconSpan.className   = 'toast-icon';
   iconSpan.textContent = icons[type] || 'i';
   const msgSpan = document.createElement('span');
-  msgSpan.textContent  = String(msg || '');
+  // Decode HTML entities (e.g. &#8369;) since textContent shows them literally
+  msgSpan.textContent  = String(msg || '').replace(/&#(\d+);/g, function(_, n) { return String.fromCharCode(parseInt(n, 10)); });
   el.appendChild(iconSpan);
   el.appendChild(msgSpan);
   const container = document.getElementById('toastContainer');
@@ -1483,6 +1520,7 @@ async function processCheckout(total) {
   // Validate cash for cash payments
   if (!isNonCash && (!cash || cash < total)) {
     toast('Cash received is insufficient!', 'error');
+    _checkoutInProgress = false;
     if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
     return;
   }
@@ -1490,7 +1528,12 @@ async function processCheckout(total) {
   // BUG 1 FIX: snapshot cart HERE before anything else —
   // was declared inside try block AFTER payload was already built, causing ReferenceError
   const cartSnapshot = [...cart];
-  if (!cartSnapshot.length) { toast('Cart is empty!', 'warning'); return; }
+  if (!cartSnapshot.length) {
+    toast('Cart is empty!', 'warning');
+    _checkoutInProgress = false;
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
+    return;
+  }
 
   const txId  = 'TX' + Date.now();
   const siNum = 'SI' + Date.now();
@@ -1919,7 +1962,7 @@ function viewProductImage(productId, productName) {
       <img src="${img}" style="max-width:100%;max-height:360px;border-radius:10px;object-fit:contain;box-shadow:var(--shadow)">
     </div>
     <div style="display:flex;gap:10px;margin-top:16px">
-      <button class="btn btn-ghost btn-sm" onclick="openImageUpload('${productId}','${productName}');closeModalDirect()">Change Image</button>
+      <button class="btn btn-ghost btn-sm" onclick="openImageUpload('${productId}','${jsq(productName)}');closeModalDirect()">Change Image</button>
       <button class="btn btn-danger btn-sm" onclick="deleteProductImage('${productId}');closeModalDirect();loadInventory()">Remove</button>
       <button class="btn btn-primary" style="flex:1" onclick="closeModalDirect()">Close</button>
     </div>`);
@@ -1947,7 +1990,7 @@ function renderInventoryTable(products) {
     const badge = qty === 0 ? '<span class="badge-out">Out</span>' : qty <= 5 ? '<span class="badge-low">Low</span>' : '<span class="badge-in-stock">In Stock</span>';
     const chk = canDelete ? `<td><input type="checkbox" class="row-select" name="row_select_${p.id}" value="${p.id}" onchange="updateBulkBar()"></td>` : '';
     const img = getProductImage(p.id);
-    const thumb = img ? `<img src="${img}" class="prod-thumb" onclick="viewProductImage('${p.id}','${p.name}')">` : `<div class="prod-thumb-empty" onclick="openImageUpload('${p.id}','${p.name}')">+</div>`;
+    const thumb = img ? `<img src="${img}" class="prod-thumb" onclick="viewProductImage('${p.id}','${jsq(p.name)}')">` : `<div class="prod-thumb-empty" onclick="openImageUpload('${p.id}','${jsq(p.name)}')">+</div>`;
     const acts = canEdit ? `<td><div class="inv-btn-group">
       <button class="inv-btn inv-btn-edit" onclick="openEditProductModal('${p.id}')" title="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit</button>
       <button class="inv-btn inv-btn-in" onclick="openStockModal('${p.id}','in')" title="Stock In"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg> In</button>
@@ -2669,7 +2712,7 @@ async function gasBulkImport(batch) {
   })).filter(p => p.name);
 
   // Use GET + base64 payload (same as gasPost) — avoids CORS block
-  const payload = { action: 'bulkAddProducts', products: JSON.stringify(products) };
+  const payload = { action: 'bulkAddProducts', products: JSON.stringify(products), token: authToken || '' };
   const json    = JSON.stringify(payload);
   let encoded;
   try {
@@ -2687,7 +2730,7 @@ async function gasBulkImport(batch) {
     clearTimeout(timer);
     const text = await res.text();
     if (!text || !text.trim()) return { success: true, count: products.length };
-    try { return JSON.parse(text); }
+    try { return handleAuthError(JSON.parse(text)); }
     catch(e) { return { success: true, count: products.length }; }
   } catch(e) {
     clearTimeout(timer);
@@ -5039,9 +5082,8 @@ function inc_renderMasterTable(items, el) {
         '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category || '—') + '</td>' +
         '<td>' + amtD + '</td>' +
         '<td>' + inc_statusBadge(m.status) + '</td>' +
-        '<td>' + inc_statusBadge(m.status) + '</td>' +
       '</tr>';
-    }).join('') || '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--text3)">No items. Upload an Excel file to add products.</td></tr>';
+    }).join('') || '<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--text3)">No items. Upload an Excel file to add products.</td></tr>';
   }
 
   target.innerHTML = tabsHtml + toolbar +
@@ -5104,9 +5146,8 @@ function inc_filterMaster(q) {
         '<td style="font-size:0.8rem;color:var(--text3)">' + esc(m.category||'—') + '</td>' +
         '<td>' + amtD + '</td>' +
         '<td>' + inc_statusBadge(m.status) + '</td>' +
-        '<td>' + inc_statusBadge(m.status) + '</td>' +
       '</tr>';
-    }).join('') || '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--text3)">No matching items.</td></tr>';
+    }).join('') || '<tr><td colspan="5" style="padding:24px;text-align:center;color:var(--text3)">No matching items.</td></tr>';
   }
 }
 
