@@ -4996,42 +4996,165 @@ async function inc_viewAllItemsDay(date) {
   }
 }
 
-// ── ALL CLAIMS ────────────────────────────────────────────
+// ── ALL CLAIMS (date range + branch + category + status) ───
+let inc_allFilter = { from: '', to: '', category: '', status: '' };
+let inc_allClaimsCache = [];
+
 async function inc_loadAllClaims() {
   const el = document.getElementById('incContent');
   if (!el) return;
   el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
   try {
-    const res    = await gasRequest({ action:'inc_getClaims' });
-    const claims = inc_filterByBranch(res.data || []).slice().reverse();
-
-    const rows = claims.map(c =>
-      '<tr>' +
-        '<td style="font-size:0.78rem">' + safeFormatDateTime(c.claimDate) + '</td>' +
-        '<td><b>' + esc(c.employeeName) + '</b></td>' +
-        '<td>' + esc(inc_branchDisp(c.branch)) + '</td>' +
-        '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
-        '<td>' + esc(c.description) + '</td>' +
-        '<td style="text-align:center">' + (c.qty||1) + '</td>' +
-        '<td class="fw-700">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
-        '<td>' + inc_statusBadge(c.status) + '</td>' +
-        '<td>' + inc_actionBtns(c) + '</td>' +
-      '</tr>'
-    ).join('') || '<tr><td colspan="9"><div class="no-data"><div class="no-data-text">No claims' + (inc_branchFilter ? ' for ' + esc(inc_branchDisp(inc_branchFilter)) : ' yet') + '.</div></div></td></tr>';
-
-    const total = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
-    el.innerHTML =
-      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">' +
-        inc_branchSelectHtml("inc_setBranchFilter(this.value, inc_loadAllClaims)") +
-        '<span style="font-size:0.82rem;color:var(--text3)">' + claims.length + ' claim(s) &bull; Total &#8369;' + total.toFixed(2) + '</span>' +
-      '</div>' +
-      '<div class="card"><div class="tbl-wrap" style="max-height:65vh;overflow-y:auto"><table>' +
-        '<thead><tr><th>Date</th><th>Employee</th><th>Branch</th><th>OR No.</th><th>Item</th><th>Qty</th><th>Total</th><th>Status</th><th>Action</th></tr></thead>' +
-        '<tbody>' + rows + '</tbody>' +
-      '</table></div></div>';
+    const res = await gasRequest({ action:'inc_getClaims' });
+    inc_allClaimsCache = res.data || [];
+    inc_renderAllClaims();
   } catch(e) {
     toast('Error loading claims.', 'error');
   }
+}
+
+function inc_claimDay(c) {
+  const d = new Date(c.claimDate);
+  return isNaN(d) ? String(c.claimDate || '').slice(0, 10) : localDateStr(d);
+}
+
+function inc_applyAllFilters() {
+  const f = inc_allFilter;
+  return inc_filterByBranch(inc_allClaimsCache).filter(function(c) {
+    const day = inc_claimDay(c);
+    if (f.from && day < f.from) return false;
+    if (f.to   && day > f.to)   return false;
+    if (f.category) {
+      const cat = String(c.category || '');
+      if (f.category === '__none__' ? cat !== '' : cat !== f.category) return false;
+    }
+    if (f.status && String(c.status || '').toLowerCase() !== f.status.toLowerCase()) return false;
+    return true;
+  });
+}
+
+function inc_allSet(field, val) {
+  inc_allFilter[field] = val;
+  inc_renderAllClaims();
+}
+
+// quick ranges: '1-15' / '16-end' of the current month, whole month, today, all
+function inc_allPreset(kind) {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const pad = n => String(n).padStart(2, '0');
+  const ym = y + '-' + pad(m + 1);
+  const last = new Date(y, m + 1, 0).getDate();
+  if (kind === 'first')      { inc_allFilter.from = ym + '-01'; inc_allFilter.to = ym + '-15'; }
+  else if (kind === 'second'){ inc_allFilter.from = ym + '-16'; inc_allFilter.to = ym + '-' + pad(last); }
+  else if (kind === 'month') { inc_allFilter.from = ym + '-01'; inc_allFilter.to = ym + '-' + pad(last); }
+  else if (kind === 'today') { inc_allFilter.from = inc_allFilter.to = localDateStr(now); }
+  else                       { inc_allFilter.from = ''; inc_allFilter.to = ''; }
+  inc_renderAllClaims();
+}
+
+function inc_renderAllClaims() {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  const f = inc_allFilter;
+  const claims = inc_applyAllFilters().slice().sort((a, b) => String(b.claimDate).localeCompare(String(a.claimDate)));
+  const total  = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+
+  // categories that appear in the data
+  const catSet = {};
+  let hasNone = false;
+  inc_allClaimsCache.forEach(c => { if (c.category) catSet[c.category] = true; else hasNone = true; });
+  const catOpts = '<option value="">All Categories</option>' +
+    Object.keys(catSet).sort().map(c => '<option value="' + esc(c) + '"' + (c === f.category ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+    (hasNone ? '<option value="__none__"' + (f.category === '__none__' ? ' selected' : '') + '>(No category - old claims)</option>' : '');
+  const stOpts = ['', 'Pending', 'Verified', 'Rejected'].map(v =>
+    '<option value="' + v + '"' + (v === f.status ? ' selected' : '') + '>' + (v || 'All Status') + '</option>').join('');
+  const inStyle = 'padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main);background:#fff';
+
+  // totals per category for the filtered view
+  const byCat = {};
+  claims.forEach(c => { const k = c.category || '(No category)'; if (!byCat[k]) byCat[k] = { qty: 0, total: 0 }; byCat[k].qty += parseInt(c.qty || 1); byCat[k].total += parseFloat(c.totalIncentive || 0); });
+  const catChips = Object.keys(byCat).sort().map(k =>
+    '<div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:8px 14px;min-width:120px">' +
+      '<div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase">' + esc(k) + ' &bull; ' + byCat[k].qty + ' pc</div>' +
+      '<div style="font-weight:700;font-family:var(--font-mono)">&#8369;' + byCat[k].total.toFixed(2) + '</div></div>'
+  ).join('');
+
+  const rows = claims.map(c =>
+    '<tr>' +
+      '<td style="font-size:0.78rem">' + safeFormatDateTime(c.claimDate) + '</td>' +
+      '<td><b>' + esc(c.employeeName) + '</b></td>' +
+      '<td>' + esc(inc_branchDisp(c.branch)) + '</td>' +
+      '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
+      '<td>' + esc(c.description) + (c.category ? '<div style="font-size:0.72rem;color:var(--text3)">' + esc(c.category) + '</div>' : '') + '</td>' +
+      '<td style="text-align:center">' + (c.qty||1) + '</td>' +
+      '<td class="fw-700">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
+      '<td>' + inc_statusBadge(c.status) + '</td>' +
+      '<td>' + inc_actionBtns(c) + '</td>' +
+    '</tr>'
+  ).join('') || '<tr><td colspan="9"><div class="no-data"><div class="no-data-text">No claims match these filters.</div></div></td></tr>';
+
+  el.innerHTML =
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">' +
+      '<label style="font-size:0.78rem;color:var(--text3)">From</label>' +
+      '<input type="date" value="' + esc(f.from) + '" onchange="inc_allSet(\'from\', this.value)" style="' + inStyle + '">' +
+      '<label style="font-size:0.78rem;color:var(--text3)">To</label>' +
+      '<input type="date" value="' + esc(f.to) + '" onchange="inc_allSet(\'to\', this.value)" style="' + inStyle + '">' +
+      inc_branchSelectHtml("inc_setBranchFilter(this.value, inc_renderAllClaims)") +
+      '<select onchange="inc_allSet(\'category\', this.value)" style="' + inStyle + '">' + catOpts + '</select>' +
+      '<select onchange="inc_allSet(\'status\', this.value)" style="' + inStyle + '">' + stOpts + '</select>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_allPreset(\'first\')">1-15 (this month)</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_allPreset(\'second\')">16-end (this month)</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_allPreset(\'month\')">This month</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_allPreset(\'today\')">Today</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_allPreset(\'all\')">All dates</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_loadAllClaims()" title="Reload">&#8635; Refresh</button>' +
+      '<button class="btn btn-success btn-sm" onclick="inc_exportFilteredClaims()">Export Excel</button>' +
+    '</div>' +
+    '<div style="background:var(--text1,#111);color:white;border-radius:10px;padding:12px 20px;display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:6px">' +
+      '<span style="font-size:0.8rem;opacity:.7">' + claims.length + ' claim(s)' + (f.from || f.to ? ' &bull; ' + esc(f.from || '...') + ' to ' + esc(f.to || '...') : '') + '</span>' +
+      '<span style="font-size:1.3rem;font-weight:700;font-family:var(--font-mono)">&#8369;' + total.toFixed(2) + '</span>' +
+    '</div>' +
+    (catChips ? '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' + catChips + '</div>' : '') +
+    '<div class="card"><div class="tbl-wrap" style="max-height:60vh;overflow-y:auto"><table>' +
+      '<thead><tr><th>Date</th><th>Employee</th><th>Branch</th><th>OR No.</th><th>Item</th><th>Qty</th><th>Total</th><th>Status</th><th>Action</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>' +
+    '</table></div></div>';
+}
+
+function inc_exportFilteredClaims() {
+  const claims = inc_applyAllFilters().slice().sort((a, b) => String(a.claimDate).localeCompare(String(b.claimDate)));
+  if (!claims.length) { toast('No data to export.', 'warning'); return; }
+  const f = inc_allFilter;
+  const total = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+  const HEADER = ['Date','Employee','Branch','OR No.','Category','Description','Qty','Incentive/Unit','Total Incentive','Status'];
+  const data = claims.map(c => [
+    safeFormatDateTime(c.claimDate), c.employeeName, inc_branchDisp(c.branch), c.invoiceNo, c.category || '', c.description,
+    parseInt(c.qty || 1), parseFloat(c.incentivePerUnit || 0), parseFloat(c.totalIncentive || 0), c.status
+  ]);
+  const byCat = {};
+  claims.forEach(c => { const k = c.category || '(No category)'; byCat[k] = (byCat[k] || 0) + parseFloat(c.totalIncentive || 0); });
+  const sheet = [
+    ['AE HOME POS — Incentive Claims'],
+    ['Period:', (f.from || 'start') + ' to ' + (f.to || 'latest')],
+    ['Branch:', inc_branchFilter ? inc_branchDisp(inc_branchFilter) : 'All Branches'],
+    ['Category:', f.category === '__none__' ? '(No category)' : (f.category || 'All')],
+    ['Status:', f.status || 'All'],
+    [],
+    HEADER, ...data, [],
+    ['TOTAL PER CATEGORY'],
+    ...Object.keys(byCat).sort().map(k => [k, byCat[k]]),
+    [],
+    ['Grand Total:', total],
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(sheet);
+  ws['!cols'] = [{wch:20},{wch:22},{wch:12},{wch:16},{wch:16},{wch:30},{wch:6},{wch:14},{wch:16},{wch:10}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Claims');
+  XLSX.writeFile(wb, 'IncentiveClaims_' + (f.from || 'all') + '_to_' + (f.to || 'latest') + '.xlsx');
+  toast('Excel downloaded!', 'success');
 }
 
 // ══════════════════════════════════════════════════════════
