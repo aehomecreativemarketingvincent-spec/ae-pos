@@ -4999,14 +4999,20 @@ async function inc_viewAllItemsDay(date) {
 // ── ALL CLAIMS (date range + branch + category + status) ───
 let inc_allFilter = { from: '', to: '', category: '', status: '' };
 let inc_allClaimsCache = [];
+let inc_allCatNames = [];
 
 async function inc_loadAllClaims() {
   const el = document.getElementById('incContent');
   if (!el) return;
   el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
   try {
-    const res = await gasRequest({ action:'inc_getClaims' });
+    const [res, cres] = await Promise.all([
+      gasRequest({ action:'inc_getClaims' }),
+      gasRequest({ action:'inc_getClaimCategories' }).catch(() => ({ data: [] })),
+    ]);
     inc_allClaimsCache = res.data || [];
+    // categories from the catalog, so the dropdown is never empty
+    inc_allCatNames = ((cres && cres.data) || []).map(c => c.category).filter(Boolean);
     inc_renderAllClaims();
   } catch(e) {
     toast('Error loading claims.', 'error');
@@ -5063,6 +5069,7 @@ function inc_renderAllClaims() {
   // categories that appear in the data
   const catSet = {};
   let hasNone = false;
+  inc_allCatNames.forEach(n => { catSet[n] = true; });
   inc_allClaimsCache.forEach(c => { if (c.category) catSet[c.category] = true; else hasNone = true; });
   const catOpts = '<option value="">All Categories</option>' +
     Object.keys(catSet).sort().map(c => '<option value="' + esc(c) + '"' + (c === f.category ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
