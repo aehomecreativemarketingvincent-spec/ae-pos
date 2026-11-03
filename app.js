@@ -4655,7 +4655,7 @@ const INC_BRANCHES_DISP = ['Vigan', 'SDO', 'San Juan', 'Cabugao 1', 'Cabugao 2',
 
 // ── STATE ─────────────────────────────────────────────────
 let inc_masterCache = [];   // Incentive Master List
-let inc_claimState  = { invoiceNo:'', saleType:'retail', items:[], cats:[], orTaken:false, orTimer:null };
+let inc_claimState  = { invoiceNo:'', saleType:'retail', items:[], cats:[], prods:[], orTaken:false, orTimer:null };
 let inc_rejectId    = null;
 
 // ── MAIN PAGE ROUTER ──────────────────────────────────────
@@ -4678,8 +4678,7 @@ async function inc_renderAdminPage() {
     '<div id="incTabBar" class="tab-bar" style="margin-bottom:16px">' +
       '<button class="tab-btn active" onclick="inc_showTab(\'daily\',this)">Daily Report</button>' +
       '<button class="tab-btn" onclick="inc_showTab(\'all\',this)">All Claims</button>' +
-      '<button class="tab-btn" onclick="inc_showTab(\'master\',this)">Incentive List</button>' +
-      '<button class="tab-btn" onclick="inc_showTab(\'setamounts\',this)">Set Branch Amounts</button>' +
+      '<button class="tab-btn" onclick="inc_showTab(\'catalog\',this)">Categories &amp; Amounts</button>' +
     '</div>' +
     '<div id="incContent"></div>';
   inc_showTab('daily', document.querySelector('#incTabBar .tab-btn'));
@@ -4691,6 +4690,7 @@ function inc_showTab(tab, btn) {
   if (btn) btn.classList.add('active');
   if (tab === 'daily')      inc_loadDailyReport();
   if (tab === 'all')        inc_loadAllClaims();
+  if (tab === 'catalog')    inc_loadCatalog();
   if (tab === 'master')     inc_loadMasterList();
   if (tab === 'setamounts') inc_renderSetAmounts();
 }
@@ -4969,6 +4969,221 @@ async function inc_loadAllClaims() {
       '</table></div></div>';
   } catch(e) {
     toast('Error loading claims.', 'error');
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// CATEGORIES & AMOUNTS (one amount per category, all branches)
+// ══════════════════════════════════════════════════════════
+let inc_catData  = [];
+let inc_prodData = [];
+let inc_catImportRows = [];
+
+async function inc_loadCatalog() {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  try {
+    const res = await gasRequest({ action: 'inc_getClaimCategories' });
+    if (!res.success) { el.innerHTML = '<div class="no-data"><div class="no-data-text">' + esc(res.message || 'Error loading.') + '</div></div>'; return; }
+    inc_catData  = res.data || [];
+    inc_prodData = res.products || [];
+    inc_renderCatalog();
+  } catch(e) {
+    el.innerHTML = '<div class="no-data"><div class="no-data-text">Error loading. Check connection.</div></div>';
+  }
+}
+
+function inc_renderCatalog() {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  const isAdmin = currentUser.role === 'admin';
+  const rows = inc_catData.map(function(c) {
+    const off = String(c.status).toLowerCase() === 'inactive';
+    return '<tr' + (off ? ' style="opacity:.55"' : '') + '>' +
+      '<td><b>' + esc(c.category) + '</b></td>' +
+      '<td class="fw-700 text-green">&#8369;' + (parseFloat(c.amount) || 0).toFixed(2) + '</td>' +
+      '<td style="text-align:center">' + (c.products || 0) + '</td>' +
+      '<td>' + (off ? '<span class="badge-out">Inactive</span>' : '<span class="badge-in-stock">Active</span>') + '</td>' +
+      (isAdmin ? '<td style="white-space:nowrap">' +
+        '<button class="btn btn-ghost btn-sm" onclick="inc_openCategoryModal(\'' + esc(c.id) + '\')">Edit</button> ' +
+        '<button class="btn btn-danger btn-sm" onclick="inc_deleteCategory(\'' + esc(c.id) + '\')">Delete</button></td>' : '') +
+    '</tr>';
+  }).join('') || '<tr><td colspan="5"><div class="no-data"><div class="no-data-text">No categories yet. Add one or upload a file.</div></div></td></tr>';
+
+  el.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">' +
+      '<div style="font-size:0.85rem;color:var(--text2)">The amount you set here is the same for <b>all branches</b>. Agents type the item, pick the category, and the amount shows automatically.</div>' +
+      (isAdmin ? '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<button class="btn btn-ghost btn-sm" onclick="inc_downloadCatalogTemplate()">Download Template</button>' +
+        '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'inc_cat_file\').click()">Upload Excel/CSV</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="inc_openCategoryModal()">+ Add Category</button>' +
+        '<input type="file" id="inc_cat_file" accept=".xlsx,.xls,.csv" style="display:none" onchange="inc_handleCatalogUpload(this)">' +
+      '</div>' : '') +
+    '</div>' +
+    '<div class="card"><div class="tbl-wrap"><table>' +
+      '<thead><tr><th>Category</th><th>Amount</th><th>Product names</th><th>Status</th>' + (isAdmin ? '<th>Actions</th>' : '') + '</tr></thead>' +
+      '<tbody>' + rows + '</tbody></table></div></div>' +
+    '<div style="margin-top:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">' +
+      '<div style="font-size:0.85rem;font-weight:700">Product names (suggestions for agents) &mdash; ' + inc_prodData.length + '</div>' +
+      '<input type="text" id="inc_prod_q" placeholder="Search product or category..." oninput="inc_renderProductList()" style="padding:8px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);min-width:220px">' +
+    '</div>' +
+    '<div class="card" style="margin-top:8px"><div class="tbl-wrap"><table>' +
+      '<thead><tr><th>Product Name</th><th>Category</th>' + (isAdmin ? '<th></th>' : '') + '</tr></thead>' +
+      '<tbody id="inc_prod_body"></tbody></table></div></div>';
+  inc_renderProductList();
+}
+
+function inc_renderProductList() {
+  const body = document.getElementById('inc_prod_body');
+  if (!body) return;
+  const q = (document.getElementById('inc_prod_q')?.value || '').toLowerCase().trim();
+  const isAdmin = currentUser.role === 'admin';
+  const list = inc_prodData.filter(p => !q || p.productName.toLowerCase().includes(q) || p.category.toLowerCase().includes(q));
+  const shown = list.slice(0, 200);
+  body.innerHTML = shown.map(function(p) {
+    return '<tr><td>' + esc(p.productName) + '</td><td>' + esc(p.category) + '</td>' +
+      (isAdmin ? '<td><button class="btn btn-danger btn-sm" onclick="inc_deleteProductName(\'' + esc(p.id) + '\')">Remove</button></td>' : '') + '</tr>';
+  }).join('') || '<tr><td colspan="3"><div class="no-data"><div class="no-data-text">No product names.</div></div></td></tr>';
+  if (list.length > shown.length) {
+    body.innerHTML += '<tr><td colspan="3" style="text-align:center;color:var(--text3);font-size:0.8rem">Showing first 200 of ' + list.length + '. Use search to narrow down.</td></tr>';
+  }
+}
+
+function inc_openCategoryModal(id) {
+  const c = id ? inc_catData.find(x => x.id === id) : null;
+  openModal(
+    '<div class="modal-title">' + (c ? 'Edit Category' : 'Add Category') + '</div>' +
+    '<div class="field"><label for="cat_name">Category name</label>' +
+      '<input id="cat_name" maxlength="60" placeholder="e.g. Washing Machine" value="' + esc(c ? c.category : '') + '"></div>' +
+    '<div class="field" style="margin-top:10px"><label for="cat_amount">Incentive amount per unit (&#8369;) &mdash; all branches</label>' +
+      '<input id="cat_amount" type="number" min="0" step="0.01" placeholder="e.g. 50" value="' + (c ? c.amount : '') + '"></div>' +
+    '<div class="field" style="margin-top:10px"><label for="cat_status">Status</label>' +
+      '<select id="cat_status"><option value="Active"' + (c && String(c.status).toLowerCase()==='inactive' ? '' : ' selected') + '>Active</option>' +
+      '<option value="Inactive"' + (c && String(c.status).toLowerCase()==='inactive' ? ' selected' : '') + '>Inactive (hidden from agents)</option></select></div>' +
+    '<button class="btn btn-primary" style="width:100%;margin-top:14px" onclick="inc_saveCategory(' + (c ? '\'' + esc(c.id) + '\'' : 'null') + ')">Save</button>'
+  );
+}
+
+async function inc_saveCategory(id) {
+  const category = document.getElementById('cat_name')?.value.trim();
+  const amount   = parseFloat(document.getElementById('cat_amount')?.value);
+  const status   = document.getElementById('cat_status')?.value || 'Active';
+  if (!category)                    { toast('Enter the category name.', 'error'); return; }
+  if (!amount || amount <= 0)       { toast('Enter an amount greater than 0.', 'error'); return; }
+  try {
+    const res = await gasPost({ action: 'inc_saveCategory', id: id || '', category, amount, status });
+    if (res.success) { toast('Category saved.', 'success'); closeModalDirect(); inc_loadCatalog(); }
+    else toast(res.message || 'Error saving.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function inc_deleteCategory(id) {
+  const c = inc_catData.find(x => x.id === id);
+  if (!confirm('Delete category "' + (c ? c.category : '') + '" and its product names? Existing claims are not affected.')) return;
+  try {
+    const res = await gasPost({ action: 'inc_deleteCategory', id });
+    if (res.success) { toast('Category deleted.', 'success'); inc_loadCatalog(); }
+    else toast(res.message || 'Error.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+async function inc_deleteProductName(id) {
+  try {
+    const res = await gasPost({ action: 'inc_deleteProduct', id });
+    if (res.success) { inc_prodData = inc_prodData.filter(p => p.id !== id); inc_renderProductList(); }
+    else toast(res.message || 'Error.', 'error');
+  } catch(e) { toast('Network error.', 'error'); }
+}
+
+function inc_downloadCatalogTemplate() {
+  const csv = 'Product Name,Category,Amount\n' +
+    'Washing Machine 7kg,Washing,50\n' +
+    'Washing Machine 9kg,Washing,50\n' +
+    'Refrigerator 2 Door,Refrigerator,100\n' +
+    'Electric Fan Stand,Fan,20\n';
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'AEHome_Incentive_Template.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Template downloaded!', 'success');
+}
+
+async function inc_handleCatalogUpload(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  try {
+    const buf = await file.arrayBuffer();
+    const wb  = XLSX.read(buf, { type: 'array' });
+    const raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+    input.value = '';
+    if (!raw.length) { toast('No data found in file.', 'error'); return; }
+    const rows = raw.map(function(r) {
+      const keys = Object.keys(r);
+      const get = names => { for (const n of names) { const k = keys.find(k2 => k2.trim().toLowerCase() === n); if (k !== undefined) return String(r[k] == null ? '' : r[k]).trim(); } return ''; };
+      return {
+        product:  get(['product name','product','name','item','item name','description']),
+        category: get(['category','cat']),
+        amount:   parseFloat(String(get(['amount','incentive','incentive amount','price'])).replace(/[^0-9.]/g, '')) || 0,
+      };
+    }).filter(r => r.category);
+    if (!rows.length) { toast('No valid rows. File needs "Category" and "Amount" columns (and optional "Product Name").', 'error'); return; }
+    inc_catImportRows = rows;
+    inc_showCatalogPreview();
+  } catch(e) { toast('File read error: ' + e.message, 'error'); }
+}
+
+function inc_showCatalogPreview() {
+  const rows = inc_catImportRows;
+  // work out the amount per category and flag conflicts / missing amounts
+  const cats = {};
+  rows.forEach(function(r) {
+    const k = r.category.toLowerCase();
+    if (!cats[k]) cats[k] = { name: r.category, amounts: {}, count: 0 };
+    cats[k].count++;
+    if (r.amount > 0) cats[k].amounts[r.amount] = true;
+  });
+  const existing = {};
+  inc_catData.forEach(c => { existing[c.category.toLowerCase()] = c; });
+  let warn = 0;
+  const lines = Object.keys(cats).map(function(k) {
+    const c = cats[k];
+    const amts = Object.keys(c.amounts);
+    const ex = existing[k];
+    let note = '', amtTxt;
+    if (amts.length === 0)      { amtTxt = ex ? '<span style="color:var(--text3)">keeps &#8369;' + ex.amount.toFixed(2) + '</span>' : '<span class="text-red">no amount</span>'; if (!ex) { warn++; note = 'Will be skipped (new category without amount)'; } }
+    else if (amts.length > 1)   { amtTxt = '&#8369;' + parseFloat(amts[amts.length - 1]).toFixed(2); warn++; note = 'Different amounts in file (' + amts.map(a => '&#8369;' + a).join(', ') + '). The last one is used.'; }
+    else                        { amtTxt = '&#8369;' + parseFloat(amts[0]).toFixed(2); }
+    return '<tr><td><b>' + esc(c.name) + '</b></td><td>' + amtTxt + '</td><td style="text-align:center">' + c.count + '</td>' +
+           '<td>' + (ex ? '<span class="badge-low">Update</span>' : '<span class="badge-in-stock">New</span>') + '</td>' +
+           '<td style="font-size:0.75rem;color:var(--amber,#d97706)">' + note + '</td></tr>';
+  }).join('');
+  openModal(
+    '<div class="modal-title">Review Upload</div>' +
+    '<div style="font-size:0.82rem;color:var(--text2);margin-bottom:10px">' + rows.length + ' row(s), ' + Object.keys(cats).length + ' categor' + (Object.keys(cats).length === 1 ? 'y' : 'ies') +
+      (warn ? ' &mdash; <b style="color:var(--amber,#d97706)">' + warn + ' warning(s)</b>' : '') + '</div>' +
+    '<div class="tbl-wrap" style="max-height:300px;overflow:auto"><table><thead><tr><th>Category</th><th>Amount</th><th>Rows</th><th></th><th></th></tr></thead><tbody>' + lines + '</tbody></table></div>' +
+    '<button class="btn btn-primary" id="inc_cat_confirm" style="width:100%;margin-top:14px" onclick="inc_confirmCatalogImport()">Confirm Upload</button>'
+  );
+}
+
+async function inc_confirmCatalogImport() {
+  const btn = document.getElementById('inc_cat_confirm');
+  if (btn) { btn.disabled = true; btn.textContent = 'Uploading...'; }
+  try {
+    const res = await gasPost({ action: 'inc_importCatalog', rows: JSON.stringify(inc_catImportRows) }, 90000);
+    if (res.success) {
+      toast('Done! ' + res.addedCategories + ' new, ' + res.updatedCategories + ' updated categories, ' + res.addedProducts + ' product name(s) added.', 'success');
+      closeModalDirect(); inc_loadCatalog();
+    } else {
+      toast(res.message || 'Upload failed.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Confirm Upload'; }
+    }
+  } catch(e) {
+    toast('Network error.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Confirm Upload'; }
   }
 }
 
@@ -5591,7 +5806,7 @@ function inc_setSaleType(type) {
 }
 
 async function inc_openClaimModal() {
-  inc_claimState = { invoiceNo:'', saleType:'retail', items:[{ description:'', category:'', qty:1 }], cats:[], orTaken:false, orTimer:null };
+  inc_claimState = { invoiceNo:'', saleType:'retail', items:[{ description:'', category:'', qty:1 }], cats:[], prods:[], orTaken:false, orTimer:null };
   openModal(
     '<div class="modal-title">Add Incentive Claim</div>' +
 
@@ -5609,6 +5824,7 @@ async function inc_openClaimModal() {
     '</div>' +
 
     '<div style="font-size:0.78rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin:14px 0 6px">Items sold under this OR</div>' +
+    '<datalist id="inc_prodlist"></datalist>' +
     '<div id="inc_items"></div>' +
     '<button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="inc_addItemRow()">+ Add another item</button>' +
 
@@ -5621,9 +5837,12 @@ async function inc_openClaimModal() {
   try {
     const res = await gasRequest({ action: 'inc_getClaimCategories' });
     if (res.success) {
-      inc_claimState.cats = res.data || [];
+      inc_claimState.cats  = res.data || [];
+      inc_claimState.prods = res.products || [];
+      const dl = document.getElementById('inc_prodlist');
+      if (dl) dl.innerHTML = inc_claimState.prods.slice(0, 3000).map(p => '<option value="' + esc(p.productName) + '"></option>').join('');
       if (!inc_claimState.cats.length) {
-        inc_showValbox('warn', 'No incentive categories have an amount set for ' + esc(res.branch || 'your branch') + ' yet. Ask your Admin to set the amounts.');
+        inc_showValbox('warn', 'No incentive categories are set up yet. Ask your Admin to add categories and amounts.');
       }
       inc_renderItems();
       inc_refreshTotals();
@@ -5651,10 +5870,10 @@ function inc_renderItems() {
           ? '<button type="button" class="btn btn-ghost btn-sm" onclick="inc_removeItemRow(' + i + ')">Remove</button>' : '') +
       '</div>' +
       '<div class="field"><label>Item name</label>' +
-        '<input type="text" maxlength="120" placeholder="Type the item sold" value="' + esc(it.description) + '" oninput="inc_itemChanged(' + i + ',\'description\',this.value)" autocomplete="off"></div>' +
+        '<input type="text" list="inc_prodlist" maxlength="120" placeholder="Type the item sold" value="' + esc(it.description) + '" oninput="inc_itemChanged(' + i + ',\'description\',this.value)" autocomplete="off"></div>' +
       '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">' +
         '<div class="field" style="flex:2;min-width:150px"><label>Category</label>' +
-          '<select onchange="inc_itemChanged(' + i + ',\'category\',this.value)">' + opts + '</select></div>' +
+          '<select id="inc_catsel_' + i + '" onchange="inc_itemChanged(' + i + ',\'category\',this.value)">' + opts + '</select></div>' +
         '<div class="field" style="flex:1;min-width:80px"><label>Qty</label>' +
           '<input type="number" min="1" max="1000" value="' + (parseInt(it.qty) || 1) + '" oninput="inc_itemChanged(' + i + ',\'qty\',this.value)"></div>' +
       '</div>' +
@@ -5681,6 +5900,15 @@ function inc_itemChanged(i, field, val) {
   const it = inc_claimState.items[i];
   if (!it) return;
   it[field] = (field === 'qty') ? (Math.max(1, parseInt(val) || 1)) : val;
+  // typed name matches a known product -> pick its category (agent can still change it)
+  if (field === 'description' && !it.category) {
+    const hit = (inc_claimState.prods || []).find(p => p.productName.toLowerCase() === String(val).trim().toLowerCase());
+    if (hit && (inc_claimState.cats || []).some(c => c.category === hit.category)) {
+      it.category = hit.category;
+      const sel = document.getElementById('inc_catsel_' + i);
+      if (sel) sel.value = hit.category;
+    }
+  }
   inc_refreshTotals();   // only updates text below the inputs, never re-renders them (keeps focus)
 }
 
