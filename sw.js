@@ -1,4 +1,4 @@
-const CACHE = 'ae-pos-v1';
+const CACHE = 'ae-pos-v2';
 const ASSETS = ['/', '/index.html', '/style.css', '/app.js', '/manifest.json', '/icon-192.png', '/icon-512.png', '/favicon.ico'];
 
 self.addEventListener('install', e => {
