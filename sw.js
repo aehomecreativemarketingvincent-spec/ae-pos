@@ -1,4 +1,4 @@
-const CACHE = 'ae-pos-v2';
+const CACHE = 'ae-pos-v3';
 const ASSETS = ['/', '/index.html', '/style.css', '/app.js', '/manifest.json', '/icon-192.png', '/icon-512.png', '/favicon.ico'];
 
 self.addEventListener('install', e => {
@@ -14,8 +14,24 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  if (e.request.url.includes('script.google.com')) return; // don't cache GAS
+  const req = e.request;
+  if (req.method !== 'GET') return;                       // only handle GET
+  if (req.url.includes('script.google.com')) return;      // don't cache GAS
+  if (!req.url.startsWith('http')) return;                // ignore chrome-extension:// etc.
   e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request))
+    fetch(req).then(res => {
+      // keep a fresh copy of same-origin files for offline use
+      if (res && res.ok && new URL(req.url).origin === self.location.origin) {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
+      }
+      return res;
+    }).catch(() =>
+      caches.match(req).then(hit =>
+        hit ||
+        (req.mode === 'navigate' ? caches.match('/index.html') : null) ||
+        new Response('', { status: 503, statusText: 'Offline' })   // always a valid Response
+      )
+    )
   );
 });
