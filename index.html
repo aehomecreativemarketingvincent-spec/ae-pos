@@ -13,7 +13,7 @@
 <link rel="icon" href="favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=2">
+<link rel="stylesheet" href="style.css?v=3">
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 </head>
 <body>
@@ -37,8 +37,53 @@
       </div>
       <button class="btn-login" onclick="doLogin()">Sign In</button>
       <button class="btn-viewer" onclick="enterViewerMode()">Continue as Viewer</button>
+      <button type="button" class="btn-link" onclick="showRegisterPanel()">Sales Agent? Create an account</button>
     </div>
     <div id="loginError" class="login-error hidden"></div>
+  </div>
+
+  <!-- SALES AGENT SELF-REGISTRATION -->
+  <div id="registerPanel" class="login-card" style="display:none">
+    <div class="login-logo">
+      <div class="login-logo-text">AE HOME</div>
+      <p>Sales Agent Sign Up</p>
+    </div>
+    <div class="login-form">
+      <div class="form-group">
+        <label for="regName">Full Name</label>
+        <input type="text" id="regName" placeholder="Your full name" autocomplete="off" maxlength="60">
+      </div>
+      <div class="form-group">
+        <label for="regUser">Username</label>
+        <input type="text" id="regUser" placeholder="Letters, numbers, . or _" autocomplete="off" maxlength="30">
+      </div>
+      <div class="form-group">
+        <label for="regBranch">Branch</label>
+        <select id="regBranch">
+          <option value="">Select your branch</option>
+          <option value="Vigan">Vigan</option>
+          <option value="SDO">SDO</option>
+          <option value="San Juan">San Juan</option>
+          <option value="Cabugao1">Cabugao 1</option>
+          <option value="Cabugao2">Cabugao 2</option>
+          <option value="Laoag">Laoag</option>
+          <option value="Candon">Candon</option>
+          <option value="Tagudin">Tagudin</option>
+          <option value="Elyu">Elyu</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="regPass">Password</label>
+        <input type="password" id="regPass" placeholder="At least 6 characters" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label for="regPass2">Confirm Password</label>
+        <input type="password" id="regPass2" placeholder="Re-enter password" autocomplete="new-password">
+      </div>
+      <button class="btn-login" onclick="doRegister()">Create Account</button>
+      <button type="button" class="btn-link" onclick="showLoginPanel()">Back to Sign In</button>
+    </div>
+    <div id="regMsg" style="margin-top:10px;font-size:0.82rem;text-align:center;min-height:18px"></div>
   </div>
 </div>
 
@@ -141,6 +186,6 @@
   </div>
 </div>
 
-<script src="app.js?v=3"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
