@@ -84,6 +84,9 @@ const ROLE_NAV = {
   agent: [
     { id: 'incentives', icon: '', label: 'Incentives' },
   ],
+  verifier: [
+    { id: 'incentives', icon: '', label: 'Incentives' },
+  ],
   viewer: [
     { id: 'dashboard', icon: '', label: 'Dashboard' },
     { id: 'receipts',  icon: '', label: 'Receipts' },
@@ -529,7 +532,7 @@ function initApp() {
   buildNav(role);
 
   // Default page
-  const defaultPages = { admin: 'dashboard', cashier: 'pos', clerk: 'inventory', viewer: 'dashboard', agent: 'incentives' };
+  const defaultPages = { admin: 'dashboard', cashier: 'pos', clerk: 'inventory', viewer: 'dashboard', agent: 'incentives', verifier: 'incentives' };
   navigateTo(defaultPages[role] || 'dashboard');
 }
 
@@ -619,7 +622,25 @@ function handleAuthError(res) {
 }
 
 // ─── GAS REQUEST ─────────────────────────────
+// Read-only actions are safe to retry automatically when the server is busy / the network blips.
+// Writes (gasPost) are never auto-retried, to avoid saving twice.
+const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|checkSession$|loginViewer$)/;
 async function gasRequest(params, timeoutMs = 30000) {
+  const canRetry = GAS_READ_RE.test(String((params && params.action) || ''));
+  let lastErr;
+  for (let attempt = 0; attempt < (canRetry ? 3 : 1); attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 700 * attempt));
+    try {
+      return await gasRequestOnce(params, timeoutMs);
+    } catch (e) {
+      lastErr = e;
+      if (!canRetry || (e && /timed out/i.test(e.message || ''))) break;   // timeouts are not retried
+    }
+  }
+  throw lastErr;
+}
+
+async function gasRequestOnce(params, timeoutMs) {
   const ctrl  = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -665,7 +686,11 @@ async function gasPost(payload, timeoutMs = 45000) {
     if (!text || !text.trim()) return { success: true };
     let out;
     try { out = JSON.parse(text); }
-    catch (e) { return { success: true }; }
+    catch (e) {
+      // Google returns an HTML page when it is overloaded: that is NOT a successful save
+      if (/^\s*</.test(text)) return { success: false, message: 'Server is busy right now. Please wait a few seconds and try again.' };
+      return { success: true };
+    }
     return handleAuthError(out);
   } catch (e) {
     clearTimeout(timer);
@@ -3026,6 +3051,7 @@ function openAddCashierModal() {
           <option value="cashier">Cashier</option>
           <option value="clerk">Inventory Clerk</option>
           <option value="agent">Sales Agent (Incentives only)</option>
+          <option value="verifier">Incentive Verifier (Verify/Reject only)</option>
           <option value="admin">Admin</option>
         </select>
       </div></div>
@@ -3056,6 +3082,7 @@ function openEditCashierModal(id) {
             <option value="cashier" ${c.role==='cashier'?'selected':''}>Cashier</option>
             <option value="clerk" ${c.role==='clerk'?'selected':''}>Inventory Clerk</option>
             <option value="agent" ${c.role==='agent'?'selected':''}>Sales Agent (Incentives only)</option>
+            <option value="verifier" ${c.role==='verifier'?'selected':''}>Incentive Verifier (Verify/Reject only)</option>
             <option value="admin" ${c.role==='admin'?'selected':''}>Admin</option>
           </select>
         </div>
@@ -4703,7 +4730,7 @@ let inc_rejectId    = null;
 // ── MAIN PAGE ROUTER ──────────────────────────────────────
 async function inc_renderPage() {
   const role = currentUser.role;
-  if (role === 'admin' || role === 'clerk') {
+  if (role === 'admin' || role === 'clerk' || role === 'verifier') {
     await inc_renderAdminPage();
   } else {
     await inc_renderAgentPage();
@@ -4721,7 +4748,7 @@ async function inc_renderAdminPage() {
       '<button class="tab-btn active" onclick="inc_showTab(\'daily\',this)">Daily Report</button>' +
       '<button class="tab-btn" onclick="inc_showTab(\'all\',this)">All Claims</button>' +
       '<button class="tab-btn" onclick="inc_showTab(\'orcheck\',this)">OR Check</button>' +
-      '<button class="tab-btn" onclick="inc_showTab(\'catalog\',this)">Categories &amp; Amounts</button>' +
+      (currentUser.role === 'verifier' ? '' : '<button class="tab-btn" onclick="inc_showTab(\'catalog\',this)">Categories &amp; Amounts</button>') +
     '</div>' +
     '<div id="incContent"></div>';
   inc_showTab('daily', document.querySelector('#incTabBar .tab-btn'));
@@ -5100,6 +5127,7 @@ function inc_groupedRowsHtml(claims) {
   }).join('') || '<tr><td colspan="9"><div class="no-data"><div class="no-data-text">No claims match these filters.</div></div></td></tr>';
 }
 
+let _incCatCache = null;   // short-lived copy of the category list for the claim form
 async function inc_loadAllClaims() {
   const el = document.getElementById('incContent');
   if (!el) return;
@@ -6332,7 +6360,12 @@ async function inc_openClaimModal() {
   inc_renderItems();
   inc_refreshTotals();
   try {
-    const res = await gasRequest({ action: 'inc_getClaimCategories' });
+    let res;
+    if (_incCatCache && Date.now() - _incCatCache.t < 300000 && _incCatCache.uid === (currentUser && currentUser.id)) res = _incCatCache.res;
+    else {
+      res = await gasRequest({ action: 'inc_getClaimCategories' });
+      if (res && res.success) _incCatCache = { t: Date.now(), res: res, uid: currentUser && currentUser.id };
+    }
     if (res.success) {
       inc_checkApiVersion(res);
       inc_claimState.cats  = res.data || [];
@@ -6693,7 +6726,7 @@ function inc_actionBtns(c) {
       ? '<span style="font-size:0.73rem;color:var(--red,#ef4444)">' + esc(c.rejectionReason||'') + '</span>'
       : '';
   }
-  if (role === 'admin' || role === 'manager' || role === 'clerk') {
+  if (role === 'admin' || role === 'manager' || role === 'clerk' || role === 'verifier') {
     return '<div style="display:flex;gap:5px">' +
       '<button class="inv-btn inv-btn-in" onclick="inc_verifyClaim(\'' + esc(c.id) + '\', this)">Verify</button>' +
       '<button class="inv-btn inv-btn-del" onclick="inc_openRejectModal(\'' + esc(c.id) + '\', this)">Reject</button>' +
