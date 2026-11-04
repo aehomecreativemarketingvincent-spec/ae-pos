@@ -4675,6 +4675,17 @@ function inc_similarity(a, b) {
 }
 
 // per item (normalised name) totals for the lines already claimed under the OR being typed
+const INC_API_VERSION_NEEDED = 5;
+// The GAS script must be the latest one. If not, claims would not see other agents' items.
+function inc_checkApiVersion(res) {
+  if ((parseInt(res && res.apiVersion) || 0) >= INC_API_VERSION_NEEDED) return true;
+  inc_claimState.apiOutdated = true;
+  inc_showValbox('error', '<b>The server script (Code.gs) is outdated.</b> Claims cannot be checked against other agents. Ask your Admin to deploy the latest Code.gs (Deploy &gt; Manage deployments &gt; Edit &gt; New version).');
+  const btn = document.getElementById('inc_submit_btn');
+  if (btn) btn.disabled = true;
+  return false;
+}
+
 function inc_orAggregate() {
   const agg = {};
   (inc_claimState.orItems || []).forEach(function(x) {
@@ -4709,6 +4720,7 @@ async function inc_renderAdminPage() {
     '<div id="incTabBar" class="tab-bar" style="margin-bottom:16px">' +
       '<button class="tab-btn active" onclick="inc_showTab(\'daily\',this)">Daily Report</button>' +
       '<button class="tab-btn" onclick="inc_showTab(\'all\',this)">All Claims</button>' +
+      '<button class="tab-btn" onclick="inc_showTab(\'orcheck\',this)">OR Check</button>' +
       '<button class="tab-btn" onclick="inc_showTab(\'catalog\',this)">Categories &amp; Amounts</button>' +
     '</div>' +
     '<div id="incContent"></div>';
@@ -4720,7 +4732,9 @@ function inc_showTab(tab, btn) {
   if (tabBar) tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
   if (tab === 'daily')      inc_loadDailyReport();
+  inc_view = tab;
   if (tab === 'all')        inc_loadAllClaims();
+  if (tab === 'orcheck')    inc_loadOrCheck();
   if (tab === 'catalog')    inc_loadCatalog();
   if (tab === 'master')     inc_loadMasterList();
   if (tab === 'setamounts') inc_renderSetAmounts();
@@ -5032,6 +5046,7 @@ let inc_allFilter = { from: '', to: '', category: '', status: '' };
 let inc_allClaimsCache = [];
 let inc_allCatNames = [];
 let inc_allGroup = false;   // group claims by OR number
+let inc_view = 'daily';     // which admin tab is open
 
 function inc_toggleGroup() { inc_allGroup = !inc_allGroup; inc_renderAllClaims(); }
 
@@ -5243,6 +5258,211 @@ function inc_exportFilteredClaims() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Claims');
   XLSX.writeFile(wb, 'IncentiveClaims_' + (f.from || 'all') + '_to_' + (f.to || 'latest') + '.xlsx');
+  toast('Excel downloaded!', 'success');
+}
+
+// ══════════════════════════════════════════════════════════
+// OR CHECK — one card per OR: who claimed what, how many agents, flags
+// ══════════════════════════════════════════════════════════
+let inc_orFilter = { q: '', from: '', to: '', status: '', flagged: false, multi: false };
+
+async function inc_loadOrCheck() {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+  try {
+    const res = await gasRequest({ action:'inc_getClaims' });
+    inc_allClaimsCache = res.data || [];
+    inc_renderOrCheck();
+  } catch(e) { toast('Error loading claims.', 'error'); }
+}
+
+function inc_orSet(field, val) { inc_orFilter[field] = val; inc_renderOrCheck(); }
+
+// build the OR groups (after filters) with their flags and counts
+function inc_buildOrGroups() {
+  const f = inc_orFilter;
+  const q = f.q.toLowerCase().trim();
+  const groups = {}, order = [];
+  inc_filterByBranch(inc_allClaimsCache).forEach(function(c) {
+    const day = inc_claimDay(c);
+    if (f.from && day < f.from) return;
+    if (f.to   && day > f.to)   return;
+    const k = inc_normOR(c.invoiceNo);
+    if (!groups[k]) { groups[k] = { key: k, or: c.invoiceNo, lines: [] }; order.push(k); }
+    groups[k].lines.push(c);
+  });
+  let list = order.map(function(k) {
+    const g = groups[k];
+    g.lines.sort((a, b) => String(a.claimDate).localeCompare(String(b.claimDate)));
+    const live = g.lines.filter(c => String(c.status).toLowerCase() !== 'rejected');
+    g.live = live;
+    g.agents = Array.from(new Set(live.map(c => c.employeeName)));
+    g.pcs    = live.reduce((t, c) => t + (parseInt(c.qty) || 1), 0);
+    g.total  = live.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+    g.pending = g.lines.filter(c => String(c.status).toLowerCase() === 'pending');
+    g.firstDate = g.lines[0] ? g.lines[0].claimDate : '';
+    // flags
+    g.flags = [];
+    const byItem = {};
+    live.forEach(function(c) {
+      const n = inc_normItem(c.description);
+      const e = byItem[n] || (byItem[n] = { name: c.description, claimed: 0, total: 0, cats: {} });
+      e.claimed += parseInt(c.qty) || 1; e.total = Math.max(e.total, parseInt(c.qtyOnOR) || 0); e.cats[c.category || ''] = true;
+    });
+    const over = [], unclaimed = [], catDiff = [];
+    Object.keys(byItem).forEach(function(n) {
+      const e = byItem[n];
+      if (e.total && e.claimed > e.total) over.push(e.name + ' (' + e.claimed + ' of ' + e.total + ')');
+      else if (e.total && e.claimed < e.total) unclaimed.push(e.name + ' (' + (e.total - e.claimed) + ' pc not claimed)');
+      if (Object.keys(e.cats).length > 1) catDiff.push(e.name);
+    });
+    g.dupIds = {};
+    for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
+      const a = live[i], b = live[j];
+      if (a.employeeName === b.employeeName) continue;
+      if (inc_normItem(a.description) !== inc_normItem(b.description) && inc_similarity(a.description, b.description) >= 0.8) { g.dupIds[a.id] = true; g.dupIds[b.id] = true; }
+    }
+    if (Object.keys(g.dupIds).length) g.flags.push({ t: 'Possible duplicate', c: 'warn' });
+    if (over.length)      g.flags.push({ t: 'Over-claimed: ' + over.join(', '), c: 'bad' });
+    if (catDiff.length)   g.flags.push({ t: 'Different categories for: ' + catDiff.join(', '), c: 'warn' });
+    if (unclaimed.length) g.flags.push({ t: 'Not fully claimed: ' + unclaimed.join(', '), c: 'info' });
+    g.hasProblem = g.flags.some(x => x.c !== 'info');
+    return g;
+  });
+  list = list.filter(function(g) {
+    if (f.status && !g.lines.some(c => String(c.status).toLowerCase() === f.status.toLowerCase())) return false;
+    if (f.multi && g.agents.length < 2) return false;
+    if (f.flagged && !g.hasProblem) return false;
+    if (q) {
+      const hay = (g.or + ' ' + g.lines.map(c => c.employeeName + ' ' + c.description + ' ' + c.category).join(' ')).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  list.sort((a, b) => String(b.firstDate).localeCompare(String(a.firstDate)));
+  return list;
+}
+
+function inc_renderOrCheck() {
+  const el = document.getElementById('incContent');
+  if (!el) return;
+  const keepY = window.scrollY, pc = document.getElementById('pageContent'), keepPc = pc ? pc.scrollTop : 0;
+  const f = inc_orFilter;
+  const groups = inc_buildOrGroups();
+  const inStyle = 'padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:var(--font-main);background:#fff';
+  const stOpts = ['', 'Pending', 'Verified', 'Rejected'].map(v => '<option value="' + v + '"' + (v === f.status ? ' selected' : '') + '>' + (v || 'All Status') + '</option>').join('');
+  const flagStyle = { warn: 'background:#fffbeb;color:#92400e', bad: 'background:#fee2e2;color:#991b1b', info: 'background:#e0f2fe;color:#075985' };
+
+  const multiCount = groups.filter(g => g.agents.length > 1).length;
+  const probCount  = groups.filter(g => g.hasProblem).length;
+  const pendCount  = groups.reduce((t, g) => t + g.pending.length, 0);
+
+  const cards = groups.map(function(g) {
+    const flags = g.flags.map(x => '<span style="' + flagStyle[x.c] + ';padding:2px 9px;border-radius:20px;font-size:0.72rem;font-weight:700;margin-right:6px;display:inline-block;margin-top:4px">' + (x.c === 'bad' || x.c === 'warn' ? '&#9888; ' : '') + esc(x.t) + '</span>').join('');
+    const rows = g.lines.map(function(c) {
+      const rej = String(c.status).toLowerCase() === 'rejected';
+      const q = parseInt(c.qty) || 1, oq = parseInt(c.qtyOnOR) || q;
+      return '<tr' + (rej ? ' style="opacity:.55"' : '') + '>' +
+        '<td><b>' + esc(c.employeeName) + '</b></td>' +
+        '<td>' + esc(inc_branchDisp(c.branch)) + '</td>' +
+        '<td>' + esc(c.description) + (c.category ? '<div style="font-size:0.72rem;color:var(--text3)">' + esc(c.category) + '</div>' : '') +
+          (g.dupIds[c.id] ? '<div style="font-size:0.72rem;color:var(--amber,#d97706);font-weight:700">&#9888; Possible duplicate</div>' : '') + '</td>' +
+        '<td style="text-align:center">' + q + (oq > q ? '<div style="font-size:0.7rem;color:var(--text3)">of ' + oq + '</div>' : '') + '</td>' +
+        '<td class="fw-700">&#8369;' + parseFloat(c.totalIncentive || 0).toFixed(2) + '</td>' +
+        '<td>' + inc_statusBadge(c.status) + '</td>' +
+        '<td>' + inc_actionBtns(c) + '</td>' +
+      '</tr>';
+    }).join('');
+    const byAgent = g.agents.map(a => {
+      const mine = g.live.filter(c => c.employeeName === a);
+      return esc(a) + ' (' + mine.length + ' item' + (mine.length === 1 ? '' : 's') + ', &#8369;' + mine.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0).toFixed(2) + ')';
+    }).join(' &nbsp;&bull;&nbsp; ');
+    return '<div class="card" style="margin-bottom:14px;' + (g.hasProblem ? 'border:1.5px solid #fcd34d' : '') + '">' +
+      '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">' +
+        '<div>' +
+          '<div><b style="font-family:var(--font-mono);font-size:1rem">OR ' + esc(g.or) + '</b>' +
+            ' <span style="font-size:0.78rem;color:var(--text3)">' + safeFormatDateTime(g.firstDate) + '</span></div>' +
+          '<div style="font-size:0.82rem;margin-top:4px"><b>' + g.agents.length + '</b> agent(s) &bull; <b>' + g.live.length + '</b> item line(s) &bull; <b>' + g.pcs + '</b> pc &bull; <b class="text-green">&#8369;' + g.total.toFixed(2) + '</b></div>' +
+          '<div style="font-size:0.78rem;color:var(--text2);margin-top:3px">' + (byAgent || '<i>All lines rejected</i>') + '</div>' +
+          '<div>' + flags + '</div>' +
+        '</div>' +
+        (g.pending.length ? '<button class="btn btn-success btn-sm" onclick="inc_verifyAllInOr(\'' + esc(g.key) + '\', this)">Verify all pending (' + g.pending.length + ')</button>' : '<span style="font-size:0.78rem;color:var(--green,#059669);font-weight:700">&#10003; Nothing pending</span>') +
+      '</div>' +
+      '<div class="tbl-wrap"><table><thead><tr><th>Agent</th><th>Branch</th><th>Item</th><th>Qty</th><th>Incentive</th><th>Status</th><th>Action</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '</div>';
+  }).join('') || '<div class="no-data"><div class="no-data-text">No ORs match these filters.</div></div>';
+
+  el.innerHTML =
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">' +
+      '<input type="text" id="inc_or_q" placeholder="Search OR, agent or item..." value="' + esc(f.q) + '" oninput="inc_orSearchInput(this.value)" style="' + inStyle + ';min-width:230px">' +
+      '<label style="font-size:0.78rem;color:var(--text3)">From</label><input type="date" value="' + esc(f.from) + '" onchange="inc_orSet(\'from\', this.value)" style="' + inStyle + '">' +
+      '<label style="font-size:0.78rem;color:var(--text3)">To</label><input type="date" value="' + esc(f.to) + '" onchange="inc_orSet(\'to\', this.value)" style="' + inStyle + '">' +
+      inc_branchSelectHtml("inc_setBranchFilter(this.value, inc_renderOrCheck)") +
+      '<select onchange="inc_orSet(\'status\', this.value)" style="' + inStyle + '">' + stOpts + '</select>' +
+    '</div>' +
+    '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:12px;font-size:0.82rem">' +
+      '<label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox"' + (f.multi ? ' checked' : '') + ' onchange="inc_orSet(\'multi\', this.checked)"> Shared by 2+ agents</label>' +
+      '<label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox"' + (f.flagged ? ' checked' : '') + ' onchange="inc_orSet(\'flagged\', this.checked)"> With warnings only</label>' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_orReset()">Reset</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="inc_loadOrCheck()">&#8635; Refresh</button>' +
+      '<button class="btn btn-success btn-sm" onclick="inc_exportOrCheck()">Export Excel</button>' +
+    '</div>' +
+    '<div style="background:var(--text1,#111);color:white;border-radius:10px;padding:12px 20px;display:flex;gap:22px;flex-wrap:wrap;margin-bottom:14px;font-size:0.82rem">' +
+      '<span><b>' + groups.length + '</b> OR(s)</span><span><b>' + multiCount + '</b> shared by 2+ agents</span>' +
+      '<span><b>' + probCount + '</b> with warnings</span><span><b>' + pendCount + '</b> pending to verify</span>' +
+    '</div>' + cards;
+  window.scrollTo(0, keepY); if (pc) pc.scrollTop = keepPc;
+}
+
+let _orSearchTimer = null;
+function inc_orSearchInput(v) {
+  inc_orFilter.q = v;
+  clearTimeout(_orSearchTimer);
+  _orSearchTimer = setTimeout(function() {
+    inc_renderOrCheck();
+    const i = document.getElementById('inc_or_q');
+    if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+  }, 300);
+}
+
+function inc_orReset() { inc_orFilter = { q: '', from: '', to: '', status: '', flagged: false, multi: false }; inc_branchFilter = ''; inc_renderOrCheck(); }
+
+// verify every pending line of one OR (one call per line, same API as the single Verify button)
+async function inc_verifyAllInOr(key, btn) {
+  const g = inc_buildOrGroups().find(x => x.key === key);
+  if (!g || !g.pending.length) return;
+  if (!confirm('Verify ' + g.pending.length + ' pending item(s) under OR ' + g.or + '?')) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'Verifying...'; }
+  let done = 0, failed = 0;
+  for (const c of g.pending) {
+    try {
+      const res = await gasPost({ action:'inc_verifyClaim', id: c.id, verifiedBy: currentUser.name || currentUser.username });
+      if (res.success) { done++; const x = inc_allClaimsCache.find(z => z.id === c.id); if (x) x.status = 'Verified'; } else failed++;
+    } catch(e) { failed++; }
+  }
+  toast(done + ' verified' + (failed ? ', ' + failed + ' failed' : '') + '.', failed ? 'warning' : 'success');
+  inc_renderOrCheck();
+}
+
+function inc_exportOrCheck() {
+  const groups = inc_buildOrGroups();
+  if (!groups.length) { toast('No data to export.', 'warning'); return; }
+  const HEADER = ['OR No.','Date','Agent','Branch','Item','Category','Qty','Qty on OR','Incentive','Status','OR Agents','OR Warnings'];
+  const data = [];
+  groups.forEach(function(g) {
+    g.lines.forEach(function(c) {
+      data.push([g.or, safeFormatDateTime(c.claimDate), c.employeeName, inc_branchDisp(c.branch), c.description, c.category || '',
+        parseInt(c.qty || 1), parseInt(c.qtyOnOR) || parseInt(c.qty || 1), parseFloat(c.totalIncentive || 0), c.status,
+        g.agents.length, g.flags.filter(x => x.c !== 'info').map(x => x.t).join(' | ')]);
+    });
+  });
+  const f = inc_orFilter;
+  const sheet = [['AE HOME POS — OR Check'], ['Period:', (f.from || 'start') + ' to ' + (f.to || 'latest')], ['Branch:', inc_branchFilter ? inc_branchDisp(inc_branchFilter) : 'All Branches'], [], HEADER, ...data];
+  const ws = XLSX.utils.aoa_to_sheet(sheet);
+  ws['!cols'] = [{wch:16},{wch:20},{wch:22},{wch:12},{wch:30},{wch:16},{wch:6},{wch:10},{wch:12},{wch:10},{wch:10},{wch:40}];
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'OR Check');
+  XLSX.writeFile(wb, 'IncentiveORCheck_' + (f.from || 'all') + '_to_' + (f.to || 'latest') + '.xlsx');
   toast('Excel downloaded!', 'success');
 }
 
@@ -6111,6 +6331,7 @@ async function inc_openClaimModal() {
   try {
     const res = await gasRequest({ action: 'inc_getClaimCategories' });
     if (res.success) {
+      inc_checkApiVersion(res);
       inc_claimState.cats  = res.data || [];
       inc_claimState.prods = res.products || [];
       const dl = document.getElementById('inc_prodlist');
@@ -6211,6 +6432,7 @@ async function inc_checkOR() {
     if (orNo !== inc_claimState.invoiceNo) return;   // user kept typing
     const msg = document.getElementById('inc_or_msg');
     if (!res.success) return;
+    if (!inc_checkApiVersion(res)) return;
     inc_claimState.orItems = res.items || [];
     if (msg) {
       if (inc_claimState.orItems.length) {
@@ -6290,7 +6512,7 @@ function inc_refreshTotals() {
       '</table>';
   }
   const btn = document.getElementById('inc_submit_btn');
-  if (btn) btn.disabled = !(ready && inc_claimState.invoiceNo && !inc_claimState.orTaken);
+  if (btn) btn.disabled = !(ready && inc_claimState.invoiceNo && !inc_claimState.orTaken && !inc_claimState.apiOutdated);
 }
 
 function inc_showValbox(type, msg) {
@@ -6342,16 +6564,41 @@ async function inc_submitClaim() {
 }
 
 // ── VERIFY / REJECT ───────────────────────────────────────
-async function inc_verifyClaim(id) {
-  try {
-    const res = await gasPost({ action:'inc_verifyClaim', id, verifiedBy: currentUser.name || currentUser.username });
-    if (res.success) { toast('Claim verified.','success'); navigateTo('incentives'); }
-    else toast(res.message || 'Error verifying.','error');
-  } catch(e) { toast('Network error.','error'); }
+// Update one claim row in place (status badge + action cell) so the admin stays where they are:
+// same tab, same filters, same scroll position. No page reload.
+function inc_updateClaimRow(btn, id, status, reason) {
+  const c = (inc_allClaimsCache || []).find(x => x.id === id);
+  if (c) { c.status = status; if (reason !== undefined) c.rejectionReason = reason; }
+  if (inc_view === 'orcheck') { inc_renderOrCheck(); return; }   // cards recount themselves
+  const actionTd = btn && btn.closest ? btn.closest('td') : null;
+  const statusTd = actionTd ? actionTd.previousElementSibling : null;
+  if (statusTd) statusTd.innerHTML = inc_statusBadge(status);
+  if (actionTd) actionTd.innerHTML = status === 'Rejected'
+    ? '<span style="font-size:0.73rem;color:var(--red,#ef4444)">' + esc(reason || '') + '</span>' : '';
 }
 
-function inc_openRejectModal(id) {
+async function inc_verifyClaim(id, btn) {
+  if (btn) { if (btn.disabled) return; btn.disabled = true; btn.textContent = 'Verifying...'; }
+  try {
+    const res = await gasPost({ action:'inc_verifyClaim', id, verifiedBy: currentUser.name || currentUser.username });
+    if (res.success) {
+      toast('Claim verified.','success');
+      if (btn && btn.isConnected) inc_updateClaimRow(btn, id, 'Verified');
+      else navigateTo('incentives');
+    } else {
+      toast(res.message || 'Error verifying.','error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Verify'; }
+    }
+  } catch(e) {
+    toast('Network error.','error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Verify'; }
+  }
+}
+
+let inc_rejectBtn = null;
+function inc_openRejectModal(id, btn) {
   inc_rejectId = id;
+  inc_rejectBtn = btn || null;
   openModal(
     '<div class="modal-title">Reject Claim</div>' +
     '<p style="font-size:0.85rem;color:var(--text2);margin-bottom:14px">Please provide a reason for rejection. This will be recorded and visible to the employee.</p>' +
@@ -6373,7 +6620,11 @@ async function inc_confirmReject() {
       rejectionReason: reason,
       verifiedBy: currentUser.name || currentUser.username,
     });
-    if (res.success) { toast('Claim rejected.','success'); closeModalDirect(); navigateTo('incentives'); }
+    if (res.success) {
+      toast('Claim rejected.','success'); closeModalDirect();
+      if (inc_rejectBtn && inc_rejectBtn.isConnected) inc_updateClaimRow(inc_rejectBtn, inc_rejectId, 'Rejected', reason);
+      else navigateTo('incentives');
+    }
     else { toast(res.message || 'Error.','error'); if(btn){btn.disabled=false;btn.textContent='Confirm Reject';} }
   } catch(e) { toast('Network error.','error'); if(btn){btn.disabled=false;} }
 }
@@ -6441,8 +6692,8 @@ function inc_actionBtns(c) {
   }
   if (role === 'admin' || role === 'manager' || role === 'clerk') {
     return '<div style="display:flex;gap:5px">' +
-      '<button class="inv-btn inv-btn-in" onclick="inc_verifyClaim(\'' + esc(c.id) + '\')">Verify</button>' +
-      '<button class="inv-btn inv-btn-del" onclick="inc_openRejectModal(\'' + esc(c.id) + '\')">Reject</button>' +
+      '<button class="inv-btn inv-btn-in" onclick="inc_verifyClaim(\'' + esc(c.id) + '\', this)">Verify</button>' +
+      '<button class="inv-btn inv-btn-del" onclick="inc_openRejectModal(\'' + esc(c.id) + '\', this)">Reject</button>' +
     '</div>';
   }
   return '';
