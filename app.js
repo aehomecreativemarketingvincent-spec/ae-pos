@@ -4859,9 +4859,12 @@ function inc_setBranchFilter(val, reloadFn) {
 }
 
 // group (already filtered) claims into per-employee rows
+// Rejected claims are never paid, so they are left out of every total
+function inc_isLive(c) { return String(c.status || '').toLowerCase() !== 'rejected'; }
+
 function inc_summarize(claims) {
   const byEmp = {};
-  claims.forEach(function(c) {
+  claims.filter(inc_isLive).forEach(function(c) {
     const k = c.employeeId;
     if (!byEmp[k]) byEmp[k] = { employeeId: c.employeeId, employeeName: c.employeeName, branch: c.branch || '', total: 0, count: 0 };
     byEmp[k].total += parseFloat(c.totalIncentive || 0);
@@ -4890,7 +4893,7 @@ async function inc_loadDailyReport(dateVal) {
     if (!res.success) { toast(res.message || 'Error loading report.','error'); return; }
     const claims     = inc_filterByBranch(res.claims || []);
     const summary    = inc_summarize(claims);
-    const grandTotal = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+    const grandTotal = claims.filter(inc_isLive).reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
 
     if (!summary.length) {
       el.innerHTML += '<div class="no-data"><div class="no-data-icon"></div><div class="no-data-text">No incentive claims for ' + d + '</div></div>';
@@ -4909,7 +4912,7 @@ async function inc_loadDailyReport(dateVal) {
     let branchChips = '';
     if (!inc_branchFilter) {
       const bt = {};
-      claims.forEach(c => { const b = c.branch || ''; bt[b] = (bt[b] || 0) + parseFloat(c.totalIncentive || 0); });
+      claims.filter(inc_isLive).forEach(c => { const b = c.branch || ''; bt[b] = (bt[b] || 0) + parseFloat(c.totalIncentive || 0); });
       branchChips = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' +
         Object.keys(bt).sort().map(b =>
           '<div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:8px 14px;min-width:110px">' +
@@ -4968,7 +4971,7 @@ async function inc_viewEmployeeDay(employeeId, date) {
   try {
     const res    = await gasRequest({ action:'inc_getClaims', employeeId:employeeId, date:date });
     const claims = res.data || [];
-    const total  = claims.reduce((s,c) => s + parseFloat(c.totalIncentive||0), 0);
+    const total  = claims.filter(inc_isLive).reduce((s,c) => s + parseFloat(c.totalIncentive||0), 0);
     const empName = claims.length ? claims[0].employeeName : '';
 
     const rows = claims.map(c =>
@@ -5009,7 +5012,7 @@ async function inc_viewAllItemsDay(date) {
   try {
     const res    = await gasRequest({ action:'inc_getDailySummary', date:date });
     const claims = inc_filterByBranch(res.claims || []);
-    const grand  = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+    const grand  = claims.filter(inc_isLive).reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
 
     const rows = claims.map(c =>
       '<tr>' +
@@ -5063,8 +5066,8 @@ function inc_groupedRowsHtml(claims) {
   return order.map(function(k) {
     const g = groups[k];
     const lines = g.lines.slice().sort((a, b) => String(a.claimDate).localeCompare(String(b.claimDate)));
-    const total = lines.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
-    const agents = Array.from(new Set(lines.map(c => c.employeeName)));
+    const total = lines.filter(inc_isLive).reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+    const agents = Array.from(new Set(lines.filter(inc_isLive).map(c => c.employeeName)));
     // possible duplicates: different names that look alike, claimed by different agents
     const flagged = {};
     for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) {
@@ -5160,7 +5163,7 @@ function inc_renderAllClaims() {
   if (!el) return;
   const f = inc_allFilter;
   const claims = inc_applyAllFilters().slice().sort((a, b) => String(b.claimDate).localeCompare(String(a.claimDate)));
-  const total  = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+  const total  = claims.filter(inc_isLive).reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
 
   // categories that appear in the data
   const catSet = {};
@@ -5176,7 +5179,7 @@ function inc_renderAllClaims() {
 
   // totals per category for the filtered view
   const byCat = {};
-  claims.forEach(c => { const k = c.category || '(No category)'; if (!byCat[k]) byCat[k] = { qty: 0, total: 0 }; byCat[k].qty += parseInt(c.qty || 1); byCat[k].total += parseFloat(c.totalIncentive || 0); });
+  claims.filter(inc_isLive).forEach(c => { const k = c.category || '(No category)'; if (!byCat[k]) byCat[k] = { qty: 0, total: 0 }; byCat[k].qty += parseInt(c.qty || 1); byCat[k].total += parseFloat(c.totalIncentive || 0); });
   const catChips = Object.keys(byCat).sort().map(k =>
     '<div style="background:var(--surface,#fff);border:1px solid var(--border);border-radius:10px;padding:8px 14px;min-width:120px">' +
       '<div style="font-size:0.7rem;color:var(--text3);text-transform:uppercase">' + esc(k) + ' &bull; ' + byCat[k].qty + ' pc</div>' +
@@ -5232,7 +5235,7 @@ function inc_exportFilteredClaims() {
   const claims = inc_applyAllFilters().slice().sort((a, b) => String(a.claimDate).localeCompare(String(b.claimDate)));
   if (!claims.length) { toast('No data to export.', 'warning'); return; }
   const f = inc_allFilter;
-  const total = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+  const total = claims.filter(inc_isLive).reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
   const HEADER = ['Date','Employee','Branch','OR No.','Category','Description','Qty','Incentive/Unit','Total Incentive','Status'];
   const data = claims.map(c => [
     safeFormatDateTime(c.claimDate), c.employeeName, inc_branchDisp(c.branch), c.invoiceNo, c.category || '', c.description,
@@ -6249,7 +6252,7 @@ async function inc_loadAgentClaims(date) {
   try {
     const res    = await gasRequest({ action:'inc_getClaims', employeeId: currentUser.id || currentUser.username, date:date });
     const claims = res.data || [];
-    const total  = claims.reduce((s,c) => s + parseFloat(c.totalIncentive||0), 0);
+    const total  = claims.filter(inc_isLive).reduce((s,c) => s + parseFloat(c.totalIncentive||0), 0);
 
     const rows = claims.slice().reverse().map(c =>
       '<tr>' +
@@ -6638,7 +6641,7 @@ async function inc_exportDailyExcel(date) {
     if (!res.success || !claims.length) { toast('No data to export.','warning'); return; }
     const now = new Date();
     const summary    = inc_summarize(claims);
-    const grandTotal = claims.reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
+    const grandTotal = claims.filter(inc_isLive).reduce((t, c) => t + parseFloat(c.totalIncentive || 0), 0);
     const HEADER = ['Employee','Branch','OR No.','Category','Description','Qty','Incentive/Unit','Total Incentive','Status'];
     const data = claims.map(c => [
       c.employeeName, inc_branchDisp(c.branch), c.invoiceNo, c.category || '', c.description,
