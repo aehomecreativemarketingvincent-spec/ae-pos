@@ -414,6 +414,7 @@ function startSessionPoller() {
   if (!currentUser || currentUser.role === 'viewer') return;
   sessionPollInterval = setInterval(async () => {
     if (!currentUser || !mySessionId) return;
+    if (document.hidden) return;            // background tab: no need to ask the server
     try {
       const res = await gasRequest({
         action: 'checkSession',
@@ -426,7 +427,7 @@ function startSessionPoller() {
         showSessionKicked();
       }
     } catch(e) {} // silent fail — don't logout on network error
-  }, 15000); // check every 15 seconds
+  }, 90000 + Math.floor(Math.random() * 20000)); // every ~90s (was 15s: too many requests when many users are online)
 }
 
 function stopSessionPoller() {
@@ -624,12 +625,12 @@ function handleAuthError(res) {
 // ─── GAS REQUEST ─────────────────────────────
 // Read-only actions are safe to retry automatically when the server is busy / the network blips.
 // Writes (gasPost) are never auto-retried, to avoid saving twice.
-const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|checkSession$|loginViewer$)/;
+const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get)/;   // not the session poller: it must never add load
 async function gasRequest(params, timeoutMs = 30000) {
   const canRetry = GAS_READ_RE.test(String((params && params.action) || ''));
   let lastErr;
-  for (let attempt = 0; attempt < (canRetry ? 3 : 1); attempt++) {
-    if (attempt) await new Promise(r => setTimeout(r, 700 * attempt));
+  for (let attempt = 0; attempt < (canRetry ? 2 : 1); attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 1200 + Math.random() * 1800));   // random wait so many users do not retry at the same moment
     try {
       return await gasRequestOnce(params, timeoutMs);
     } catch (e) {
