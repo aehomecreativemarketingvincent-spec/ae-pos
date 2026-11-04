@@ -1503,3 +1503,4 @@ tbody tr:last-child td { border-bottom: none; }
   font-family: inherit; font-size: 0.9rem; background: #fff; outline: none;
 }
 #registerPanel .form-group select:focus { border-color: var(--blue); }
+.role-verifier { background: #e0e7ff; color: #3730a3; }
