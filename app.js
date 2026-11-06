@@ -4482,29 +4482,75 @@ async function audit_saveSession() {
   if (!counted.length) { toast('Enter at least one Actual Count before saving.', 'warning'); return; }
   const now       = new Date();
   const sessionId = audit_sessionId || ('AUD-' + Date.now());
-  const payload   = {
-    action:    'audit_saveSession',
-    sessionId: sessionId,
-    auditedBy: currentUser ? (currentUser.name || currentUser.username || '') : '',
-    auditDate: now.toISOString(),
-    rows:      JSON.stringify(audit_current),
-  };
+  const auditedBy = currentUser ? (currentUser.name || currentUser.username || '') : '';
+  const auditDate = now.toISOString();
+
   const btn = document.querySelector('#auditContent .btn-success');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
-  try {
-    const res = await gasPost(payload);
-    if (res.success) {
-      audit_sessionId = sessionId;
-      toast('Audit session saved!', 'success');
-      if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
-    } else {
-      toast(res.message || 'Error saving audit.', 'error');
-      if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
-    }
-  } catch(e) {
-    toast('Network error saving audit.', 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
+
+  // ── BATCHED SAVE (same GET+base64 URL-safe pattern as confirmImport/gasBulkImport) ──
+  // Sending all audited rows in a single request can exceed the browser's safe URL
+  // length once base64-encoded, which fails client-side with net::ERR_FAILED before
+  // it ever reaches the server. Splitting into small batches keeps each request well
+  // under that limit. Only the FIRST batch tells the backend to clear old rows for
+  // this session; every batch after that only appends (see Code.gs audit_saveSession).
+  const BATCH_SIZE = 15;
+  const batches = [];
+  for (let i = 0; i < audit_current.length; i += BATCH_SIZE) {
+    batches.push(audit_current.slice(i, i + BATCH_SIZE));
   }
+
+  let savedCount = 0;
+  let failed = false;
+  let failMsg = '';
+
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    const payload = {
+      action:       'audit_saveSession',
+      sessionId:    sessionId,
+      auditedBy:    auditedBy,
+      auditDate:    auditDate,
+      rows:         JSON.stringify(batch),
+      isFirstBatch: b === 0,
+    };
+    if (btn && batches.length > 1) {
+      btn.textContent = 'Saving... (' + (b + 1) + '/' + batches.length + ')';
+    }
+
+    let res;
+    try {
+      res = await gasPost(payload);
+    } catch (e) {
+      // Retry once after 2s, same as confirmImport's batch retry
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        res = await gasPost(payload);
+      } catch (e2) {
+        failed = true;
+        failMsg = e2.message || 'Network error saving audit.';
+        break;
+      }
+    }
+
+    if (!res || !res.success) {
+      failed = true;
+      failMsg = (res && res.message) || 'Error saving audit.';
+      break;
+    }
+
+    savedCount += batch.length;
+    if (b < batches.length - 1) await new Promise(r => setTimeout(r, 800));
+  }
+
+  if (!failed) {
+    audit_sessionId = sessionId;
+    toast('Audit session saved!', 'success');
+  } else {
+    toast(failMsg + (savedCount ? ' (' + savedCount + ' of ' + audit_current.length + ' items saved before the error)' : ''), 'error');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
+}
 }
 
 async function audit_loadHistory() {
