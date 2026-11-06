@@ -4551,7 +4551,6 @@ async function audit_saveSession() {
   }
   if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
 }
-}
 
 async function audit_loadHistory() {
   const el = document.getElementById('auditContent');
