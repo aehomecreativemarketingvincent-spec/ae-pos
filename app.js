@@ -4344,6 +4344,8 @@ async function deleteWholesaler(id) {
 let audit_sessions  = [];
 let audit_current   = null;
 let audit_sessionId = null;
+let audit_closing       = null;  // Closing Inventory phase: [{productId, productName, category, openingActual, soldQty, expectedClosing, remarks}]
+let audit_closingSaved  = false;
 
 async function audit_renderPage() {
   const pc = document.getElementById('pageContent');
@@ -4546,10 +4548,250 @@ async function audit_saveSession() {
   if (!failed) {
     audit_sessionId = sessionId;
     toast('Audit session saved!', 'success');
+    audit_renderLockedTable();
   } else {
     toast(failMsg + (savedCount ? ' (' + savedCount + ' of ' + audit_current.length + ' items saved before the error)' : ''), 'error');
   }
   if (btn) { btn.disabled = false; btn.textContent = 'Save Audit Session'; }
+}
+
+// Read-only view of a saved Opening Inventory session — shown right after
+// Save Audit Session succeeds, and whenever a past session is opened from
+// History. Saved = locked: no more editing, only Closing Inventory / Export /
+// Print / Back. (Does not touch audit_renderTable, which still does the live,
+// editable count sheet before the first save.)
+function audit_renderLockedTable(container) {
+  if (!audit_current || !audit_current.length) return;
+  const el = container || document.getElementById('auditContent');
+  if (!el) return;
+  const now     = new Date();
+  const dateStr = localDateStr(now);
+
+  const rows = audit_current.map(function(r) {
+    const actualVal = r.actualCount !== '' ? parseInt(r.actualCount) : '';
+    const variance  = actualVal !== '' ? actualVal - r.posStockPcs : '';
+    const varClass  = variance === '' ? '' : variance > 0 ? 'text-green' : variance < 0 ? 'text-red' : 'text-muted';
+    const varDisp   = variance === '' ? '—' : (variance > 0 ? '+' : '') + variance;
+    return '<tr>' +
+      '<td style="font-size:0.85rem"><b>' + esc(r.productName) + '</b></td>' +
+      '<td style="font-size:0.8rem">' + esc(r.category) + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + r.posStockPcs + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + (r.actualCount !== '' ? r.actualCount : '—') + '</td>' +
+      '<td class="fw-700 ' + varClass + '" style="text-align:center">' + varDisp + '</td>' +
+      '<td style="font-size:0.8rem">' + esc(r.remarks || '') + '</td>' +
+      '<td style="font-size:0.78rem;white-space:nowrap">' + (r.dateCounted || dateStr) + '</td>' +
+      '<td style="font-size:0.78rem">' + esc(r.countedBy || '') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML =
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">' +
+      '<span style="font-size:0.78rem;color:var(--text3);background:var(--bg2);padding:5px 10px;border-radius:6px">Opening Inventory saved — locked</span>' +
+      '<button class="btn btn-primary" onclick="audit_startClosing()">Closing Inventory</button>' +
+      '<button class="btn btn-primary" onclick="audit_exportExcel()">Export Excel</button>' +
+      '<button class="btn btn-ghost" onclick="audit_printAudit()">Print</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="audit_renderPage()">Back</button>' +
+    '</div>' +
+    '<div class="tbl-wrap" style="max-height:65vh;overflow-y:auto">' +
+      '<table>' +
+        '<thead><tr>' +
+          '<th>Product Name</th><th>Category</th><th>POS Stock</th>' +
+          '<th>Actual Count</th><th>Variance</th><th>Remarks</th>' +
+          '<th>Date Counted</th><th>Counted By</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>';
+}
+
+// ── CLOSING INVENTORY (phase 2) ──────────────────────────────
+// Starts from the Opening session's counted items (audit_current), lets the
+// clerk type Sold Qty per item, and auto-computes Expected Closing =
+// Opening Actual − Sold Qty. Saved separately (audit_saveClosingSession),
+// under the same sessionId, to its own "Inventory Closing" sheet.
+function audit_startClosing() {
+  if (!audit_current || !audit_current.length) { toast('No opening session loaded.', 'warning'); return; }
+  audit_closing = audit_current
+    .filter(function(r) { return r.actualCount !== ''; })
+    .map(function(r) {
+      return {
+        productId:       r.productId,
+        productName:     r.productName,
+        category:        r.category,
+        openingActual:   r.actualCount,
+        soldQty:         '',
+        expectedClosing: r.actualCount,
+        remarks:         '',
+      };
+    });
+  audit_closingSaved = false;
+  audit_renderClosingTable();
+}
+
+function audit_renderClosingTable(container) {
+  if (!audit_closing || !audit_closing.length) return;
+  const el = container || document.getElementById('auditContent');
+  if (!el) return;
+
+  const rows = audit_closing.map(function(r, i) {
+    return '<tr>' +
+      '<td style="font-size:0.85rem"><b>' + esc(r.productName) + '</b></td>' +
+      '<td style="font-size:0.8rem">' + esc(r.category) + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + r.openingActual + '</td>' +
+      '<td style="text-align:center">' +
+        '<input type="number" min="0" ' +
+          'data-idx="' + i + '" ' +
+          'value="' + (r.soldQty !== '' ? r.soldQty : '') + '" ' +
+          'placeholder="0" ' +
+          'oninput="audit_onSoldQty(this,' + i + ')" ' +
+          'style="width:72px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;text-align:center;font-family:var(--font-main);font-size:0.9rem">' +
+      '</td>' +
+      '<td class="fw-700" style="text-align:center" id="audit_closing_exp_' + i + '">' + r.expectedClosing + '</td>' +
+      '<td>' +
+        '<input type="text" ' +
+          'value="' + esc(r.remarks || '') + '" ' +
+          'placeholder="Remarks..." ' +
+          'oninput="audit_onClosingRemark(this,' + i + ')" ' +
+          'style="width:130px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;font-family:var(--font-main);font-size:0.8rem">' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML =
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">' +
+      '<button class="btn btn-success" onclick="audit_saveClosingSession()">Save Closing Inventory</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="audit_renderLockedTable()">Back</button>' +
+      '<span style="font-size:0.78rem;color:var(--text3);margin-left:auto">Expected Closing = Opening Actual − Sold Qty</span>' +
+    '</div>' +
+    '<div class="tbl-wrap" style="max-height:65vh;overflow-y:auto">' +
+      '<table>' +
+        '<thead><tr>' +
+          '<th>Product Name</th><th>Category</th><th>Opening Actual</th>' +
+          '<th>Sold Qty</th><th>Expected Closing</th><th>Remarks</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>';
+}
+
+function audit_onSoldQty(input, idx) {
+  if (!audit_closing || !audit_closing[idx]) return;
+  const val  = input.value.trim();
+  const sold = val !== '' ? parseInt(val) : 0;
+  audit_closing[idx].soldQty = val !== '' ? sold : '';
+  const opening  = parseInt(audit_closing[idx].openingActual) || 0;
+  const expected = opening - sold;
+  audit_closing[idx].expectedClosing = expected;
+  const expEl = document.getElementById('audit_closing_exp_' + idx);
+  if (expEl) expEl.textContent = expected;
+}
+
+function audit_onClosingRemark(input, idx) {
+  if (!audit_closing || !audit_closing[idx]) return;
+  audit_closing[idx].remarks = input.value;
+}
+
+async function audit_saveClosingSession() {
+  if (!audit_closing || !audit_closing.length) { toast('Nothing to save.', 'warning'); return; }
+  if (!audit_sessionId) { toast('Missing opening session. Please reload.', 'error'); return; }
+  const now         = new Date();
+  const closedBy    = currentUser ? (currentUser.name || currentUser.username || '') : '';
+  const closingDate = now.toISOString();
+
+  const btn = document.querySelector('#auditContent .btn-success');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+
+  // Same batched GET+base64 pattern as audit_saveSession — keeps each
+  // request well under the browser's safe URL length.
+  const BATCH_SIZE = 15;
+  const batches = [];
+  for (let i = 0; i < audit_closing.length; i += BATCH_SIZE) {
+    batches.push(audit_closing.slice(i, i + BATCH_SIZE));
+  }
+
+  let savedCount = 0;
+  let failed = false;
+  let failMsg = '';
+
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    const payload = {
+      action:       'audit_saveClosingSession',
+      sessionId:    audit_sessionId,
+      closedBy:     closedBy,
+      closingDate:  closingDate,
+      rows:         JSON.stringify(batch),
+      isFirstBatch: b === 0,
+    };
+    if (btn && batches.length > 1) {
+      btn.textContent = 'Saving... (' + (b + 1) + '/' + batches.length + ')';
+    }
+
+    let res;
+    try {
+      res = await gasPost(payload);
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        res = await gasPost(payload);
+      } catch (e2) {
+        failed = true;
+        failMsg = e2.message || 'Network error saving closing inventory.';
+        break;
+      }
+    }
+
+    if (!res || !res.success) {
+      failed = true;
+      failMsg = (res && res.message) || 'Error saving closing inventory.';
+      break;
+    }
+
+    savedCount += batch.length;
+    if (b < batches.length - 1) await new Promise(r => setTimeout(r, 800));
+  }
+
+  if (!failed) {
+    audit_closingSaved = true;
+    toast('Closing inventory saved!', 'success');
+    audit_renderClosingLockedTable();
+  } else {
+    toast(failMsg + (savedCount ? ' (' + savedCount + ' of ' + audit_closing.length + ' items saved before the error)' : ''), 'error');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Save Closing Inventory'; }
+}
+
+function audit_renderClosingLockedTable(container) {
+  if (!audit_closing || !audit_closing.length) return;
+  const el = container || document.getElementById('auditContent');
+  if (!el) return;
+
+  const rows = audit_closing.map(function(r) {
+    return '<tr>' +
+      '<td style="font-size:0.85rem"><b>' + esc(r.productName) + '</b></td>' +
+      '<td style="font-size:0.8rem">' + esc(r.category) + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + r.openingActual + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + (r.soldQty !== '' ? r.soldQty : 0) + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + r.expectedClosing + '</td>' +
+      '<td style="font-size:0.8rem">' + esc(r.remarks || '') + '</td>' +
+    '</tr>';
+  }).join('');
+
+  el.innerHTML =
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">' +
+      '<span style="font-size:0.78rem;color:var(--text3);background:var(--bg2);padding:5px 10px;border-radius:6px">Closing Inventory saved — locked</span>' +
+      '<button class="btn btn-ghost btn-sm" onclick="audit_renderLockedTable()">Back to Opening</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="audit_renderPage()">Done</button>' +
+    '</div>' +
+    '<div class="tbl-wrap" style="max-height:65vh;overflow-y:auto">' +
+      '<table>' +
+        '<thead><tr>' +
+          '<th>Product Name</th><th>Category</th><th>Opening Actual</th>' +
+          '<th>Sold Qty</th><th>Expected Closing</th><th>Remarks</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>';
 }
 
 async function audit_loadHistory() {
@@ -4621,7 +4863,9 @@ async function audit_viewSession(sessionId) {
       };
     });
     audit_sessionId = sessionId;
-    audit_renderTable(el);
+    // A session opened from History was already saved, so show it locked
+    // (read-only) just like right after Save Audit Session succeeds.
+    audit_renderLockedTable(el);
   } catch(e) {
     toast('Could not load session.', 'error');
   }
