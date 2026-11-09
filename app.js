@@ -5177,7 +5177,7 @@ function inc_setBranchFilter(val, reloadFn) {
 
 // group (already filtered) claims into per-employee rows
 // Rejected claims are never paid, so they are left out of every total
-function inc_isLive(c) { return String(c.status || '').toLowerCase() !== 'rejected'; }
+function inc_isLive(c) { var s = String(c.status || '').toLowerCase(); return s !== 'rejected' && s !== 'voided'; }
 
 function inc_summarize(claims) {
   const byEmp = {};
@@ -6894,13 +6894,20 @@ async function inc_submitClaim() {
 // same tab, same filters, same scroll position. No page reload.
 function inc_updateClaimRow(btn, id, status, reason) {
   const c = (inc_allClaimsCache || []).find(x => x.id === id);
-  if (c) { c.status = status; if (reason !== undefined) c.rejectionReason = reason; }
+  if (c) {
+    c.status = status;
+    if (status === 'Rejected' && reason !== undefined) c.rejectionReason = reason;
+    if (status === 'Voided'   && reason !== undefined) c.voidReason      = reason;
+  }
   if (inc_view === 'orcheck') { inc_renderOrCheck(); return; }   // cards recount themselves
   const actionTd = btn && btn.closest ? btn.closest('td') : null;
   const statusTd = actionTd ? actionTd.previousElementSibling : null;
   if (statusTd) statusTd.innerHTML = inc_statusBadge(status);
   if (actionTd) actionTd.innerHTML = status === 'Rejected'
-    ? '<span style="font-size:0.73rem;color:var(--red,#ef4444)">' + esc(reason || '') + '</span>' : '';
+    ? '<span style="font-size:0.73rem;color:var(--red,#ef4444)">' + esc(reason || '') + '</span>'
+    : status === 'Voided'
+    ? '<span style="font-size:0.73rem;color:#6b21a8">' + esc(reason || '') + '</span>'
+    : '';
 }
 
 async function inc_verifyClaim(id, btn) {
@@ -6955,6 +6962,42 @@ async function inc_confirmReject() {
   } catch(e) { toast('Network error.','error'); if(btn){btn.disabled=false;} }
 }
 
+// ── VOID (admin-only, for already-Verified claims) ──────────
+let inc_voidId  = null;
+let inc_voidBtn = null;
+function inc_openVoidModal(id, btn) {
+  inc_voidId  = id;
+  inc_voidBtn = btn || null;
+  openModal(
+    '<div class="modal-title">Void Claim</div>' +
+    '<p style="font-size:0.85rem;color:var(--text2);margin-bottom:14px">This claim was already Verified. Voiding it removes it from the incentive totals but keeps the record for audit purposes. Please give a reason.</p>' +
+    '<div class="field"><label for="inc_void_reason">Void Reason *</label>' +
+      '<textarea id="inc_void_reason" name="inc_void_reason" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:7px;font-family:var(--font-main);min-height:80px" placeholder="e.g. Verified by mistake, duplicate claim..."></textarea>' +
+    '</div>' +
+    '<button class="btn btn-danger" style="width:100%;margin-top:8px" onclick="inc_confirmVoid()">Confirm Void</button>'
+  );
+}
+
+async function inc_confirmVoid() {
+  const reason = document.getElementById('inc_void_reason')?.value.trim();
+  if (!reason) { toast('Please enter a void reason.','error'); return; }
+  const btn = document.querySelector('#modalBox .btn-danger');
+  if (btn) { btn.disabled = true; btn.textContent = 'Voiding...'; }
+  try {
+    const res = await gasPost({
+      action: 'inc_voidClaim', id: inc_voidId,
+      voidReason: reason,
+      voidedBy: currentUser.name || currentUser.username,
+    });
+    if (res.success) {
+      toast('Claim voided.','success'); closeModalDirect();
+      if (inc_voidBtn && inc_voidBtn.isConnected) inc_updateClaimRow(inc_voidBtn, inc_voidId, 'Voided', reason);
+      else navigateTo('incentives');
+    }
+    else { toast(res.message || 'Error.','error'); if(btn){btn.disabled=false;btn.textContent='Confirm Void';} }
+  } catch(e) { toast('Network error.','error'); if(btn){btn.disabled=false;} }
+}
+
 // ── EXCEL EXPORT ──────────────────────────────────────────
 async function inc_exportDailyExcel(date) {
   toast('Preparing Excel...','info');
@@ -7004,6 +7047,7 @@ function inc_statusBadge(status) {
     'Pending':  'background:#fffbeb;color:#92400e',
     'Verified': 'background:#d1fae5;color:#065f46',
     'Rejected': 'background:#fee2e2;color:#991b1b',
+    'Voided':   'background:#f3e8ff;color:#6b21a8',
   };
   const style = map[status] || 'background:#f3f4f6;color:var(--text3)';
   return '<span style="' + style + ';padding:2px 9px;border-radius:20px;font-size:0.72rem;font-weight:700">' + (status||'') + '</span>';
@@ -7011,11 +7055,19 @@ function inc_statusBadge(status) {
 
 function inc_actionBtns(c) {
   const role = currentUser.role;
-  if (c.status !== 'Pending') {
-    return c.status === 'Rejected'
-      ? '<span style="font-size:0.73rem;color:var(--red,#ef4444)">' + esc(c.rejectionReason||'') + '</span>'
+  if (c.status === 'Rejected') {
+    return '<span style="font-size:0.73rem;color:var(--red,#ef4444)">' + esc(c.rejectionReason||'') + '</span>';
+  }
+  if (c.status === 'Voided') {
+    return '<span style="font-size:0.73rem;color:#6b21a8">' + esc(c.voidReason||'') + '</span>';
+  }
+  if (c.status === 'Verified') {
+    // Admin-only: void an already-verified claim (mistaken verify, duplicate, etc.)
+    return role === 'admin'
+      ? '<button class="inv-btn inv-btn-del" onclick="inc_openVoidModal(\'' + esc(c.id) + '\', this)">Void</button>'
       : '';
   }
+  if (c.status !== 'Pending') return '';
   if (role === 'admin' || role === 'manager' || role === 'clerk' || role === 'verifier') {
     return '<div style="display:flex;gap:5px">' +
       '<button class="inv-btn inv-btn-in" onclick="inc_verifyClaim(\'' + esc(c.id) + '\', this)">Verify</button>' +
