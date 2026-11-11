@@ -1488,16 +1488,90 @@ function clearCart() {
 }
 
 // ─── CHECKOUT ─────────────────────────────────
+// ── Retail / Wholesale pricing at checkout ───────────────
+// The cart itself always holds RETAIL prices (unchanged behaviour). The mode picked
+// in the checkout modal only re-prices a copy of the cart at the moment of payment,
+// so cancelling the modal can never leave the cart in a half-changed state.
+let _checkoutPriceType = 'retail';
+
+function ws_priceFor(item, mode) {
+  if (mode !== 'wholesale') return parseFloat(item.price || 0);
+  const prod = allProducts.find(p => p.id === item.productId);
+  if (!prod) return 0;
+  return parseFloat((item.unit === 'pack' ? prod.priceWholesalePack : prod.priceWholesale) || 0) || 0;
+}
+
+function ws_repriceCart(mode) {
+  return cart.map(c => {
+    if (mode !== 'wholesale') return Object.assign({}, c, { priceType: 'retail' });   // retail = exactly as in cart
+    const price = ws_priceFor(c, mode);
+    return Object.assign({}, c, {
+      price,
+      total: Math.round(price * c.qty * 100) / 100,
+      priceType: mode === 'wholesale' ? 'wholesale' : 'retail',
+    });
+  });
+}
+
+function ws_missingItems(mode) {
+  if (mode !== 'wholesale') return [];
+  return cart.filter(c => ws_priceFor(c, 'wholesale') <= 0);
+}
+
+function ws_currentTotal() {
+  return ws_repriceCart(_checkoutPriceType).reduce((s, c) => s + c.total, 0);
+}
+
+function ws_renderCheckoutSummary() {
+  const el = document.getElementById('checkoutSummaryBox');
+  if (!el) return;
+  const mode  = _checkoutPriceType;
+  const lines = ws_repriceCart(mode);
+  const total = lines.reduce((s, c) => s + c.total, 0);
+  const missing = ws_missingItems(mode);
+  el.innerHTML =
+    lines.map(c => `<div class="checkout-item-line"><span>${c.name} (${c.unit}) x${c.qty}</span><span>₱${parseFloat(c.total||0).toFixed(2)}</span></div>`).join('') +
+    `<div class="checkout-total-line"><span>TOTAL</span><span>₱${total.toFixed(2)}</span></div>`;
+  const warn = document.getElementById('wsMissingWarn');
+  if (warn) {
+    warn.style.display = missing.length ? 'block' : 'none';
+    warn.innerHTML = missing.length
+      ? '<b>No wholesale price set for:</b><br>' + missing.map(c => esc(c.name) + ' (' + c.unit + ')').join('<br>') +
+        '<br><span style="font-size:0.75rem">Set it in Inventory (Admin/Clerk), or remove the item, or switch back to Retail.</span>'
+      : '';
+  }
+  const btn = document.getElementById('checkoutConfirmBtn');
+  if (btn) btn.disabled = missing.length > 0;
+  updateChange(total);
+}
+
+function setCheckoutPriceType(mode) {
+  _checkoutPriceType = mode === 'wholesale' ? 'wholesale' : 'retail';
+  const r = document.getElementById('wsBtnRetail'), w = document.getElementById('wsBtnWholesale');
+  if (r) r.className = 'btn btn-sm ' + (_checkoutPriceType === 'retail'    ? 'btn-primary' : 'btn-ghost');
+  if (w) w.className = 'btn btn-sm ' + (_checkoutPriceType === 'wholesale' ? 'btn-primary' : 'btn-ghost');
+  ws_renderCheckoutSummary();
+}
+
 function openCheckout() {
  if (cart.length === 0) { toast('Cart is empty!', 'warning'); return; }
+  _checkoutPriceType = 'retail';
   const total = cart.reduce((s, c) => s + c.total, 0);
   openModal(`
 <div class="modal-title">Checkout</div>
 <div class="checkout-form">
-<div class="checkout-summary">
+<div class="field">
+  <label>Price Type</label>
+  <div style="display:flex;gap:8px">
+    <button type="button" id="wsBtnRetail" class="btn btn-sm btn-primary" style="flex:1" onclick="setCheckoutPriceType('retail')">Retail</button>
+    <button type="button" id="wsBtnWholesale" class="btn btn-sm btn-ghost" style="flex:1" onclick="setCheckoutPriceType('wholesale')">Wholesale</button>
+  </div>
+</div>
+<div class="checkout-summary" id="checkoutSummaryBox">
  ${cart.map(c => `<div class="checkout-item-line"><span>${c.name} (${c.unit}) x${c.qty}</span><span>₱${parseFloat(c.total||0).toFixed(2)}</span></div>`).join('')}
  <div class="checkout-total-line"><span>TOTAL</span><span>₱${total.toFixed(2)}</span></div>
       </div>
+<div id="wsMissingWarn" style="display:none;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;border-radius:8px;padding:10px 12px;font-size:0.8rem;margin-bottom:10px"></div>
 <div class="field">
 <label for="paymentMethod">Payment Method</label>
 <select id="paymentMethod" name="paymentMethod" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:var(--font-main);font-size:0.9rem;background:white">
@@ -1510,13 +1584,13 @@ function openCheckout() {
 </div>
 <div class="field">
 <label for="cashInput">Cash Received (₱)</label>
-<input type="number" id="cashInput" name="cashInput" placeholder="0.00" min="0" step="0.01" oninput="updateChange(${total})">
+<input type="number" id="cashInput" name="cashInput" placeholder="0.00" min="0" step="0.01" oninput="updateChange(ws_currentTotal())">
 </div>
 <div class="change-display" id="changeDisplay">
 <div class="change-label">Change</div>
 <div class="change-amount" id="changeAmt">₱0.00</div>
 </div>
-<button class="btn btn-primary btn-lg" style="width:100%" onclick="processCheckout(${total})">Confirm & Save Transaction</button>
+<button class="btn btn-primary btn-lg" id="checkoutConfirmBtn" style="width:100%" onclick="processCheckout(ws_currentTotal())">Confirm & Save Transaction</button>
     </div>`);
   setTimeout(() => document.getElementById('cashInput')?.focus(), 200);
 }
@@ -1535,8 +1609,17 @@ async function processCheckout(total) {
   // ── Guard: prevent duplicate submissions (button + flag)
   if (_checkoutInProgress) return;
   _checkoutInProgress = true;
-  const confirmBtn = document.querySelector('#modalBox .btn-primary');
+  const confirmBtn = document.getElementById('checkoutConfirmBtn') || document.querySelector('#modalBox .btn-primary');
   if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Saving...'; }
+
+  // Wholesale guard: never save a wholesale sale with a missing (zero) wholesale price
+  const _wsMissing = ws_missingItems(_checkoutPriceType);
+  if (_wsMissing.length) {
+    toast('No wholesale price for: ' + _wsMissing.map(c => c.name).join(', '), 'error');
+    _checkoutInProgress = false;
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm & Save Transaction'; }
+    return;
+  }
 
   const paymentMethod = document.getElementById('paymentMethod')?.value || 'Cash Sale';
   const isNonCash     = ['GCash','Card','Charge Sale','Receivable'].includes(paymentMethod);
@@ -1553,7 +1636,9 @@ async function processCheckout(total) {
 
   // BUG 1 FIX: snapshot cart HERE before anything else —
   // was declared inside try block AFTER payload was already built, causing ReferenceError
-  const cartSnapshot = [...cart];
+  const cartSnapshot = ws_repriceCart(_checkoutPriceType);
+  const _priceType   = _checkoutPriceType === 'wholesale' ? 'wholesale' : 'retail';
+  total = cartSnapshot.reduce((s, c) => s + c.total, 0);
   if (!cartSnapshot.length) {
     toast('Cart is empty!', 'warning');
     _checkoutInProgress = false;
@@ -1573,6 +1658,7 @@ async function processCheckout(total) {
     cashierId:     currentUser.id   || currentUser.username || '',
     date:          now.toISOString(),
     items:         JSON.stringify(cartSnapshot),
+    priceType:     _priceType,
     total,
     cash:   isNonCash ? total : cash,
     change,
@@ -1763,6 +1849,7 @@ function generateAndShowReceipt(data) {
         <div><b>Transaction #:</b> ${txId}</div>
         <div><b>Cashier:</b> ${cashier}</div>
         <div><b>Date & Time:</b> ${dateStr}</div>
+        ${items.some(i => i.priceType === 'wholesale') ? '<div><b>Price Type:</b> WHOLESALE</div>' : ''}
       </div>
       <hr class="receipt-divider">
 <div class="receipt-items-header">
@@ -2030,6 +2117,7 @@ function renderInventoryTable(products) {
       <td>${p.qtyPcs||0}</td><td>${p.qtyPacks||0}</td>
       <td>₱${parseFloat(p.pricePer||0).toFixed(2)}</td>
       <td>₱${parseFloat(p.pricePack||0).toFixed(2)}</td>
+      ${canEdit ? `<td>${parseFloat(p.priceWholesale||0) > 0 ? '₱' + parseFloat(p.priceWholesale).toFixed(2) : '—'}</td><td>${parseFloat(p.priceWholesalePack||0) > 0 ? '₱' + parseFloat(p.priceWholesalePack).toFixed(2) : '—'}</td>` : ''}
       <td>${badge}</td>${acts}
     </tr>`;
   }).join('');
@@ -2037,7 +2125,7 @@ function renderInventoryTable(products) {
   el.innerHTML = `
     ${canDelete ? '<div class="bulk-action-bar" id="bulkActionBar" style="display:none"><span id="selectedCount">0 selected</span><button class="btn btn-danger btn-sm" onclick="bulkDeleteSelected()">Delete Selected</button><button class="btn btn-ghost btn-sm" onclick="clearSelection()">Clear</button></div>' : ''}
     <div class="tbl-wrap"><table>
-      <thead><tr>${chkCol}${imgCol}<th>Barcode</th><th>Name</th><th>Qty Pcs</th><th>Qty Packs</th><th>Price/Pc</th><th>Price/Pack</th><th>Status</th>${actCol}</tr></thead>
+      <thead><tr>${chkCol}${imgCol}<th>Barcode</th><th>Name</th><th>Qty Pcs</th><th>Qty Packs</th><th>Price/Pc</th><th>Price/Pack</th>${canEdit ? '<th>WS Price/Pc</th><th>WS Price/Pack</th>' : ''}<th>Status</th>${actCol}</tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
 }
@@ -2218,12 +2306,22 @@ function buildProductModal(p) {
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
         <div class="field">
-          <label for="f_pricePer">Price per Piece (₱)</label>
+          <label for="f_pricePer">Retail Price per Piece (₱)</label>
           <input id="f_pricePer" type="number" min="0" step="0.01" value="${p?.pricePer || 0}" placeholder="0.00">
         </div>
         <div class="field">
-          <label for="f_pricePack">Price per Pack (₱)</label>
+          <label for="f_pricePack">Retail Price per Pack (₱)</label>
           <input id="f_pricePack" type="number" min="0" step="0.01" value="${p?.pricePack || 0}" placeholder="0.00">
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="field">
+          <label for="f_priceWholesale">Wholesale Price per Piece (₱)</label>
+          <input id="f_priceWholesale" type="number" min="0" step="0.01" value="${p?.priceWholesale || 0}" placeholder="0.00">
+        </div>
+        <div class="field">
+          <label for="f_priceWholesalePack">Wholesale Price per Pack (₱)</label>
+          <input id="f_priceWholesalePack" type="number" min="0" step="0.01" value="${p?.priceWholesalePack || 0}" placeholder="0.00">
         </div>
       </div>
     </div>
@@ -2467,6 +2565,8 @@ async function saveProduct(id = null) {
     qtyPacks: parseInt(document.getElementById('f_qtyPacks')?.value || 0),
     pricePer: parseFloat(document.getElementById('f_pricePer')?.value || 0),
     pricePack: parseFloat(document.getElementById('f_pricePack')?.value || 0),
+    priceWholesale:     parseFloat(document.getElementById('f_priceWholesale')?.value || 0),
+    priceWholesalePack: parseFloat(document.getElementById('f_priceWholesalePack')?.value || 0),
   };
 
   showLoading(id ? 'Updating product...' : 'Saving product...');
