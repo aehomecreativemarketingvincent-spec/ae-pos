@@ -4484,6 +4484,8 @@ async function audit_startNew() {
       posStockPacks: parseInt(p.qtyPacks || 0),
       actualCount:   '',
       variance:      '',
+      actualPacks:   '',
+      variancePacks: '',
       remarks:       '',
       dateCounted:   '',
       countedBy:     '',
@@ -4508,10 +4510,15 @@ function audit_renderTable(container) {
     const variance  = actualVal !== '' ? actualVal - r.posStockPcs : '';
     const varClass  = variance === '' ? '' : variance > 0 ? 'text-green' : variance < 0 ? 'text-red' : 'text-muted';
     const varDisp   = variance === '' ? '\u2014' : (variance > 0 ? '+' : '') + variance;
+    const actualPk  = (r.actualPacks !== undefined && r.actualPacks !== '') ? parseInt(r.actualPacks) : '';
+    const varPk     = actualPk !== '' ? actualPk - (r.posStockPacks || 0) : '';
+    const varPkCls  = varPk === '' ? '' : varPk > 0 ? 'text-green' : varPk < 0 ? 'text-red' : 'text-muted';
+    const varPkDisp = varPk === '' ? '\u2014' : (varPk > 0 ? '+' : '') + varPk;
     return '<tr>' +
       '<td style="font-size:0.85rem"><b>' + esc(r.productName) + '</b></td>' +
       '<td style="font-size:0.8rem">' + esc(r.category) + '</td>' +
       '<td class="fw-700" style="text-align:center">' + r.posStockPcs + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + (r.posStockPacks || 0) + '</td>' +
       '<td style="text-align:center">' +
         '<input type="number" min="0" ' +
           'data-idx="' + i + '" ' +
@@ -4520,7 +4527,15 @@ function audit_renderTable(container) {
           'oninput="audit_onCount(this,' + i + ')" ' +
           'style="width:72px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;text-align:center;font-family:var(--font-main);font-size:0.9rem">' +
       '</td>' +
+      '<td style="text-align:center">' +
+        '<input type="number" min="0" ' +
+          'value="' + (actualPk !== '' ? actualPk : '') + '" ' +
+          'placeholder="0" ' +
+          'oninput="audit_onCountPacks(this,' + i + ')" ' +
+          'style="width:72px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;text-align:center;font-family:var(--font-main);font-size:0.9rem">' +
+      '</td>' +
       '<td class="fw-700 ' + varClass + '" style="text-align:center" id="audit_var_' + i + '">' + varDisp + '</td>' +
+      '<td class="fw-700 ' + varPkCls + '" style="text-align:center" id="audit_varp_' + i + '">' + varPkDisp + '</td>' +
       '<td>' +
         '<input type="text" ' +
           'value="' + esc(r.remarks || '') + '" ' +
@@ -4539,13 +4554,13 @@ function audit_renderTable(container) {
       '<button class="btn btn-primary" onclick="audit_exportExcel()">Export Excel</button>' +
       '<button class="btn btn-ghost" onclick="audit_printAudit()">Print</button>' +
       '<button class="btn btn-ghost btn-sm" onclick="audit_renderPage()">Cancel</button>' +
-      '<span style="font-size:0.78rem;color:var(--text3);margin-left:auto">Variance = Actual Count \u2212 POS Stock</span>' +
+      '<span style="font-size:0.78rem;color:var(--text3);margin-left:auto">Variance = Actual Count \u2212 POS Stock (per piece and per pack)</span>' +
     '</div>' +
     '<div class="tbl-wrap" style="max-height:65vh;overflow-y:auto">' +
       '<table>' +
         '<thead><tr>' +
-          '<th>Product Name</th><th>Category</th><th>POS Stock</th>' +
-          '<th>Actual Count</th><th>Variance</th><th>Remarks</th>' +
+          '<th>Product Name</th><th>Category</th><th>POS Stock (Pcs)</th><th>POS Stock (Packs)</th>' +
+          '<th>Actual Count (Pcs)</th><th>Actual Count (Packs)</th><th>Variance (Pcs)</th><th>Variance (Packs)</th><th>Remarks</th>' +
           '<th>Date Counted</th><th>Counted By</th>' +
         '</tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
@@ -4573,6 +4588,26 @@ function audit_onCount(input, idx) {
   }
 }
 
+function audit_onCountPacks(input, idx) {
+  if (!audit_current || !audit_current[idx]) return;
+  const val = input.value.trim();
+  const r   = audit_current[idx];
+  r.actualPacks   = val !== '' ? parseInt(val) : '';
+  r.variancePacks = val !== '' ? r.actualPacks - (r.posStockPacks || 0) : '';
+  r.dateCounted   = localDateStr(new Date());
+  r.countedBy     = currentUser ? (currentUser.name || currentUser.username || '') : '';
+  const varEl = document.getElementById('audit_varp_' + idx);
+  if (!varEl) return;
+  if (val === '') {
+    varEl.textContent = '\u2014';
+    varEl.className   = 'fw-700 text-muted';
+  } else {
+    const v = r.variancePacks;
+    varEl.textContent = (v > 0 ? '+' : '') + v;
+    varEl.className   = 'fw-700 ' + (v > 0 ? 'text-green' : v < 0 ? 'text-red' : 'text-muted');
+  }
+}
+
 function audit_onRemark(input, idx) {
   if (!audit_current || !audit_current[idx]) return;
   audit_current[idx].remarks = input.value;
@@ -4580,8 +4615,12 @@ function audit_onRemark(input, idx) {
 
 async function audit_saveSession() {
   if (!audit_current || !audit_current.length) { toast('Nothing to save.', 'warning'); return; }
-  const counted = audit_current.filter(function(r) { return r.actualCount !== ''; });
+  const counted = audit_current.filter(function(r) { return r.actualCount !== '' || (r.actualPacks !== undefined && r.actualPacks !== ''); });
   if (!counted.length) { toast('Enter at least one Actual Count before saving.', 'warning'); return; }
+  // keep the pack variance in sync with the typed pack count before it is sent
+  audit_current.forEach(function(r) {
+    r.variancePacks = (r.actualPacks !== undefined && r.actualPacks !== '') ? parseInt(r.actualPacks) - (r.posStockPacks || 0) : '';
+  });
   const now       = new Date();
   const sessionId = audit_sessionId || ('AUD-' + Date.now());
   const auditedBy = currentUser ? (currentUser.name || currentUser.username || '') : '';
@@ -4672,12 +4711,19 @@ function audit_renderLockedTable(container) {
     const variance  = actualVal !== '' ? actualVal - r.posStockPcs : '';
     const varClass  = variance === '' ? '' : variance > 0 ? 'text-green' : variance < 0 ? 'text-red' : 'text-muted';
     const varDisp   = variance === '' ? '—' : (variance > 0 ? '+' : '') + variance;
+    const actualPk  = (r.actualPacks !== undefined && r.actualPacks !== '') ? parseInt(r.actualPacks) : '';
+    const varPk     = actualPk !== '' ? actualPk - (r.posStockPacks || 0) : '';
+    const varPkCls  = varPk === '' ? '' : varPk > 0 ? 'text-green' : varPk < 0 ? 'text-red' : 'text-muted';
+    const varPkDisp = varPk === '' ? '—' : (varPk > 0 ? '+' : '') + varPk;
     return '<tr>' +
       '<td style="font-size:0.85rem"><b>' + esc(r.productName) + '</b></td>' +
       '<td style="font-size:0.8rem">' + esc(r.category) + '</td>' +
       '<td class="fw-700" style="text-align:center">' + r.posStockPcs + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + (r.posStockPacks || 0) + '</td>' +
       '<td class="fw-700" style="text-align:center">' + (r.actualCount !== '' ? r.actualCount : '—') + '</td>' +
+      '<td class="fw-700" style="text-align:center">' + (actualPk !== '' ? actualPk : '—') + '</td>' +
       '<td class="fw-700 ' + varClass + '" style="text-align:center">' + varDisp + '</td>' +
+      '<td class="fw-700 ' + varPkCls + '" style="text-align:center">' + varPkDisp + '</td>' +
       '<td style="font-size:0.8rem">' + esc(r.remarks || '') + '</td>' +
       '<td style="font-size:0.78rem;white-space:nowrap">' + (r.dateCounted || dateStr) + '</td>' +
       '<td style="font-size:0.78rem">' + esc(r.countedBy || '') + '</td>' +
@@ -4695,8 +4741,8 @@ function audit_renderLockedTable(container) {
     '<div class="tbl-wrap" style="max-height:65vh;overflow-y:auto">' +
       '<table>' +
         '<thead><tr>' +
-          '<th>Product Name</th><th>Category</th><th>POS Stock</th>' +
-          '<th>Actual Count</th><th>Variance</th><th>Remarks</th>' +
+          '<th>Product Name</th><th>Category</th><th>POS Stock (Pcs)</th><th>POS Stock (Packs)</th>' +
+          '<th>Actual Count (Pcs)</th><th>Actual Count (Packs)</th><th>Variance (Pcs)</th><th>Variance (Packs)</th><th>Remarks</th>' +
           '<th>Date Counted</th><th>Counted By</th>' +
         '</tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
@@ -4956,6 +5002,8 @@ async function audit_viewSession(sessionId) {
         posStockPcs:   parseInt(r.posStockPcs   || 0),
         posStockPacks: parseInt(r.posStockPacks  || 0),
         actualCount:   r.actualCount !== '' ? parseInt(r.actualCount) : '',
+        actualPacks:   (r.actualPacks !== undefined && r.actualPacks !== '') ? parseInt(r.actualPacks) : '',
+        variancePacks: r.variancePacks !== undefined ? r.variancePacks : '',
         variance:      r.variance,
         remarks:       r.remarks,
         dateCounted:   r.dateCounted,
@@ -4990,12 +5038,15 @@ async function audit_exportExcel() {
   try {
     if (typeof XLSX === 'undefined') { toast('Excel library failed to load.','error'); return; }
     const now    = new Date();
-    const HEADER = ['Product Name','Category','POS Stock (Pcs)','Actual Count','Variance','Remarks','Date Counted','Counted By'];
+    const HEADER = ['Product Name','Category','POS Stock (Pcs)','POS Stock (Packs)','Actual Count (Pcs)','Actual Count (Packs)','Variance (Pcs)','Variance (Packs)','Remarks','Date Counted','Counted By'];
     const data   = audit_current.map(function(r) {
       const actual   = r.actualCount !== '' ? parseInt(r.actualCount) : '';
       const variance = actual !== '' ? actual - r.posStockPcs : '';
-      return [r.productName, r.category, r.posStockPcs, actual !== '' ? actual : '',
-              variance !== '' ? variance : '', r.remarks || '',
+      const actualPk = (r.actualPacks !== undefined && r.actualPacks !== '') ? parseInt(r.actualPacks) : '';
+      const varPk    = actualPk !== '' ? actualPk - (r.posStockPacks || 0) : '';
+      return [r.productName, r.category, r.posStockPcs, r.posStockPacks || 0,
+              actual !== '' ? actual : '', actualPk !== '' ? actualPk : '',
+              variance !== '' ? variance : '', varPk !== '' ? varPk : '', r.remarks || '',
               r.dateCounted || localDateStr(now),
               r.countedBy || (currentUser ? currentUser.name : '') || ''];
     });
@@ -5011,7 +5062,7 @@ async function audit_exportExcel() {
       var addr = XLSX.utils.encode_cell({ r: 4, c: c });
       if (ws[addr]) ws[addr].s = { font: { bold: true }, fill: { patternType: 'solid', fgColor: { rgb: 'FFD966' } } };
     }
-    ws['!cols'] = [{wch:30},{wch:16},{wch:14},{wch:14},{wch:12},{wch:24},{wch:14},{wch:18}];
+    ws['!cols'] = [{wch:30},{wch:16},{wch:14},{wch:14},{wch:16},{wch:16},{wch:14},{wch:14},{wch:24},{wch:14},{wch:18}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Inventory Audit');
     XLSX.writeFile(wb, 'InventoryAudit_' + localDateStr(now) + '.xlsx');
@@ -5028,10 +5079,14 @@ function audit_printAudit() {
     const actual   = r.actualCount !== '' ? parseInt(r.actualCount) : '\u2014';
     const variance = r.actualCount !== '' ? (parseInt(r.actualCount) - r.posStockPcs) : '\u2014';
     const vStr     = variance === '\u2014' ? '\u2014' : (variance > 0 ? '+' + variance : String(variance));
+    const actualPk = (r.actualPacks !== undefined && r.actualPacks !== '') ? parseInt(r.actualPacks) : '\u2014';
+    const varPk    = actualPk === '\u2014' ? '\u2014' : (actualPk - (r.posStockPacks || 0));
+    const vPkStr   = varPk === '\u2014' ? '\u2014' : (varPk > 0 ? '+' + varPk : String(varPk));
     return '<tr>' +
       '<td>' + esc(r.productName) + '</td><td>' + esc(r.category) + '</td>' +
-      '<td>' + r.posStockPcs + '</td><td>' + actual + '</td>' +
-      '<td>' + vStr + '</td><td>' + esc(r.remarks || '') + '</td>' +
+      '<td>' + r.posStockPcs + '</td><td>' + (r.posStockPacks || 0) + '</td>' +
+      '<td>' + actual + '</td><td>' + actualPk + '</td>' +
+      '<td>' + vStr + '</td><td>' + vPkStr + '</td><td>' + esc(r.remarks || '') + '</td>' +
       '<td>' + (r.dateCounted || localDateStr(now)) + '</td>' +
       '<td>' + esc(r.countedBy || (currentUser ? currentUser.name : '') || '') + '</td>' +
     '</tr>';
@@ -5050,8 +5105,8 @@ function audit_printAudit() {
     '<h2>AE HOME POS \u2014 Inventory Physical Count Audit</h2>' +
     '<p>Generated: ' + now.toLocaleString('en-PH') + ' | Audited By: ' + esc(currentUser ? currentUser.name || '' : '') + '</p>' +
     '<table><thead><tr>' +
-    '<th>Product Name</th><th>Category</th><th>POS Stock</th><th>Actual Count</th>' +
-    '<th>Variance</th><th>Remarks</th><th>Date Counted</th><th>Counted By</th>' +
+    '<th>Product Name</th><th>Category</th><th>POS Stock (Pcs)</th><th>POS Stock (Packs)</th><th>Actual Count (Pcs)</th><th>Actual Count (Packs)</th>' +
+    '<th>Variance (Pcs)</th><th>Variance (Packs)</th><th>Remarks</th><th>Date Counted</th><th>Counted By</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table>' +
     '<br><button onclick="window.print()">Print</button>' +
     '</body></html>'
