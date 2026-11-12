@@ -6989,31 +6989,25 @@ async function inc_photoRowClick(inv) {
 }
 
 // Photo section inside the "Add Incentive Claim" form (choose from saved Receipt Photos)
-function inc_photoSelect(id) { inc_claimState.photoId = id; inc_photoRenderPreview(); }
 function inc_photoDeselect() { inc_claimState.photoId = null; inc_photoRenderPreview(); }
+// The claim form shows NO image. If the agent started the claim from Receipt Photos
+// ("Use for Claim"), only a one-line note appears; the photo itself opens on demand.
 async function inc_photoRenderPreview() {
   const box = document.getElementById('inc_photo_preview');
   if (!box) return;
-  let list = [];
-  try { list = (await inc_photoList()).filter(function(r) { return !r.inv; }); } catch(e) { return; }
   const sel = inc_claimState.photoId;
-  const selRec = list.find(function(r) { return r.id === sel; });
-  if (sel && !selRec) inc_claimState.photoId = null;
-  const others = list.filter(function(r) { return r.id !== sel; }).slice(0, 8);
+  if (!sel) { box.innerHTML = ''; return; }
+  let rec = null;
+  try { rec = await inc_photoById(sel); } catch(e) {}
+  if (!rec || rec.inv) { inc_claimState.photoId = null; box.innerHTML = ''; return; }
   box.innerHTML =
-    (selRec
-      ? '<div style="display:flex;align-items:center;gap:10px;margin-top:8px">' +
-          '<img src="' + selRec.data + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:2px solid var(--green);cursor:pointer" onclick="inc_photoView(\'' + selRec.id + '\')">' +
-          '<div style="font-size:0.78rem;color:var(--text2)">Selected &mdash; tap the photo to enlarge it while you fill in the form. It will be linked to this OR when you submit.</div>' +
-          '<button type="button" class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="inc_photoDeselect()">Unselect</button>' +
-        '</div>'
-      : '') +
-    (others.length
-      ? '<div style="font-size:0.72rem;color:var(--text3);margin:8px 0 4px">Saved photos not yet claimed &mdash; tap one to use it:</div>' +
-        '<div style="display:flex;gap:6px;flex-wrap:wrap">' + others.map(function(r) {
-          return '<img src="' + r.data + '" title="' + safeFormatDateTime(new Date(r.ts).toISOString()) + '" style="width:52px;height:52px;object-fit:cover;border-radius:6px;border:1.5px solid var(--border);cursor:pointer" onclick="inc_photoSelect(\'' + r.id + '\')">';
-        }).join('') + '</div>'
-      : (selRec ? '' : '<div style="font-size:0.74rem;color:var(--text3);margin-top:6px">No saved photos waiting. Use <b>Receipt Photos</b> on the main page to take one.</div>'));
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding:9px 12px;border:1.5px solid var(--green);border-radius:10px;font-size:0.78rem;color:var(--text2)">' +
+      '<span>&#128247; Receipt photo attached. It will be linked to this OR when you submit.</span>' +
+      '<span style="margin-left:auto;display:flex;gap:6px">' +
+        '<button type="button" class="btn btn-ghost btn-sm" onclick="inc_photoView(\'' + sel + '\')">View</button>' +
+        '<button type="button" class="btn btn-ghost btn-sm" onclick="inc_photoDeselect()">Remove</button>' +
+      '</span>' +
+    '</div>';
 }
 
 function inc_money(n) { return '&#8369;' + (parseFloat(n) || 0).toFixed(2); }
@@ -7061,11 +7055,7 @@ async function inc_openClaimModal() {
     '<div id="inc_items"></div>' +
     '<button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="inc_addItemRow()">+ Add another item</button>' +
 
-    '<div style="margin-top:14px">' +
-      '<div style="font-size:0.78rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:6px">Receipt Photo (optional)</div>' +
-      '<div style="font-size:0.72rem;color:var(--text3)">Pick a photo you already saved under <b>Receipt Photos</b> (take it there first, then come back here). Your own copy, saved only on this phone/browser, not sent to the system.</div>' +
-      '<div id="inc_photo_preview"></div>' +
-    '</div>' +
+    '<div id="inc_photo_preview"></div>' +
 
     '<div id="inc_valbox" style="display:none;border-radius:8px;padding:12px 14px;margin-top:10px;font-size:0.84rem"></div>' +
     '<div id="inc_summary" style="background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
