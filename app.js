@@ -6727,6 +6727,8 @@ async function inc_loadAgentClaims(date) {
     const claims = res.data || [];
     const total  = claims.filter(inc_isLive).reduce((s,c) => s + parseFloat(c.totalIncentive||0), 0);
 
+    let photoHave = new Set();
+    try { photoHave = await inc_photoHave(); } catch(pe) {}
     const rows = claims.slice().reverse().map(c =>
       '<tr>' +
         '<td style="font-family:var(--font-mono);font-size:0.78rem">' + esc(c.invoiceNo) + '</td>' +
@@ -6736,15 +6738,17 @@ async function inc_loadAgentClaims(date) {
         '<td class="fw-700 text-green">&#8369;' + parseFloat(c.totalIncentive||0).toFixed(2) + '</td>' +
         '<td>' + inc_statusBadge(c.status) + '</td>' +
         '<td style="font-size:0.75rem;color:var(--text3)">' + safeFormatDateTime(c.claimDate) + '</td>' +
+        '<td><button class="btn btn-ghost btn-sm" onclick="inc_photoModal(\'' + String(c.invoiceNo || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;') + '\')">' +
+          (photoHave.has(String(c.invoiceNo || '').trim().toUpperCase()) ? '&#128247; View' : '+ Photo') + '</button></td>' +
       '</tr>'
-    ).join('') || '<tr><td colspan="7"><div class="no-data"><div class="no-data-text">No claims yet today. Click <b>Add Incentive Claim</b> to start.</div></div></td></tr>';
+    ).join('') || '<tr><td colspan="8"><div class="no-data"><div class="no-data-text">No claims yet today. Click <b>Add Incentive Claim</b> to start.</div></div></td></tr>';
 
     el.innerHTML =
       '<div style="background:linear-gradient(135deg,var(--blue,#1e90ff),#0056d2);border-radius:12px;padding:18px 22px;color:white;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">' +
         '<div><div style="font-size:0.75rem;opacity:.7">TODAY\'S INCENTIVE</div><div style="font-size:2rem;font-weight:700;font-family:var(--font-mono)">&#8369;' + total.toFixed(2) + '</div><div style="font-size:0.78rem;opacity:.6">' + claims.length + ' claim(s)</div></div>' +
       '</div>' +
       '<div class="card"><div class="tbl-wrap"><table>' +
-        '<thead><tr><th>OR No.</th><th>Item</th><th>Qty</th><th>&#8369;/Unit</th><th>Total</th><th>Status</th><th>Time</th></tr></thead>' +
+        '<thead><tr><th>OR No.</th><th>Item</th><th>Qty</th><th>&#8369;/Unit</th><th>Total</th><th>Status</th><th>Time</th><th>Receipt</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
       '</table></div></div>';
   } catch(e) {
@@ -6753,6 +6757,155 @@ async function inc_loadAgentClaims(date) {
 }
 
 // ── CLAIM MODAL (one OR number -> many items, amount by category) ─────
+// ── LOCAL RECEIPT PHOTOS (agent) ─────────────────────────────
+// Agents can snap/upload their OR receipt as a personal copy. Photos are kept ONLY in
+// this browser/phone (IndexedDB) - nothing is sent to the server or Google Sheets.
+// Stored per logged-in user + OR number, so agents sharing a device don't see each other's.
+const INC_PHOTO_DB    = 'ae_pos_local';
+const INC_PHOTO_STORE = 'or_photos';
+
+function inc_photoDb() {
+  return new Promise(function(resolve, reject) {
+    if (!window.indexedDB) { reject(new Error('This browser cannot store photos.')); return; }
+    const rq = indexedDB.open(INC_PHOTO_DB, 1);
+    rq.onupgradeneeded = function() { rq.result.createObjectStore(INC_PHOTO_STORE); };
+    rq.onsuccess = function() { resolve(rq.result); };
+    rq.onerror   = function() { reject(rq.error || new Error('Storage error.')); };
+  });
+}
+function inc_photoUser() { return String((currentUser && (currentUser.id || currentUser.username)) || ''); }
+function inc_photoKey(inv) { return inc_photoUser() + '|' + String(inv || '').trim().toUpperCase(); }
+
+async function inc_photoPut(inv, dataUrl) {
+  const db = await inc_photoDb();
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e) {}
+  return new Promise(function(resolve, reject) {
+    const tx = db.transaction(INC_PHOTO_STORE, 'readwrite');
+    tx.objectStore(INC_PHOTO_STORE).put({ data: dataUrl, ts: Date.now() }, inc_photoKey(inv));
+    tx.oncomplete = function() { resolve(true); };
+    tx.onerror    = function() { reject(tx.error || new Error('Could not save photo.')); };
+  });
+}
+async function inc_photoGet(inv) {
+  const db = await inc_photoDb();
+  return new Promise(function(resolve, reject) {
+    const rq = db.transaction(INC_PHOTO_STORE, 'readonly').objectStore(INC_PHOTO_STORE).get(inc_photoKey(inv));
+    rq.onsuccess = function() { resolve(rq.result ? rq.result.data : null); };
+    rq.onerror   = function() { reject(rq.error); };
+  });
+}
+async function inc_photoDel(inv) {
+  const db = await inc_photoDb();
+  return new Promise(function(resolve, reject) {
+    const tx = db.transaction(INC_PHOTO_STORE, 'readwrite');
+    tx.objectStore(INC_PHOTO_STORE).delete(inc_photoKey(inv));
+    tx.oncomplete = function() { resolve(true); };
+    tx.onerror    = function() { reject(tx.error); };
+  });
+}
+// Set of OR numbers (upper-cased) that already have a photo for the current user
+async function inc_photoHave() {
+  const db = await inc_photoDb();
+  const prefix = inc_photoUser() + '|';
+  return new Promise(function(resolve, reject) {
+    const rq = db.transaction(INC_PHOTO_STORE, 'readonly').objectStore(INC_PHOTO_STORE).getAllKeys();
+    rq.onsuccess = function() {
+      const set = new Set();
+      (rq.result || []).forEach(function(k) { k = String(k); if (k.indexOf(prefix) === 0) set.add(k.slice(prefix.length)); });
+      resolve(set);
+    };
+    rq.onerror = function() { reject(rq.error); };
+  });
+}
+
+// Shrink the photo (phone cameras make 3-8 MB files) to ~150-300 KB, still readable
+function inc_photoCompress(file) {
+  return new Promise(function(resolve, reject) {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = function() {
+      const MAX = 1400;
+      const sc  = Math.min(1, MAX / Math.max(img.width, img.height));
+      const w = Math.round(img.width * sc), h = Math.round(img.height * sc);
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(cv.toDataURL('image/jpeg', 0.75));
+    };
+    img.onerror = function() { URL.revokeObjectURL(url); reject(new Error('That file is not a readable image.')); };
+    img.src = url;
+  });
+}
+
+// Photo chosen inside the "Add Incentive Claim" form (kept in memory until Submit succeeds)
+async function inc_photoPicked(input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  try {
+    inc_claimState.photo = await inc_photoCompress(file);
+    inc_photoRenderPreview();
+  } catch(e) { toast(e.message || 'Could not read photo.', 'error'); }
+  input.value = '';
+}
+function inc_photoClear() { inc_claimState.photo = null; inc_photoRenderPreview(); }
+function inc_photoRenderPreview() {
+  const box = document.getElementById('inc_photo_preview');
+  if (!box) return;
+  box.innerHTML = inc_claimState.photo
+    ? '<div style="display:flex;align-items:center;gap:10px;margin-top:8px">' +
+        '<img src="' + inc_claimState.photo + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1.5px solid var(--border)">' +
+        '<div style="font-size:0.78rem;color:var(--text2)">Photo ready. It will be saved on this device when you submit.</div>' +
+        '<button type="button" class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="inc_photoClear()">Remove</button>' +
+      '</div>'
+    : '';
+}
+
+// View / add / replace / delete / download a saved receipt photo (from the claims list)
+async function inc_photoModal(inv) {
+  let data = null, err = '';
+  try { data = await inc_photoGet(inv); } catch(e) { err = e.message || 'Storage error.'; }
+  const safeInv = esc(inv);
+  const jsInv   = String(inv).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  openModal(
+    '<div class="modal-title">Receipt Photo &mdash; OR ' + safeInv + '</div>' +
+    (err ? '<div style="color:var(--red,#ef4444);font-size:0.85rem;margin-bottom:10px">' + esc(err) + '</div>' : '') +
+    (data
+      ? '<img src="' + data + '" style="width:100%;max-height:60vh;object-fit:contain;border-radius:10px;border:1.5px solid var(--border);background:#fff">'
+      : '<div style="font-size:0.85rem;color:var(--text2);margin-bottom:10px">No photo saved for this OR yet.</div>') +
+    '<div style="font-size:0.74rem;color:var(--text3);margin:8px 0 12px">Saved only on this device/browser &mdash; not uploaded to the system. If you clear your browser data it will be removed, so use Download to keep a copy in your gallery.</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<label class="btn btn-primary btn-sm" style="cursor:pointer">' + (data ? 'Retake' : 'Take Photo') +
+        '<input type="file" accept="image/*" capture="environment" style="display:none" onchange="inc_photoSaveFor(\'' + jsInv + '\', this)"></label>' +
+      '<label class="btn btn-ghost btn-sm" style="cursor:pointer">Upload' +
+        '<input type="file" accept="image/*" style="display:none" onchange="inc_photoSaveFor(\'' + jsInv + '\', this)"></label>' +
+      (data ? '<a class="btn btn-ghost btn-sm" download="OR_' + safeInv + '.jpg" href="' + data + '">Download</a>' +
+              '<button type="button" class="btn btn-danger btn-sm" onclick="inc_photoDelete(\'' + jsInv + '\')">Delete</button>' : '') +
+    '</div>'
+  );
+}
+async function inc_photoSaveFor(inv, input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  try {
+    const data = await inc_photoCompress(file);
+    await inc_photoPut(inv, data);
+    toast('Receipt photo saved on this device.', 'success');
+    inc_photoModal(inv);
+    inc_loadAgentClaims(localDateStr(new Date()));
+  } catch(e) { toast(e.message || 'Could not save photo.', 'error'); }
+  input.value = '';
+}
+async function inc_photoDelete(inv) {
+  if (!confirm('Delete the saved photo for OR ' + inv + ' from this device?')) return;
+  try {
+    await inc_photoDel(inv);
+    toast('Photo deleted.', 'success');
+    closeModalDirect();
+    inc_loadAgentClaims(localDateStr(new Date()));
+  } catch(e) { toast('Could not delete photo.', 'error'); }
+}
+
 function inc_money(n) { return '&#8369;' + (parseFloat(n) || 0).toFixed(2); }
 
 function inc_catAmount(catName) {
@@ -6797,6 +6950,18 @@ async function inc_openClaimModal() {
     '<datalist id="inc_prodlist"></datalist>' +
     '<div id="inc_items"></div>' +
     '<button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="inc_addItemRow()">+ Add another item</button>' +
+
+    '<div style="margin-top:14px">' +
+      '<div style="font-size:0.78rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:6px">Receipt Photo (optional)</div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<label class="btn btn-ghost btn-sm" style="cursor:pointer">&#128247; Take Photo' +
+          '<input type="file" accept="image/*" capture="environment" style="display:none" onchange="inc_photoPicked(this)"></label>' +
+        '<label class="btn btn-ghost btn-sm" style="cursor:pointer">Upload' +
+          '<input type="file" accept="image/*" style="display:none" onchange="inc_photoPicked(this)"></label>' +
+      '</div>' +
+      '<div style="font-size:0.72rem;color:var(--text3);margin-top:4px">Your own copy of the receipt. Saved only on this phone/browser, not sent to the system.</div>' +
+      '<div id="inc_photo_preview"></div>' +
+    '</div>' +
 
     '<div id="inc_valbox" style="display:none;border-radius:8px;padding:12px 14px;margin-top:10px;font-size:0.84rem"></div>' +
     '<div id="inc_summary" style="background:var(--bg2,#f7f8fa);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:12px"></div>' +
@@ -7030,6 +7195,10 @@ async function inc_submitClaim() {
   try {
     const res = await gasPost(payload);
     if (res.success) {
+      if (inc_claimState.photo) {
+        try { await inc_photoPut(payload.invoiceNo, inc_claimState.photo); }
+        catch(pe) { toast('Claim saved, but the receipt photo could not be stored on this device.', 'warning'); }
+      }
       toast('Incentive claim submitted! &#8369;' + (parseFloat(res.totalIncentive) || 0).toFixed(2) + ' (' + (res.count || payload.items.length) + ' item/s)', 'success');
       closeModalDirect();
       inc_loadAgentClaims(localDateStr(new Date()));
