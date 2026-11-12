@@ -6988,18 +6988,7 @@ async function inc_photoRowClick(inv) {
   } catch(e) { inc_photoGallery(inv); }
 }
 
-// Photo section inside the "Add Incentive Claim" form
-async function inc_photoPicked(input) {
-  const file = input && input.files && input.files[0];
-  if (!file) return;
-  try {
-    const data = await inc_photoCompress(file);
-    inc_claimState.photoId = await inc_photoAdd(data, '');   // saved right away = already backed up
-    toast('Photo saved on this device.', 'success');
-    inc_photoRenderPreview();
-  } catch(e) { toast(e.message || 'Could not read photo.', 'error'); }
-  input.value = '';
-}
+// Photo section inside the "Add Incentive Claim" form (choose from saved Receipt Photos)
 function inc_photoSelect(id) { inc_claimState.photoId = id; inc_photoRenderPreview(); }
 function inc_photoDeselect() { inc_claimState.photoId = null; inc_photoRenderPreview(); }
 async function inc_photoRenderPreview() {
@@ -7024,7 +7013,7 @@ async function inc_photoRenderPreview() {
         '<div style="display:flex;gap:6px;flex-wrap:wrap">' + others.map(function(r) {
           return '<img src="' + r.data + '" title="' + safeFormatDateTime(new Date(r.ts).toISOString()) + '" style="width:52px;height:52px;object-fit:cover;border-radius:6px;border:1.5px solid var(--border);cursor:pointer" onclick="inc_photoSelect(\'' + r.id + '\')">';
         }).join('') + '</div>'
-      : '');
+      : (selRec ? '' : '<div style="font-size:0.74rem;color:var(--text3);margin-top:6px">No saved photos waiting. Use <b>Receipt Photos</b> on the main page to take one.</div>'));
 }
 
 function inc_money(n) { return '&#8369;' + (parseFloat(n) || 0).toFixed(2); }
@@ -7074,13 +7063,7 @@ async function inc_openClaimModal() {
 
     '<div style="margin-top:14px">' +
       '<div style="font-size:0.78rem;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:6px">Receipt Photo (optional)</div>' +
-      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-        '<label class="btn btn-ghost btn-sm" style="cursor:pointer">&#128247; Take Photo' +
-          '<input type="file" accept="image/*" capture="environment" style="display:none" onchange="inc_photoPicked(this)"></label>' +
-        '<label class="btn btn-ghost btn-sm" style="cursor:pointer">Upload' +
-          '<input type="file" accept="image/*" style="display:none" onchange="inc_photoPicked(this)"></label>' +
-      '</div>' +
-      '<div style="font-size:0.72rem;color:var(--text3);margin-top:4px">Can\'t get the details yet? Take the photo now and fill in the OR later. Your own copy, saved only on this phone/browser, not sent to the system.</div>' +
+      '<div style="font-size:0.72rem;color:var(--text3)">Pick a photo you already saved under <b>Receipt Photos</b> (take it there first, then come back here). Your own copy, saved only on this phone/browser, not sent to the system.</div>' +
       '<div id="inc_photo_preview"></div>' +
     '</div>' +
 
