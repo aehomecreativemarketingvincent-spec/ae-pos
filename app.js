@@ -6712,6 +6712,7 @@ async function inc_renderAgentPage() {
       '<div style="display:flex;gap:8px">' +
         '<button class="btn btn-ghost btn-sm" onclick="inc_renderAgentPage()" title="Refresh">&#8635; Refresh</button>' +
         '<button class="btn btn-ghost btn-sm" onclick="inc_photoGallery()">&#128247; Receipt Photos</button>' +
+        '<button class="btn btn-ghost btn-sm" onclick="inc_proofGallery()">&#128247; Proof of Sale</button>' +
         '<button class="btn btn-primary" onclick="inc_openClaimModal()">+ Add Incentive Claim</button>' +
       '</div>' +
     '</div>' +
@@ -7008,6 +7009,126 @@ async function inc_photoRenderPreview() {
         '<button type="button" class="btn btn-ghost btn-sm" onclick="inc_photoDeselect()">Remove</button>' +
       '</span>' +
     '</div>';
+}
+
+// ── PROOF OF SALE PHOTOS (agent) ──────────────────────────────
+// Standalone gallery, separate from the receipt photos and from incentive claims.
+// Photos are kept ONLY in this browser/phone (own IndexedDB), per logged-in user.
+// Nothing is sent to the server. Agents can download them to their gallery.
+const INC_PROOF_DB    = 'ae_pos_proof';
+const INC_PROOF_STORE = 'photos';
+
+function inc_proofDb() {
+  return new Promise(function(resolve, reject) {
+    if (!window.indexedDB) { reject(new Error('This browser cannot store photos.')); return; }
+    const rq = indexedDB.open(INC_PROOF_DB, 1);
+    rq.onupgradeneeded = function() { rq.result.createObjectStore(INC_PROOF_STORE, { keyPath: 'id' }); };
+    rq.onsuccess = function() { resolve(rq.result); };
+    rq.onerror   = function() { reject(rq.error || new Error('Storage error.')); };
+  });
+}
+function inc_proofUser() { return String((currentUser && (currentUser.id || currentUser.username)) || ''); }
+
+async function inc_proofAdd(dataUrl) {
+  const db = await inc_proofDb();
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e) {}
+  const rec = { id: 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                user: inc_proofUser(), data: dataUrl, ts: Date.now() };
+  return new Promise(function(resolve, reject) {
+    const tx = db.transaction(INC_PROOF_STORE, 'readwrite');
+    tx.objectStore(INC_PROOF_STORE).put(rec);
+    tx.oncomplete = function() { resolve(rec.id); };
+    tx.onerror    = function() { reject(tx.error || new Error('Could not save photo.')); };
+  });
+}
+async function inc_proofList() {
+  const db = await inc_proofDb();
+  const me = inc_proofUser();
+  return new Promise(function(resolve, reject) {
+    const rq = db.transaction(INC_PROOF_STORE, 'readonly').objectStore(INC_PROOF_STORE).getAll();
+    rq.onsuccess = function() {
+      resolve((rq.result || []).filter(function(r) { return r.user === me; }).sort(function(a, b) { return b.ts - a.ts; }));
+    };
+    rq.onerror = function() { reject(rq.error); };
+  });
+}
+async function inc_proofGet(id) {
+  const rec = (await inc_proofList()).find(function(r) { return r.id === id; });
+  return rec || null;
+}
+async function inc_proofRemove(id) {
+  const rec = await inc_proofGet(id);
+  if (!rec) return true;
+  const db = await inc_proofDb();
+  return new Promise(function(resolve, reject) {
+    const tx = db.transaction(INC_PROOF_STORE, 'readwrite');
+    tx.objectStore(INC_PROOF_STORE).delete(id);
+    tx.oncomplete = function() { resolve(true); };
+    tx.onerror    = function() { reject(tx.error); };
+  });
+}
+
+async function inc_proofGallery() {
+  let list = [], err = '';
+  try { list = await inc_proofList(); } catch(e) { err = e.message || 'Storage error.'; }
+  const cards = list.slice(0, 40).map(function(r) {
+    return '<div style="width:150px;border:1.5px solid var(--border);border-radius:10px;padding:8px;background:#fff">' +
+      '<img src="' + r.data + '" style="width:100%;height:110px;object-fit:cover;border-radius:6px;cursor:pointer" onclick="inc_proofView(\'' + r.id + '\')">' +
+      '<div style="font-size:0.7rem;color:var(--text3);margin:5px 0 6px">' + safeFormatDateTime(new Date(r.ts).toISOString()) + '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:4px">' +
+        '<button class="btn btn-ghost btn-sm" onclick="inc_proofDownload(\'' + r.id + '\')">Download</button>' +
+        '<button class="btn btn-danger btn-sm" onclick="inc_proofDeleteConfirm(\'' + r.id + '\')">Delete</button>' +
+      '</div></div>';
+  }).join('');
+  openModal(
+    '<div class="modal-title">Proof of Sale Photos</div>' +
+    (err ? '<div style="color:var(--red,#ef4444);font-size:0.85rem;margin-bottom:10px">' + esc(err) + '</div>' : '') +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' +
+      '<label class="btn btn-primary btn-sm" style="cursor:pointer">&#128247; Take Photo' +
+        '<input type="file" accept="image/*" capture="environment" style="display:none" onchange="inc_proofAddFromInput(this)"></label>' +
+      '<label class="btn btn-ghost btn-sm" style="cursor:pointer">Upload' +
+        '<input type="file" accept="image/*" style="display:none" onchange="inc_proofAddFromInput(this)"></label>' +
+    '</div>' +
+    '<div style="font-size:0.74rem;color:var(--text3);margin-bottom:12px">Your own proof-of-sale photos (for example the item sold). Saved only on this device/browser, not uploaded to the system, and separate from your receipt photos. Download the ones you want to keep &mdash; clearing your browser data removes them. If a person is in the photo, ask their permission first.</div>' +
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;max-height:55vh;overflow-y:auto">' +
+      (cards || '<div style="font-size:0.85rem;color:var(--text2)">No proof-of-sale photos yet.</div>') +
+    '</div>'
+  );
+}
+async function inc_proofAddFromInput(input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  try {
+    const data = await inc_photoCompress(file);
+    await inc_proofAdd(data);
+    toast('Photo saved on this device.', 'success');
+    inc_proofGallery();
+  } catch(e) { toast(e.message || 'Could not save photo.', 'error'); }
+  input.value = '';
+}
+async function inc_proofView(id) {
+  try {
+    const rec = await inc_proofGet(id);
+    if (rec) inc_photoShow(rec.data, safeFormatDateTime(new Date(rec.ts).toISOString()));
+  } catch(e) { toast('Could not open photo.', 'error'); }
+}
+async function inc_proofDownload(id) {
+  try {
+    const rec = await inc_proofGet(id);
+    if (!rec) return;
+    const a = document.createElement('a');
+    a.href = rec.data;
+    a.download = 'proof_of_sale_' + localDateStr(new Date(rec.ts)) + '_' + rec.id + '.jpg';
+    document.body.appendChild(a); a.click(); a.remove();
+  } catch(e) { toast('Could not download photo.', 'error'); }
+}
+async function inc_proofDeleteConfirm(id) {
+  if (!confirm('Delete this photo from this device? This cannot be undone.')) return;
+  try {
+    await inc_proofRemove(id);
+    toast('Photo deleted.', 'success');
+    inc_proofGallery();
+  } catch(e) { toast('Could not delete photo.', 'error'); }
 }
 
 function inc_money(n) { return '&#8369;' + (parseFloat(n) || 0).toFixed(2); }
