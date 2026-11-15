@@ -7857,6 +7857,7 @@ function pcx_setList(rows, updatedAt) {
 }
 
 function pcx_renderPage() {
+  try { pcx_closeScanner(); } catch (e) {}
   if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'clerk')) {
     document.getElementById('pageContent').innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>';
     return;
@@ -7869,7 +7870,13 @@ function pcx_renderPage() {
       placeholder="Scan barcode or type product name"
       style="flex:1;min-width:200px;padding:12px;font-size:16px;border:1px solid var(--border,#ccc);border-radius:8px"
       oninput="pcx_onInput()" onkeydown="if(event.key==='Enter'){pcx_onEnter();}">
+    <button class="btn btn-primary" onclick="pcx_openScanner()">Scan</button>
     <button class="btn btn-ghost" onclick="pcx_clearInput()">Clear</button>
+  </div>
+  <div id="pcxScanWrap" style="display:none;margin-top:10px">
+    <video id="pcxVideo" autoplay playsinline muted style="width:100%;border-radius:8px;max-height:220px;object-fit:cover;background:#000"></video>
+    <div id="pcxScanStatus" style="font-size:13px;margin-top:4px;opacity:.8">Point at the barcode...</div>
+    <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="pcx_closeScanner()">Close Camera</button>
   </div>
   <div id="pcxResult" style="margin-top:14px"></div>
 </div>
@@ -8118,4 +8125,87 @@ function pcx_confirmClear() {
     pcx_updateMeta(); pcx_clearInput();
     toast('Price list cleared', 'success');
   }).catch(e => toast(e.message, 'error'));
+}
+
+// ── Price Checker camera scanner (same engines as the POS scanner: BarcodeDetector, ZXing fallback) ──
+const PCXCAM = { stream: null, on: false, raf: 0, last: '', lastAt: 0, reader: null };
+
+async function pcx_openScanner() {
+  const wrap = document.getElementById('pcxScanWrap');
+  const video = document.getElementById('pcxVideo');
+  const status = document.getElementById('pcxScanStatus');
+  if (!wrap || !video) return;
+  if (PCXCAM.on) { pcx_closeScanner(); return; }
+  wrap.style.display = 'block';
+  PCXCAM.on = true; PCXCAM.last = ''; PCXCAM.lastAt = 0;
+  try {
+    PCXCAM.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    video.srcObject = PCXCAM.stream;
+    await video.play();
+    if (status) status.textContent = 'Point at the barcode...';
+
+    let detector = null;
+    if ('BarcodeDetector' in window) {
+      detector = new BarcodeDetector({ formats: ['ean_13','ean_8','code_128','code_39','upc_a','upc_e','qr_code'] });
+    } else {
+      if (typeof ZXing === 'undefined') {
+        if (status) status.textContent = 'Loading scanner...';
+        await loadScript('https://cdn.jsdelivr.net/npm/@zxing/library@0.19.1/umd/index.min.js');
+      }
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+        ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.EAN_8, ZXing.BarcodeFormat.CODE_128,
+        ZXing.BarcodeFormat.CODE_39, ZXing.BarcodeFormat.UPC_A, ZXing.BarcodeFormat.UPC_E, ZXing.BarcodeFormat.QR_CODE
+      ]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      PCXCAM.reader = new ZXing.BrowserMultiFormatReader(hints);
+    }
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (status) status.textContent = 'Point at the barcode...';
+
+    const loop = async () => {
+      if (!PCXCAM.on) return;
+      if (!document.getElementById('pcxVideo')) { pcx_closeScanner(); return; }   // left the page
+      let val = '';
+      try {
+        if (detector) {
+          const codes = await detector.detect(video);
+          if (codes.length) val = String(codes[0].rawValue || '').trim();
+        } else if (video.readyState === video.HAVE_ENOUGH_DATA) {
+          canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0);
+          const lum = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+          const bmp = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
+          val = String(PCXCAM.reader.decodeBitmap(bmp).getText() || '').trim();
+        }
+      } catch (e) {}   // not found is normal
+      const now = Date.now();
+      if (val && (val !== PCXCAM.last || now - PCXCAM.lastAt > 2500)) {
+        PCXCAM.last = val; PCXCAM.lastAt = now;
+        const box = document.getElementById('pcxInput');
+        if (box) box.value = val;
+        pcx_search(true);
+        if (status) status.textContent = 'Scanned: ' + val + ' (scan another or close)';
+        try { inc_notifyUnlock(); } catch (e) {}
+      }
+      PCXCAM.raf = requestAnimationFrame(loop);
+    };
+    loop();
+  } catch (e) {
+    if (status) status.textContent = (e && e.name === 'NotAllowedError') ? 'Camera access denied. Allow camera in browser settings.' : 'Camera error: ' + (e && e.message ? e.message : 'unavailable');
+    PCXCAM.on = false;
+  }
+}
+
+function pcx_closeScanner() {
+  PCXCAM.on = false;
+  if (PCXCAM.raf) { cancelAnimationFrame(PCXCAM.raf); PCXCAM.raf = 0; }
+  if (PCXCAM.stream) { PCXCAM.stream.getTracks().forEach(t => t.stop()); PCXCAM.stream = null; }
+  const wrap = document.getElementById('pcxScanWrap');
+  const video = document.getElementById('pcxVideo');
+  if (wrap) wrap.style.display = 'none';
+  if (video) video.srcObject = null;
 }
