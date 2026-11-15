@@ -479,6 +479,42 @@ function inc_notifyPlay() {
   } catch(e) {}
 }
 
+// Phone-style banner that slides down from the top: who sent it, what it is, tap to open Incentives
+function inc_banner(title, body, kind, ms) {
+  try {
+    let host = document.getElementById('incBannerHost');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'incBannerHost';
+      host.style.cssText = 'position:fixed;top:8px;left:0;right:0;z-index:100000;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none;padding:0 10px';
+      document.body.appendChild(host);
+    }
+    while (host.children.length >= 3) host.removeChild(host.firstChild);
+    const color = kind === 'success' ? '#2e7d32' : kind === 'warning' ? '#ef6c00' : '#1565c0';
+    const el = document.createElement('div');
+    el.style.cssText = 'pointer-events:auto;cursor:pointer;width:100%;max-width:420px;background:#fff;color:#222;border-left:5px solid ' + color +
+      ';border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.28);padding:12px 14px;transform:translateY(-130%);opacity:0;transition:transform .3s ease,opacity .3s ease;font-family:inherit';
+    const t = document.createElement('div');
+    t.style.cssText = 'font-weight:700;font-size:14px;margin-bottom:2px';
+    t.textContent = title;
+    const b = document.createElement('div');
+    b.style.cssText = 'font-size:13px;line-height:1.35;word-break:break-word';
+    b.textContent = body;
+    el.appendChild(t); el.appendChild(b);
+    const close = function() {
+      el.style.transform = 'translateY(-130%)'; el.style.opacity = '0';
+      setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 350);
+    };
+    el.onclick = function() {
+      close();
+      try { if (typeof navigateTo === 'function') navigateTo('incentives'); } catch (e) {}
+    };
+    host.appendChild(el);
+    requestAnimationFrame(function() { requestAnimationFrame(function() { el.style.transform = 'translateY(0)'; el.style.opacity = '1'; }); });
+    setTimeout(close, ms || 8000);
+  } catch (e) {}
+}
+
 async function inc_notifyCheck() {
   if (!currentUser) return;
   const role  = currentUser.role;
@@ -504,9 +540,14 @@ async function inc_notifyCheck() {
     st.pending = new Set(pending.map(function(c) { return c.id; }));
     if (fresh.length) {
       inc_notifyPlay();
-      toast(fresh.length === 1
-        ? 'New incentive claim from ' + (fresh[0].employeeName || 'an agent') + ' (OR ' + (fresh[0].invoiceNo || '') + ') waiting for verification'
-        : fresh.length + ' new incentive claims waiting for verification', 'info', 7000);
+      if (fresh.length === 1) {
+        inc_banner(fresh[0].employeeName || 'An agent', 'New incentive claim (OR ' + (fresh[0].invoiceNo || '') + ') waiting for verification', 'info', 9000);
+      } else {
+        fresh.slice(0, 3).forEach(function(c) {
+          inc_banner(c.employeeName || 'An agent', 'New incentive claim (OR ' + (c.invoiceNo || '') + ')', 'info', 9000);
+        });
+        if (fresh.length > 3) inc_banner('Incentive Tracker', (fresh.length - 3) + ' more new claims waiting for verification', 'info', 9000);
+      }
     }
   } else {
     const changed = [];
@@ -520,10 +561,11 @@ async function inc_notifyCheck() {
       if (changed.length === 1) {
         const c = changed[0];
         const why = c.status === 'Rejected' ? c.rejectionReason : c.status === 'Voided' ? c.voidReason : '';
-        toast('Your claim (OR ' + (c.invoiceNo || '') + ') was ' + c.status + (why ? ': ' + why : ''),
-              c.status === 'Verified' ? 'success' : 'warning', 8000);
+        const by = c.status === 'Verified' ? (c.verifiedBy || c.verifier) : c.status === 'Rejected' ? (c.rejectedBy || c.verifiedBy || c.verifier) : (c.voidedBy || '');
+        inc_banner(by || 'Incentive Tracker', 'Your claim (OR ' + (c.invoiceNo || '') + ') was ' + c.status + (why ? ': ' + why : ''),
+              c.status === 'Verified' ? 'success' : 'warning', 10000);
       } else {
-        toast(changed.length + ' of your claims were updated. Open Incentives to see them.', 'info', 7000);
+        inc_banner('Incentive Tracker', changed.length + ' of your claims were updated. Tap to open Incentives.', 'info', 9000);
       }
     }
   }
