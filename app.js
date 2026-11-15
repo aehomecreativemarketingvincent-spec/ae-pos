@@ -62,6 +62,7 @@ const ROLE_NAV = {
     { id: 'salesExport',    icon: '', label: 'Sales Export' },
     { id: 'wholesalers',    icon: '', label: 'Wholesalers' },
     { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
+    { id: 'priceChecker',   icon: '', label: 'Price Checker' },
     { id: 'incentives',     icon: '', label: 'Incentives' },
   ],
   cashier: [
@@ -79,6 +80,7 @@ const ROLE_NAV = {
     { id: 'salesExport',    icon: '', label: 'Sales Export' },
     { id: 'wholesalers',    icon: '', label: 'Wholesalers' },
     { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
+    { id: 'priceChecker',   icon: '', label: 'Price Checker' },
     { id: 'incentives',     icon: '', label: 'Incentives' },
   ],
   agent: [
@@ -703,6 +705,7 @@ function navigateTo(page) {
     salesExport: 'Sales Export',
     wholesalers: 'Wholesalers Information',
     inventoryAudit: 'Inventory Audit',
+    priceChecker:   'Price Checker',
     incentives:     'Incentive Tracker'
   };
  document.getElementById('topbarTitle').textContent = titles[page] || page;
@@ -743,6 +746,7 @@ function renderPage(page) {
     salesExport: renderSalesExport,
     wholesalers: renderWholesalers,
     inventoryAudit: audit_renderPage,
+    priceChecker:   pcx_renderPage,
     incentives:     inc_renderPage,
   };
   if (pages[page]) pages[page]();
@@ -765,7 +769,7 @@ function handleAuthError(res) {
 // ─── GAS REQUEST ─────────────────────────────
 // Read-only actions are safe to retry automatically when the server is busy / the network blips.
 // Writes (gasPost) are never auto-retried, to avoid saving twice.
-const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get)/;   // not the session poller: it must never add load
+const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|pc_get)/;   // not the session poller: it must never add load
 async function gasRequest(params, timeoutMs = 30000) {
   const canRetry = GAS_READ_RE.test(String((params && params.action) || ''));
   let lastErr;
@@ -7755,4 +7759,321 @@ function inc_actionBtns(c) {
     '</div>';
   }
   return '';
+}
+
+
+// ═══════════════════════════════════════════════
+// PRICE CHECKER (admin + clerk) — separate "Price Checker" sheet.
+// The full list is cached in this browser (IndexedDB) so every lookup is instant
+// and never calls the server. Upload replaces the whole list.
+// ═══════════════════════════════════════════════
+const PCX = { map: new Map(), list: [], updatedAt: '', count: 0, pending: null, busy: false, timer: null };
+
+function pcx_norm(b) {
+  const s = String(b == null ? '' : b).trim().replace(/\s+/g, '');
+  return s.replace(/^0+(?=\d)/, '');   // ignore leading zeros so scanner (EAN) and sheet values still match
+}
+function pcx_money(n) {
+  return '₱' + Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function pcx_db() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('ae_price_checker', 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore('kv'); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+async function pcx_cacheGet() {
+  try {
+    const db = await pcx_db();
+    return await new Promise(res => {
+      const r = db.transaction('kv').objectStore('kv').get('list');
+      r.onsuccess = () => res(r.result || null);
+      r.onerror   = () => res(null);
+    });
+  } catch (e) { return null; }
+}
+async function pcx_cachePut(obj) {
+  try {
+    const db = await pcx_db();
+    await new Promise(res => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(obj, 'list');
+      tx.oncomplete = res; tx.onerror = res; tx.onabort = res;
+    });
+  } catch (e) {}
+}
+
+function pcx_setList(rows, updatedAt) {
+  PCX.list = rows;
+  PCX.updatedAt = updatedAt || '';
+  PCX.count = rows.length;
+  PCX.map = new Map();
+  rows.forEach(r => PCX.map.set(pcx_norm(r[0]), r));
+}
+
+function pcx_renderPage() {
+  if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'clerk')) {
+    document.getElementById('pageContent').innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>';
+    return;
+  }
+  document.getElementById('pageContent').innerHTML = `
+<div class="card">
+  <div class="card-title">Price Checker</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <input id="pcxInput" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
+      placeholder="Scan barcode or type product name"
+      style="flex:1;min-width:200px;padding:12px;font-size:16px;border:1px solid var(--border,#ccc);border-radius:8px"
+      oninput="pcx_onInput()" onkeydown="if(event.key==='Enter'){pcx_onEnter();}">
+    <button class="btn btn-ghost" onclick="pcx_clearInput()">Clear</button>
+  </div>
+  <div id="pcxResult" style="margin-top:14px"></div>
+</div>
+<div class="card">
+  <div class="card-title">List</div>
+  <div id="pcxMeta" style="font-size:13px;opacity:.8;margin-bottom:10px"></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn btn-primary btn-sm" onclick="document.getElementById('pcxFile').click()">Upload List</button>
+    <button class="btn btn-ghost btn-sm" onclick="pcx_refresh(true)">Refresh</button>
+    <button class="btn btn-danger btn-sm" onclick="pcx_confirmClear()">Clear List</button>
+    <input id="pcxFile" type="file" accept=".xlsx,.xls,.csv" style="display:none" onchange="pcx_onFile(this)">
+  </div>
+  <div style="font-size:12px;opacity:.7;margin-top:8px">Columns: Barcode, Product Name, Retail Price. Uploading a new file replaces the whole list.</div>
+</div>`;
+  pcx_updateMeta();
+  pcx_load();
+  setTimeout(() => { const i = document.getElementById('pcxInput'); if (i) i.focus(); }, 100);
+}
+
+function pcx_updateMeta() {
+  const el = document.getElementById('pcxMeta');
+  if (!el) return;
+  if (!PCX.count) { el.textContent = 'No list loaded yet. Upload a file to start.'; return; }
+  let when = '';
+  if (PCX.updatedAt) { try { when = ' • updated ' + safeFormatDateTime(PCX.updatedAt); } catch (e) {} }
+  el.textContent = PCX.count.toLocaleString() + ' items' + when;
+}
+
+async function pcx_load() {
+  const cached = await pcx_cacheGet();
+  if (cached && cached.rows && cached.rows.length) {
+    pcx_setList(cached.rows, cached.updatedAt);
+    pcx_updateMeta();
+  } else {
+    await pcx_refresh(false);
+  }
+}
+
+async function pcx_refresh(manual) {
+  try {
+    if (manual) toast('Loading list...', 'info', 1500);
+    const r = await gasRequest({ action: 'pc_getAll' }, 60000);
+    if (!r || !r.success) { toast((r && r.message) || 'Could not load the list.', 'error'); return; }
+    pcx_setList(r.data || [], r.updatedAt);
+    await pcx_cachePut({ rows: PCX.list, updatedAt: PCX.updatedAt });
+    pcx_updateMeta();
+    pcx_onInput();
+    if (manual) toast('List updated: ' + PCX.count.toLocaleString() + ' items', 'success');
+  } catch (e) {
+    toast('Could not load the list: ' + e.message, 'error');
+  }
+}
+
+function pcx_clearInput() {
+  const i = document.getElementById('pcxInput');
+  if (i) { i.value = ''; i.focus(); }
+  const r = document.getElementById('pcxResult');
+  if (r) r.innerHTML = '';
+}
+
+function pcx_onInput() {
+  clearTimeout(PCX.timer);
+  PCX.timer = setTimeout(pcx_search, 120);
+}
+function pcx_onEnter() {
+  clearTimeout(PCX.timer);
+  pcx_search(true);
+}
+
+function pcx_card(r) {
+  return '<div style="border:2px solid #2e7d32;border-radius:12px;padding:16px;text-align:center">' +
+    '<div style="font-size:15px;font-weight:600">' + esc(r[1]) + '</div>' +
+    '<div style="font-size:40px;font-weight:800;margin:8px 0">' + pcx_money(r[2]) + '</div>' +
+    '<div style="font-size:12px;opacity:.7">Barcode: ' + esc(r[0]) + '</div></div>';
+}
+
+function pcx_search(fromEnter) {
+  const box = document.getElementById('pcxInput');
+  const out = document.getElementById('pcxResult');
+  if (!box || !out) return;
+  const q = box.value.trim();
+  if (!q) { out.innerHTML = ''; return; }
+  if (!PCX.count) { out.innerHTML = '<div style="opacity:.7">No list loaded. Upload a list first.</div>'; return; }
+
+  const exact = PCX.map.get(pcx_norm(q));
+  if (exact) {
+    out.innerHTML = pcx_card(exact);
+    if (fromEnter === true) { box.select(); }   // scanner: ready for the next scan
+    return;
+  }
+  const tokens = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = [];
+  for (let i = 0; i < PCX.list.length && hits.length < 30; i++) {
+    const r = PCX.list[i];
+    const name = String(r[1]).toLowerCase();
+    const bc   = String(r[0]).toLowerCase();
+    if (tokens.every(t => name.indexOf(t) !== -1 || bc.indexOf(t) !== -1)) hits.push(r);
+  }
+  if (!hits.length) {
+    out.innerHTML = '<div style="opacity:.7">No match for "' + esc(q) + '".</div>';
+    if (fromEnter === true) box.select();
+    return;
+  }
+  if (hits.length === 1 && fromEnter === true) { out.innerHTML = pcx_card(hits[0]); return; }
+  out.innerHTML = hits.map((r, i) =>
+    '<div onclick="pcx_pick(' + PCX.list.indexOf(r) + ')" style="display:flex;justify-content:space-between;gap:10px;padding:10px 4px;border-bottom:1px solid rgba(128,128,128,.25);cursor:pointer">' +
+      '<div style="min-width:0"><div style="font-weight:600">' + esc(r[1]) + '</div><div style="font-size:12px;opacity:.65">' + esc(r[0]) + '</div></div>' +
+      '<div style="font-weight:700;white-space:nowrap">' + pcx_money(r[2]) + '</div></div>'
+  ).join('') + (hits.length >= 30 ? '<div style="font-size:12px;opacity:.65;padding-top:8px">Showing first 30. Type more to narrow down.</div>' : '');
+}
+function pcx_pick(idx) {
+  const r = PCX.list[idx];
+  const out = document.getElementById('pcxResult');
+  if (r && out) out.innerHTML = pcx_card(r);
+}
+
+// ── Upload ────────────────────────────────────
+function pcx_parsePrice(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  const n = parseFloat(String(v == null ? '' : v).replace(/[₱,\s]|php/gi, ''));
+  return isNaN(n) ? 0 : n;
+}
+function pcx_cellBarcode(v) {
+  if (typeof v === 'number') return v.toFixed(0);   // avoids 8.9E+12 style output
+  return String(v == null ? '' : v).trim();
+}
+
+function pcx_onFile(input) {
+  const f = input.files && input.files[0];
+  input.value = '';
+  if (!f) return;
+  if (typeof XLSX === 'undefined') { toast('Spreadsheet reader not loaded. Check your internet and reload.', 'error'); return; }
+  const rd = new FileReader();
+  rd.onerror = () => toast('Could not read the file.', 'error');
+  rd.onload = () => {
+    try {
+      const wb = XLSX.read(new Uint8Array(rd.result), { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+      pcx_prepare(rows, f.name);
+    } catch (e) {
+      toast('Could not read this file: ' + e.message, 'error');
+    }
+  };
+  rd.readAsArrayBuffer(f);
+}
+
+function pcx_prepare(rows, fileName) {
+  if (!rows.length) { toast('The file is empty.', 'error'); return; }
+  let cb = 0, cn = 1, cp = 2, start = 0;
+  const head = rows[0].map(h => String(h == null ? '' : h).toLowerCase().trim());
+  const fb = head.findIndex(h => /barcode|bar code|upc|ean|sku|code/.test(h));
+  const fn = head.findIndex(h => /product|name|item|description/.test(h));
+  const fp = head.findIndex(h => /price|srp|retail/.test(h));
+  if (fb !== -1 && fn !== -1 && fp !== -1) { cb = fb; cn = fn; cp = fp; start = 1; }
+  else if (fb !== -1 || fn !== -1 || fp !== -1) { start = 1; }   // header present but unusual names: use columns A, B, C
+
+  const seen = new Map();
+  let skipped = 0;
+  for (let i = start; i < rows.length; i++) {
+    const r = rows[i];
+    const barcode = pcx_cellBarcode(r[cb]);
+    const name    = String(r[cn] == null ? '' : r[cn]).trim();
+    if (!barcode || !name) { skipped++; continue; }
+    seen.set(pcx_norm(barcode), [barcode, name, pcx_parsePrice(r[cp])]);   // duplicates: last one wins
+  }
+  const list = Array.from(seen.values());
+  if (!list.length) { toast('No valid rows found. Columns must be Barcode, Product Name, Retail Price.', 'error'); return; }
+  PCX.pending = list;
+  const sample = list.slice(0, 5).map(r =>
+    '<tr><td style="padding:4px 8px">' + esc(r[0]) + '</td><td style="padding:4px 8px">' + esc(r[1]) + '</td><td style="padding:4px 8px;text-align:right">' + pcx_money(r[2]) + '</td></tr>').join('');
+  openModal(`
+<div style="padding:4px">
+  <h3 style="margin:0 0 8px">Upload Price List</h3>
+  <div style="font-size:14px;margin-bottom:8px">File: ${esc(fileName)}<br>
+    <b>${list.length.toLocaleString()}</b> items ready${skipped ? ' (' + skipped + ' rows skipped: missing barcode or name)' : ''}.<br>
+    This replaces the current list.</div>
+  <table style="width:100%;font-size:12px;border-collapse:collapse;margin-bottom:12px">
+    <tr style="opacity:.7"><td style="padding:4px 8px">Barcode</td><td style="padding:4px 8px">Product Name</td><td style="padding:4px 8px;text-align:right">Retail Price</td></tr>${sample}
+  </table>
+  <div id="pcxProg" style="font-size:13px;margin-bottom:10px"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button class="btn btn-ghost" id="pcxCancelBtn" onclick="closeModalDirect()">Cancel</button>
+    <button class="btn btn-primary" id="pcxGoBtn" onclick="pcx_upload(0)">Upload</button>
+  </div>
+</div>`);
+}
+
+// Each request is a GET with the data in the URL, so batches are sized by encoded length, not row count.
+function pcx_makeBatches(list) {
+  const MAX = 3500, batches = [];
+  let cur = [], len = 2;
+  list.forEach(r => {
+    const l = JSON.stringify(r).length + 1;
+    if (cur.length && (len + l > MAX || cur.length >= 400)) { batches.push(cur); cur = []; len = 2; }
+    cur.push(r); len += l;
+  });
+  if (cur.length) batches.push(cur);
+  return batches;
+}
+
+async function pcx_upload(fromBatch) {
+  if (PCX.busy || !PCX.pending) return;
+  PCX.busy = true;
+  const go = document.getElementById('pcxGoBtn'), cancel = document.getElementById('pcxCancelBtn'), prog = document.getElementById('pcxProg');
+  if (go) go.disabled = true;
+  if (cancel) cancel.disabled = true;
+  const list = PCX.pending, batches = PCX.batches && fromBatch ? PCX.batches : pcx_makeBatches(list);
+  PCX.batches = batches;
+  let saved = 0;
+  for (let i = 0; i < fromBatch; i++) saved += batches[i].length;
+  try {
+    for (let i = fromBatch; i < batches.length; i++) {
+      if (prog) prog.textContent = 'Saving ' + saved.toLocaleString() + ' of ' + list.length.toLocaleString() + '... please do not close this window.';
+      const payload = { action: 'pc_saveBatch', rows: batches[i], isFirstBatch: i === 0 };
+      let res;
+      try { res = await gasPost(payload); }
+      catch (e) { await new Promise(r => setTimeout(r, 2000)); res = await gasPost(payload); }   // one retry
+      if (!res || res.success === false) throw new Error((res && res.message) || 'Save failed');
+      saved += batches[i].length;
+      PCX.resumeFrom = i + 1;
+      await new Promise(r => setTimeout(r, 800));
+    }
+    pcx_setList(list, new Date().toISOString());
+    await pcx_cachePut({ rows: PCX.list, updatedAt: PCX.updatedAt });
+    PCX.pending = null; PCX.batches = null; PCX.resumeFrom = 0;
+    closeModalDirect();
+    toast('Price list uploaded: ' + list.length.toLocaleString() + ' items', 'success');
+    pcx_updateMeta();
+  } catch (e) {
+    const next = PCX.resumeFrom || 0;
+    if (prog) prog.innerHTML = '<span style="color:#c62828">Stopped at ' + saved.toLocaleString() + ' of ' + list.length.toLocaleString() + ': ' + esc(e.message) + '</span>';
+    if (go) { go.disabled = false; go.textContent = 'Resume'; go.onclick = () => pcx_upload(next); }
+    if (cancel) cancel.disabled = false;
+  } finally {
+    PCX.busy = false;
+  }
+}
+
+function pcx_confirmClear() {
+  if (!confirm('Clear the whole price list? This cannot be undone.')) return;
+  gasPost({ action: 'pc_clear' }).then(async r => {
+    if (r && r.success === false) { toast(r.message || 'Could not clear.', 'error'); return; }
+    pcx_setList([], '');
+    await pcx_cachePut({ rows: [], updatedAt: '' });
+    pcx_updateMeta(); pcx_clearInput();
+    toast('Price list cleared', 'success');
+  }).catch(e => toast(e.message, 'error'));
 }
