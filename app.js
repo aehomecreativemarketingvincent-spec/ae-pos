@@ -7879,6 +7879,7 @@ function pcx_renderPage() {
     <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="pcx_closeScanner()">Close Camera</button>
   </div>
   <div id="pcxResult" style="margin-top:14px"></div>
+  <div style="font-size:12px;margin-top:12px;opacity:.8">Note: Prices may vary or be updated. Please double-check the price with the cashier and tell them the product name or barcode.</div>
 </div>
 <div class="card">
   <div class="card-title">List</div>
@@ -7950,7 +7951,8 @@ function pcx_card(r) {
   return '<div style="border:2px solid #2e7d32;border-radius:12px;padding:16px;text-align:center">' +
     '<div style="font-size:15px;font-weight:600">' + esc(r[1]) + '</div>' +
     '<div style="font-size:40px;font-weight:800;margin:8px 0">' + pcx_money(r[2]) + '</div>' +
-    '<div style="font-size:12px;opacity:.7">Barcode: ' + esc(r[0]) + '</div></div>';
+    '<div style="font-size:12px;opacity:.7">Barcode: ' + esc(r[0]) + '</div>' +
+    '<div style="font-size:12px;margin-top:10px;padding:8px;border-radius:8px;background:rgba(239,108,0,.12);color:#b45309">Note: Prices may vary or be updated. Please double-check the price with the cashier and tell them the product name or barcode.</div></div>';
 }
 
 function pcx_search(fromEnter) {
