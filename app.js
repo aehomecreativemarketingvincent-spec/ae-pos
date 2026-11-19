@@ -8229,7 +8229,7 @@ function pcx_closeScanner() {
 // All figures here are ESTIMATES from admin-configured rates, never approved quotations.
 // ═══════════════════════════════════════════════════════════════
 const FIN_ROLES     = ['admin'];
-const FIN_PROVIDERS = ['Skyro', 'Home Credit', 'Salmon', 'Billease', 'PayJoy', 'Tonik'];
+const FIN_PROVIDERS = ['Skyro', 'Home Credit', 'Salmon', 'Billease', 'PayJoy', 'Tonik', 'Credit Card'];
 const FIN_TERMS     = [6, 9, 12, 18, 24];
 const FIN_ST = { PENDING: 'Pending Application', APPROVED: 'Approved', REJECTED: 'Rejected', RELEASED: 'Released / Completed', CANCELLED: 'Cancelled', RELEASING: 'Releasing' };
 const FIN = { settings: null, apps: [], tab: 'apps', filter: 'all', from: '', to: '', busy: false };
@@ -8240,12 +8240,13 @@ function fin_r2(n) { return Math.round(n * 100) / 100; }
 
 // Same formulas as fin_calc_ in Code.gs (the server recomputes and stores its own estimate)
 function fin_calc(cfg, total, dp, term, today) {
-  let rate = cfg.termRates[term];
-  if (rate === undefined) return { ok: false, message: 'No rate configured for this term.' };
-  let promo = false;
-  if (cfg.promoActive && cfg.promoRate !== '' && (!cfg.promoUntil || String(today) <= cfg.promoUntil)) { rate = Number(cfg.promoRate); promo = true; }
   const financed = fin_r2(total - dp);
   if (financed <= 0) return { ok: false, message: 'Down payment leaves nothing to finance.' };
+  let rate = cfg.termRates[term];
+  let promo = false;
+  if (cfg.promoActive && cfg.promoRate !== '' && (!cfg.promoUntil || String(today) <= cfg.promoUntil)) { rate = Number(cfg.promoRate); promo = true; }
+  // blank rate is NOT 0%: no estimate, the approved quotation is entered instead
+  if (rate === undefined) return { ok: true, noRate: true, financed };
   const fees = fin_r2(cfg.feeFixed + financed * cfg.feePct / 100);
   let monthly;
   if (cfg.calcMethod === 'diminishing') {
@@ -8266,6 +8267,12 @@ function fin_dpError(cfg, total, dp) {
   const pct = dp / total * 100;
   if (cfg.minDpPct > 0 && pct + 0.0001 < cfg.minDpPct) return 'Minimum down payment is ' + cfg.minDpPct + '% of the price.';
   if (cfg.maxDpPct < 100 && pct - 0.0001 > cfg.maxDpPct) return 'Maximum down payment is ' + cfg.maxDpPct + '% of the price.';
+  return '';
+}
+function fin_termError(cfg, term, financed) {
+  if ((cfg.terms || []).indexOf(term) < 0) return 'The ' + term + '-month term is not available for ' + cfg.provider + '.';
+  const min = (cfg.minFinanced || {})[term];
+  if (min > 0 && !(financed > min)) return 'The ' + term + '-month term needs a financed amount above ' + fin_money(min) + '.';
   return '';
 }
 function fin_cfg(provider) { return ((FIN.settings || []).find(c => c.provider === provider)) || null; }
@@ -8305,19 +8312,19 @@ async function fin_onPayChange() {
   fin_renderPanel();
 }
 
-function fin_enabledProviders() { return (FIN.settings || []).filter(c => c.enabled && Object.keys(c.termRates).length); }
+function fin_enabledProviders() { return (FIN.settings || []).filter(c => c.enabled && (c.terms || []).length); }
 
 function fin_renderPanel() {
   const panel = document.getElementById('finPanel');
   if (!panel) return;
   const provs = fin_enabledProviders();
   if (!provs.length) {
-    panel.innerHTML = '<div style="font-size:13px;color:#9a3412">No financing provider is enabled with rates yet. Go to Installments > Settings, set the rates, and enable a provider.</div>';
+    panel.innerHTML = '<div style="font-size:13px;color:#9a3412">No financing provider is enabled yet. Go to Installments > Financing Settings, switch on the terms, and enable a provider.</div>';
     return;
   }
   const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:0.9rem;background:#fff;box-sizing:border-box';
   panel.innerHTML =
-    '<div style="font-weight:700;margin-bottom:8px">Installment Application</div>' +
+    '<div id="finTitle" style="font-weight:800;margin-bottom:8px;color:var(--green,#2e7d32)"></div>' +
     '<div class="field"><label>Financing Provider</label><select id="finProvider" style="' + inp + '" onchange="fin_onProviderChange()">' +
       provs.map(c => '<option value="' + esc(c.provider) + '">' + esc(c.provider) + '</option>').join('') + '</select></div>' +
     '<div class="field"><label>Customer Name</label><input id="finCustomer" type="text" maxlength="100" style="' + inp + '" placeholder="Full name"></div>' +
@@ -8325,23 +8332,46 @@ function fin_renderPanel() {
     '<div class="field" style="flex:1"><label id="finDpLabel">Amount</label><input id="finDpVal" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div></div>' +
     '<div class="field"><label>Installment Term</label><select id="finTerm" style="' + inp + '" onchange="fin_recalc()"></select></div>' +
     '<div id="finCalc" style="margin:6px 0 10px"></div>' +
-    '<div style="font-size:12px;opacity:.75;margin-bottom:4px">Optional: enter these if the provider already gave them.</div>' +
-    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Actual Approved Monthly</label><input id="finApprMonthly" type="number" min="0" step="0.01" style="' + inp + '"></div>' +
-    '<div class="field" style="flex:1"><label>Reference No.</label><input id="finRef" type="text" maxlength="60" style="' + inp + '"></div></div>' +
-    '<div style="font-size:12px;opacity:.75">Status will start as Pending Application. The sale and stock deduction happen only when you Release it in Installments.</div>';
+    '<div style="font-weight:700;font-size:13px;margin:8px 0 4px">Actual Approved Quotation (from the provider)</div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Approved Financed Amount</label><input id="finApprAmt" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div>' +
+    '<div class="field" style="flex:1"><label>Approved Monthly Payment</label><input id="finApprMonthly" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div></div>' +
+    '<div id="finDiffWrap" class="field" style="display:none"><label>Reason for the difference</label><input id="finDiffReason" type="text" maxlength="300" style="' + inp + '"></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Fees</label><select id="finFeeType" style="' + inp + '" onchange="fin_recalc()"><option value="">Not specified</option><option value="none">No fees</option><option value="included">Already included in quotation</option><option value="separate">Separate fee</option></select></div>' +
+    '<div class="field" id="finFeeAmtWrap" style="flex:1;display:none"><label>Fee Amount</label><input id="finFeeAmt" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div></div>' +
+    '<div class="field"><label>Application / Reference No.</label><input id="finRef" type="text" maxlength="60" style="' + inp + '"></div>' +
+    '<div style="font-size:12px;margin-bottom:6px">Financing Status: <b>Pending Application</b></div>' +
+    '<div id="finNotice" style="font-size:12px;opacity:.8"></div>';
   fin_onProviderChange();
 }
 
 function fin_onProviderChange() {
   const cfg = fin_cfg((document.getElementById('finProvider') || {}).value);
   if (!cfg) return;
-  const dpSel = document.getElementById('finDpType'), termSel = document.getElementById('finTerm');
+  const dpSel = document.getElementById('finDpType');
   let opts = '<option value="custom">Custom amount</option><option value="percent">Percent of price</option>';
   if (cfg.fixedDpAmt > 0) opts += '<option value="fixed">Fixed (' + fin_money(cfg.fixedDpAmt) + ')</option>';
   if (cfg.zeroDpAllowed) opts += '<option value="zero">Zero down payment</option>';
   dpSel.innerHTML = opts;
-  termSel.innerHTML = FIN_TERMS.filter(t => cfg.termRates[t] !== undefined).map(t => '<option value="' + t + '">' + t + ' months</option>').join('');
+  const t = document.getElementById('finTitle'); if (t) t.textContent = cfg.provider.toUpperCase() + ' INSTALLMENT FINANCING';
+  const n = document.getElementById('finNotice');
+  if (n) n.textContent = 'Financing terms and monthly amortization are subject to ' + cfg.provider + ' approval. Final amounts must follow the approved financing quotation. The sale and stock deduction happen only when the application is Released in Installments.';
+  const termSel = document.getElementById('finTerm'); if (termSel) termSel.dataset.sig = '';
   fin_recalc();
+}
+
+// Term list: every switched-on term is shown; ones that do not qualify for this financed amount are disabled with the reason.
+function fin_refreshTerms(cfg, financed) {
+  const sel = document.getElementById('finTerm'); if (!sel) return;
+  const sig = cfg.provider + '|' + (cfg.terms || []).map(t => t + (fin_termError(cfg, t, financed) ? 'x' : 'o')).join(',');
+  if (sel.dataset.sig === sig) return;
+  const cur = parseInt(sel.value, 10);
+  sel.dataset.sig = sig;
+  sel.innerHTML = FIN_TERMS.filter(t => (cfg.terms || []).indexOf(t) >= 0).map(t => {
+    const bad = fin_termError(cfg, t, financed);
+    return '<option value="' + t + '"' + (bad ? ' disabled' : '') + '>' + t + ' months' + (bad ? ' (needs financed above ' + fin_money(cfg.minFinanced[t]) + ')' : '') + '</option>';
+  }).join('');
+  const ok = Array.from(sel.options).find(o => !o.disabled && Number(o.value) === cur) || Array.from(sel.options).find(o => !o.disabled);
+  if (ok) sel.value = ok.value;
 }
 
 function fin_readDp(cfg, total) {
@@ -8358,6 +8388,11 @@ function fin_readDp(cfg, total) {
   return { type, dp };
 }
 
+function fin_quoteInputs() {
+  const v = id => (document.getElementById(id) || {}).value;
+  return { approvedAmount: parseFloat(v('finApprAmt')) || '', approvedMonthly: parseFloat(v('finApprMonthly')) || '', diffReason: (v('finDiffReason') || '').trim(), feeTreatment: v('finFeeType') || '', feeAmount: parseFloat(v('finFeeAmt')) || '' };
+}
+
 function fin_recalc() {
   const out = document.getElementById('finCalc');
   if (!out) return;
@@ -8365,18 +8400,37 @@ function fin_recalc() {
   if (!cfg) { out.innerHTML = ''; return; }
   const total = ws_currentTotal();
   const { dp } = fin_readDp(cfg, total);
-  const term = parseInt((document.getElementById('finTerm') || {}).value, 10);
   const row = (a, b, bold) => '<div style="display:flex;justify-content:space-between;padding:3px 0;' + (bold ? 'font-weight:700' : '') + '"><span>' + a + '</span><span>' + b + '</span></div>';
   const err = isNaN(dp) ? 'Enter the down payment.' : fin_dpError(cfg, total, dp);
-  if (err) { out.innerHTML = row('Total Selling Price', fin_money(total), true) + '<div style="color:#c62828;font-size:13px;margin-top:4px">' + esc(err) + '</div>'; return; }
+  if (err) { out.innerHTML = row('Selling Price', fin_money(total), true) + '<div style="color:#c62828;font-size:13px;margin-top:4px">' + esc(err) + '</div>'; return; }
+  const financed = fin_r2(total - dp);
+  fin_refreshTerms(cfg, financed);
+  const term = parseInt((document.getElementById('finTerm') || {}).value, 10);
+  const q = fin_quoteInputs();
+  const diffWrap = document.getElementById('finDiffWrap');
+  if (diffWrap) diffWrap.style.display = (q.approvedAmount !== '' && Math.abs(q.approvedAmount - financed) > 0.01) ? 'block' : 'none';
+  const feeWrap = document.getElementById('finFeeAmtWrap');
+  if (feeWrap) feeWrap.style.display = q.feeTreatment === 'separate' ? 'block' : 'none';
+  if (!term) { out.innerHTML = row('Selling Price', fin_money(total), true) + row('Down Payment', fin_money(dp)) + row('Amount Financed', fin_money(financed), true) + '<div style="color:#c62828;font-size:13px;margin-top:4px">No term is available for this financed amount.</div>'; return; }
   const c = fin_calc(cfg, total, dp, term, localDateStr(new Date()));
   if (!c.ok) { out.innerHTML = '<div style="color:#c62828;font-size:13px">' + esc(c.message) + '</div>'; return; }
-  out.innerHTML =
-    row('Total Selling Price', fin_money(total)) + row('Down Payment', fin_money(dp)) + row('Amount Financed', fin_money(c.financed), true) +
-    row('Rate used', c.rate + '% per month' + (c.promo ? ' (promo)' : '')) +
-    row('Estimated Monthly', fin_money(c.monthly), true) + row('Total Installment Payments', fin_money(c.totalInstallments)) +
-    row('Financing Charges', fin_money(c.charges)) + row('Total Payable (DP + installments)', fin_money(c.totalPayable)) +
-    '<div style="margin-top:6px;font-size:12px;font-weight:700;color:#9a3412;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;padding:6px 8px">ESTIMATE ONLY. This is not an approved financing quotation. The provider decides the actual approved amount and monthly.</div>';
+  let html = row('Selling Price', fin_money(total)) + row('Down Payment', fin_money(dp)) + row('Amount Financed', fin_money(financed), true);
+  if (c.noRate) {
+    html += '<div style="margin:6px 0;font-size:13px;color:#9a3412;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;padding:6px 8px">Interest rate not configured. Enter the actual approved financing quotation.</div>';
+  } else {
+    html += row('Rate used', c.rate + '% per month' + (c.promo ? ' (promo)' : '')) + row('Estimated Monthly Payment', fin_money(c.monthly), true) +
+      '<div style="margin-top:4px;font-size:12px;font-weight:700;color:#9a3412;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;padding:6px 8px">ESTIMATE ONLY' +
+      (cfg.calcMethod === 'diminishing' ? ' (monthly reducing balance, not an exact copy of the provider\'s own computation)' : '') + '. Not an approved quotation.</div>';
+  }
+  if (q.approvedMonthly !== '') {
+    const effDp = q.approvedAmount !== '' ? fin_r2(total - q.approvedAmount) : dp;
+    const inst = fin_r2(q.approvedMonthly * term);
+    const fee = (q.feeTreatment === 'separate' && q.feeAmount !== '') ? q.feeAmount : 0;
+    html += '<div style="margin-top:6px;border-top:1px dashed var(--border);padding-top:4px">' + row('Actual Approved Monthly', fin_money(q.approvedMonthly), true) +
+      row('Total Installment Payments (' + term + ' x monthly)', fin_money(inst)) + (fee ? row('Separate Fees', fin_money(fee)) : '') +
+      row('Total Customer Payable', fin_money(fin_r2(effDp + inst + fee)), true) + '</div>';
+  }
+  out.innerHTML = html;
 }
 
 // Re-run the calculator whenever checkout re-prices (Retail / Wholesale toggle)
@@ -8402,11 +8456,15 @@ async function fin_processCheckout() {
   const term = parseInt((document.getElementById('finTerm') || {}).value, 10);
   const c = fin_calc(cfg, total, dp, term, localDateStr(new Date()));
   if (!c.ok) { toast(c.message, 'error'); reset(); return; }
+  const tErr = fin_termError(cfg, term, c.financed);
+  if (tErr) { toast(tErr, 'error'); reset(); return; }
+  const q = fin_quoteInputs();
+  if (q.approvedAmount !== '' && Math.abs(q.approvedAmount - c.financed) > 0.01 && !q.diffReason) { toast('Enter the reason why the approved amount differs from the calculated balance.', 'error'); reset(); return; }
   const items = cartSnapshot.map(i => ({ productId: i.productId, unit: i.unit, name: i.name, barcode: i.barcode || '', price: i.price, qty: i.qty, total: i.total, priceType: i.priceType }));
   const payload = {
     action: 'fin_createApplication', provider: cfg.provider, customerName: customer, items: JSON.stringify(items),
     priceType: _checkoutPriceType === 'wholesale' ? 'wholesale' : 'retail', total, downPayment: dp, dpType: type, term,
-    approvedMonthly: parseFloat((document.getElementById('finApprMonthly') || {}).value) || '',
+    approvedAmount: q.approvedAmount, approvedMonthly: q.approvedMonthly, diffReason: q.diffReason, feeTreatment: q.feeTreatment, feeAmount: q.feeAmount,
     referenceNo: ((document.getElementById('finRef') || {}).value || '').trim()
   };
   if (JSON.stringify(payload).length > 4800) { toast('This cart is too large for one application. Split it into two.', 'error'); reset(); return; }
@@ -8523,10 +8581,14 @@ async function fin_openDetail(id) {
     items.map(i => row(esc(i.name) + ' (' + esc(i.unit) + ') x' + esc(i.qty), fin_money(i.total))).join('') +
     row('<b>Total Selling Price</b>', '<b>' + fin_money(a.totalSelling) + '</b>') + row('Down Payment', fin_money(a.downPayment)) +
     row('Amount Financed', fin_money(a.financed)) + row('Term', esc(a.term) + ' months') +
-    row('Estimated Monthly', fin_money(a.estMonthly) + ' (estimate)') + row('Estimated Total Payable', fin_money(a.estTotalPayable) + ' (estimate)') +
+    row('Estimated Monthly', a.estMonthly !== '' && a.estMonthly != null ? fin_money(a.estMonthly) + ' (estimate)' : 'No rate configured') + row('Estimated Total Payable', a.estTotalPayable !== '' && a.estTotalPayable != null ? fin_money(a.estTotalPayable) + ' (estimate)' : '-') +
     '<hr style="margin:8px 0;border:none;border-top:1px solid var(--border)">' +
     row('Approved Amount', a.approvedAmount !== '' ? fin_money(a.approvedAmount) : '-') + row('Approved Monthly', a.approvedMonthly !== '' ? fin_money(a.approvedMonthly) : '-') +
-    row('Approved Term', a.approvedTerm ? esc(a.approvedTerm) + ' months' : '-') + row('Adjustments', esc(a.adjustments || '-')) +
+    row('Approved Term', a.approvedTerm ? esc(a.approvedTerm) + ' months' : '-') +
+    row('Total Installment Payments', a.approvedTotalInst !== '' && a.approvedTotalInst != null ? fin_money(a.approvedTotalInst) : '-') +
+    row('Total Customer Payable', a.approvedTotalPayable !== '' && a.approvedTotalPayable != null ? fin_money(a.approvedTotalPayable) : '-') +
+    row('Fees', a.feeTreatment ? esc({ none: 'No fees', included: 'Included in quotation', separate: 'Separate: ' + fin_money(a.feeAmount) }[a.feeTreatment] || '') : '-') +
+    row('Reason for difference', esc(a.diffReason || '-')) + row('Adjustments', esc(a.adjustments || '-')) +
     row('Status Note', esc(a.statusNote || '-')) + (a.saleTxId ? row('Sale Transaction', esc(a.saleTxId)) : '') +
     '<div id="finLog" style="font-size:12px;opacity:.8;margin-top:8px"></div>' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">' + acts.join('') + '<button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
@@ -8539,19 +8601,28 @@ async function fin_openDetail(id) {
 
 function fin_openApprove(id) {
   const a = fin_find(id); if (!a) return;
+  const cfg = fin_cfg(a.provider);
   const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box';
+  const terms = cfg && (cfg.terms || []).length ? FIN_TERMS.filter(t => cfg.terms.indexOf(t) >= 0) : FIN_TERMS;
+  const need = cfg ? cfg.requireQuote : true;
   openModal('<div class="modal-title">Approve Application</div>' +
-    '<div style="font-size:12px;opacity:.75;margin-bottom:8px">Enter what ' + esc(a.provider) + ' actually approved. If the approved amount is lower than the amount financed, the difference is collected from the customer at release.</div>' +
-    '<div class="field"><label>Approved Financing Amount (₱)</label><input id="finApAmt" type="number" step="0.01" value="' + (a.approvedAmount !== '' ? a.approvedAmount : a.financed) + '" style="' + inp + '"></div>' +
-    '<div class="field"><label>Approved Monthly Amortization (₱)</label><input id="finApMo" type="number" step="0.01" value="' + (a.approvedMonthly !== '' ? a.approvedMonthly : '') + '" style="' + inp + '"></div>' +
-    '<div class="field"><label>Approved Term</label><select id="finApTerm" style="' + inp + '">' + FIN_TERMS.map(t => '<option value="' + t + '"' + (Number(a.term) === t ? ' selected' : '') + '>' + t + ' months</option>').join('') + '</select></div>' +
+    '<div style="font-size:12px;opacity:.75;margin-bottom:8px">Enter what ' + esc(a.provider) + ' actually approved' + (need ? ' (required before the sale can be completed)' : '') + '. If the approved amount differs from the calculated balance of ' + fin_money(a.financed) + ', the difference is collected from the customer at release and a reason is required.</div>' +
+    '<div class="field"><label>Approved Financed Amount (₱)</label><input id="finApAmt" type="number" step="0.01" value="' + (a.approvedAmount !== '' ? a.approvedAmount : a.financed) + '" style="' + inp + '"></div>' +
+    '<div class="field"><label>Actual Approved Monthly Payment (₱)</label><input id="finApMo" type="number" step="0.01" value="' + (a.approvedMonthly !== '' ? a.approvedMonthly : '') + '" style="' + inp + '"></div>' +
+    '<div class="field"><label>Approved Term</label><select id="finApTerm" style="' + inp + '">' + terms.map(t => '<option value="' + t + '"' + (Number(a.approvedTerm || a.term) === t ? ' selected' : '') + '>' + t + ' months</option>').join('') + '</select></div>' +
+    '<div class="field"><label>Reason for difference (if any)</label><input id="finApDiff" type="text" maxlength="300" value="' + esc(a.diffReason || '') + '" style="' + inp + '"></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Fees</label><select id="finApFee" style="' + inp + '"><option value="">Not specified</option><option value="none">No fees</option><option value="included">Already included in quotation</option><option value="separate">Separate fee</option></select></div>' +
+    '<div class="field" style="flex:1"><label>Fee Amount (if separate)</label><input id="finApFeeAmt" type="number" min="0" step="0.01" value="' + (a.feeAmount !== '' && a.feeAmount != null ? a.feeAmount : '') + '" style="' + inp + '"></div></div>' +
     '<div class="field"><label>Application / Reference No.</label><input id="finApRef" type="text" maxlength="60" value="' + esc(a.referenceNo || '') + '" style="' + inp + '"></div>' +
-    '<div class="field"><label>Adjustments / Notes</label><input id="finApAdj" type="text" maxlength="300" style="' + inp + '"></div>' +
+    '<div class="field"><label>Notes</label><input id="finApAdj" type="text" maxlength="300" style="' + inp + '"></div>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="fin_openDetail(\'' + esc(a.id) + '\')">Back</button><button class="btn btn-primary" id="finApBtn" onclick="fin_submitApprove(\'' + esc(a.id) + '\')">Mark Approved</button></div>');
+  const fs = document.getElementById('finApFee'); if (fs) fs.value = a.feeTreatment || '';
 }
 function fin_submitApprove(id) {
   const v = k => (document.getElementById(k) || {}).value;
-  fin_status({ id, toStatus: FIN_ST.APPROVED, approvedAmount: parseFloat(v('finApAmt')), approvedMonthly: parseFloat(v('finApMo')), approvedTerm: parseInt(v('finApTerm'), 10), referenceNo: (v('finApRef') || '').trim(), adjustments: (v('finApAdj') || '').trim() }, 'finApBtn');
+  fin_status({ id, toStatus: FIN_ST.APPROVED, approvedAmount: parseFloat(v('finApAmt')) || 0, approvedMonthly: parseFloat(v('finApMo')) || 0, approvedTerm: parseInt(v('finApTerm'), 10),
+    diffReason: (v('finApDiff') || '').trim(), feeTreatment: v('finApFee') || '', feeAmount: parseFloat(v('finApFeeAmt')) || 0,
+    referenceNo: (v('finApRef') || '').trim(), adjustments: (v('finApAdj') || '').trim() }, 'finApBtn');
 }
 function fin_openReason(id, toStatus) {
   const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box';
@@ -8642,32 +8713,41 @@ function fin_renderSettings() {
   if (!el) return;
   const inp = 'width:100%;padding:7px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;font-size:0.85rem';
   el.innerHTML = '<div class="card"><div class="card-title">Financing Settings</div>' +
-    '<div style="font-size:12px;opacity:.8;margin-bottom:10px">Enter the approved rates and fees from each provider. Nothing is pre-filled. A term with no rate is not offered at checkout. All computations are estimates.</div>' +
+    '<div style="font-size:12px;opacity:.8;margin-bottom:10px">Switch terms on or off independently of the rate. A blank rate is never treated as 0%: checkout then asks for the actual approved quotation. Enter only verified rates and fees. All computations are estimates.</div>' +
     (FIN.settings || []).map((c, n) => {
       const id = 'fs' + n + '_';
       const f = (k, label, val, type) => '<div style="flex:1;min-width:130px"><label style="font-size:11px;opacity:.75">' + label + '</label><input id="' + id + k + '" type="' + (type || 'number') + '" step="0.01" min="0" value="' + esc(val === '' || val == null ? '' : val) + '" style="' + inp + '"></div>';
       const chk = (k, label, v) => '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input id="' + id + k + '" type="checkbox"' + (v ? ' checked' : '') + '> ' + label + '</label>';
+      const termRow = t => '<div style="border:1px solid var(--border);border-radius:8px;padding:6px;min-width:150px;flex:1">' +
+        chk('on' + t, '<b>' + t + ' months</b>', (c.terms || []).indexOf(t) >= 0) +
+        '<div style="margin-top:4px"><label style="font-size:11px;opacity:.75">Monthly rate % (blank = not configured)</label><input id="' + id + 't' + t + '" type="number" step="0.01" min="0" value="' + (c.termRates[t] !== undefined ? c.termRates[t] : '') + '" style="' + inp + '"></div>' +
+        '<div style="margin-top:4px"><label style="font-size:11px;opacity:.75">Financed must exceed ₱ (blank = no minimum)</label><input id="' + id + 'm' + t + '" type="number" step="0.01" min="0" value="' + ((c.minFinanced || {})[t] !== undefined ? c.minFinanced[t] : '') + '" style="' + inp + '"></div></div>';
       return '<div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b>' + esc(c.provider) + '</b>' + chk('enabled', 'Enabled', c.enabled) + '</div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"><div style="flex:1;min-width:200px"><label style="font-size:11px;opacity:.75">Calculation rule</label><select id="' + id + 'calcMethod" style="' + inp + '"><option value="addon"' + (c.calcMethod === 'addon' ? ' selected' : '') + '>Flat add-on (rate % x months)</option><option value="diminishing"' + (c.calcMethod === 'diminishing' ? ' selected' : '') + '>Reducing balance (monthly rate)</option></select></div></div>' +
-        '<div style="font-size:11px;opacity:.75;margin-bottom:4px">Monthly rate % per term (leave blank = term not supported)</div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + FIN_TERMS.map(t => f('t' + t, t + ' mos', c.termRates[t] !== undefined ? c.termRates[t] : '')).join('') + '</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"><div style="flex:1;min-width:200px"><label style="font-size:11px;opacity:.75">Calculation rule</label><select id="' + id + 'calcMethod" style="' + inp + '"><option value="addon"' + (c.calcMethod === 'addon' ? ' selected' : '') + '>Flat add-on (rate % x months)</option><option value="diminishing"' + (c.calcMethod === 'diminishing' ? ' selected' : '') + '>Reducing Balance (Monthly Rate)</option></select></div></div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + FIN_TERMS.map(termRow).join('') + '</div>' +
+        '<div style="margin-bottom:8px">' + chk('requireQuote', 'Require Actual Approved Quotation Before Completing Sale', c.requireQuote) + '</div>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('feeFixed', 'Processing fee (₱ fixed)', c.feeFixed) + f('feePct', 'Processing fee (% of financed)', c.feePct) + f('fixedDpAmt', 'Fixed DP (₱, optional)', c.fixedDpAmt) + '</div>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('minDpPct', 'Min DP %', c.minDpPct) + f('maxDpPct', 'Max DP %', c.maxDpPct) + f('minDpAmt', 'Min DP (₱)', c.minDpAmt) + '<div style="flex:1;min-width:130px;display:flex;align-items:flex-end">' + chk('zeroDpAllowed', 'Zero DP allowed', c.zeroDpAllowed) + '</div></div>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('promoName', 'Promo name', c.promoName, 'text') + f('promoRate', 'Promo monthly rate %', c.promoRate) + f('promoUntil', 'Promo valid until', c.promoUntil, 'date') + '<div style="flex:1;min-width:130px;display:flex;align-items:flex-end">' + chk('promoActive', 'Promo active', c.promoActive) + '</div></div>' +
         f('notes', 'Source of rates / notes', c.notes, 'text') +
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px"><span style="font-size:11px;opacity:.65">' + (c.updatedAt ? 'Updated by ' + esc(c.updatedBy) + ' ' + esc(safeFormatDateTime(c.updatedAt)) : 'Not configured yet') + '</span><button class="btn btn-primary btn-sm" id="' + id + 'btn" onclick="fin_saveProvider(' + n + ')">Save ' + esc(c.provider) + '</button></div></div>';
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px"><span style="font-size:11px;opacity:.65">' + (c.updatedAt ? 'Updated by ' + esc(c.updatedBy) + ' ' + esc(safeFormatDateTime(c.updatedAt)) : 'Not saved yet') + '</span><button class="btn btn-primary btn-sm" id="' + id + 'btn" onclick="fin_saveProvider(' + n + ')">Save ' + esc(c.provider) + '</button></div></div>';
     }).join('') + '</div>';
 }
 
 async function fin_saveProvider(n) {
   const c = FIN.settings[n], id = 'fs' + n + '_';
   const g = k => document.getElementById(id + k);
-  const rates = {};
-  FIN_TERMS.forEach(t => { const v = g('t' + t).value; if (v !== '') rates[t] = parseFloat(v); });
-  if (g('enabled').checked && !Object.keys(rates).length) { toast('Enter at least one term rate before enabling ' + c.provider + '.', 'error'); return; }
+  const rates = {}, minFin = {}, termsOn = [];
+  FIN_TERMS.forEach(t => {
+    const r = g('t' + t).value; if (r !== '') rates[t] = parseFloat(r);
+    const m = g('m' + t).value; if (m !== '') minFin[t] = parseFloat(m);
+    if (g('on' + t).checked) termsOn.push(t);
+  });
+  if (g('enabled').checked && !termsOn.length) { toast('Switch on at least one term before enabling ' + c.provider + '.', 'error'); return; }
   const s = {
-    provider: c.provider, enabled: g('enabled').checked, calcMethod: g('calcMethod').value, termRates: rates,
+    provider: c.provider, enabled: g('enabled').checked, calcMethod: g('calcMethod').value, termRates: rates, termsOn, minFinanced: minFin,
+    requireQuote: g('requireQuote').checked,
     feeFixed: g('feeFixed').value, feePct: g('feePct').value, fixedDpAmt: g('fixedDpAmt').value,
     minDpPct: g('minDpPct').value, maxDpPct: g('maxDpPct').value, minDpAmt: g('minDpAmt').value, zeroDpAllowed: g('zeroDpAllowed').checked,
     promoName: g('promoName').value, promoRate: g('promoRate').value, promoUntil: g('promoUntil').value, promoActive: g('promoActive').checked, notes: g('notes').value
