@@ -63,6 +63,7 @@ const ROLE_NAV = {
     { id: 'wholesalers',    icon: '', label: 'Wholesalers' },
     { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
     { id: 'priceChecker',   icon: '', label: 'Price Checker' },
+    { id: 'installments',   icon: '', label: 'Installments' },
     { id: 'incentives',     icon: '', label: 'Incentives' },
   ],
   cashier: [
@@ -748,6 +749,7 @@ function navigateTo(page) {
     wholesalers: 'Wholesalers Information',
     inventoryAudit: 'Inventory Audit',
     priceChecker:   'Price Checker',
+    installments:   'Installment Financing',
     incentives:     'Incentive Tracker'
   };
  document.getElementById('topbarTitle').textContent = titles[page] || page;
@@ -789,6 +791,7 @@ function renderPage(page) {
     wholesalers: renderWholesalers,
     inventoryAudit: audit_renderPage,
     priceChecker:   pcx_renderPage,
+    installments:   fin_renderPage,
     incentives:     inc_renderPage,
   };
   if (pages[page]) pages[page]();
@@ -811,7 +814,7 @@ function handleAuthError(res) {
 // ─── GAS REQUEST ─────────────────────────────
 // Read-only actions are safe to retry automatically when the server is busy / the network blips.
 // Writes (gasPost) are never auto-retried, to avoid saving twice.
-const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|pc_get)/;   // not the session poller: it must never add load
+const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|pc_get|fin_get)/;   // not the session poller: it must never add load
 async function gasRequest(params, timeoutMs = 30000) {
   const canRetry = GAS_READ_RE.test(String((params && params.action) || ''));
   let lastErr;
@@ -1760,14 +1763,16 @@ function openCheckout() {
 <div id="wsMissingWarn" style="display:none;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;border-radius:8px;padding:10px 12px;font-size:0.8rem;margin-bottom:10px"></div>
 <div class="field">
 <label for="paymentMethod">Payment Method</label>
-<select id="paymentMethod" name="paymentMethod" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:var(--font-main);font-size:0.9rem;background:white">
+<select id="paymentMethod" name="paymentMethod" onchange="fin_onPayChange()" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:var(--font-main);font-size:0.9rem;background:white">
   <option value="Cash Sale">Cash Sale</option>
   <option value="GCash">GCash</option>
   <option value="Card">Card</option>
   <option value="Charge Sale">Charge Sale</option>
   <option value="Receivable">Receivable</option>
+  ${fin_checkoutOption()}
 </select>
 </div>
+${fin_checkoutPanelHtml()}
 <div class="field">
 <label for="cashInput">Cash Received (₱)</label>
 <input type="number" id="cashInput" name="cashInput" placeholder="0.00" min="0" step="0.01" oninput="updateChange(ws_currentTotal())">
@@ -1797,6 +1802,11 @@ async function processCheckout(total) {
   _checkoutInProgress = true;
   const confirmBtn = document.getElementById('checkoutConfirmBtn') || document.querySelector('#modalBox .btn-primary');
   if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Saving...'; }
+
+  // Installment is an application, not a sale: handled separately (nothing is deducted here)
+  if ((document.getElementById('paymentMethod')?.value) === 'Installment') {
+    if (!ws_missingItems(_checkoutPriceType).length) { return fin_processCheckout(); }
+  }
 
   // Wholesale guard: never save a wholesale sale with a missing (zero) wholesale price
   const _wsMissing = ws_missingItems(_checkoutPriceType);
@@ -8210,4 +8220,462 @@ function pcx_closeScanner() {
   const video = document.getElementById('pcxVideo');
   if (wrap) wrap.style.display = 'none';
   if (video) video.srcObject = null;
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// INSTALLMENT FINANCING (admin only for now: widen FIN_ROLES later, and the server ACL)
+// An application is NOT a sale. The sale is recorded (stock deducted) only on Release.
+// All figures here are ESTIMATES from admin-configured rates, never approved quotations.
+// ═══════════════════════════════════════════════════════════════
+const FIN_ROLES     = ['admin'];
+const FIN_PROVIDERS = ['Skyro', 'Home Credit', 'Salmon', 'Billease', 'PayJoy', 'Tonik'];
+const FIN_TERMS     = [6, 9, 12, 18, 24];
+const FIN_ST = { PENDING: 'Pending Application', APPROVED: 'Approved', REJECTED: 'Rejected', RELEASED: 'Released / Completed', CANCELLED: 'Cancelled', RELEASING: 'Releasing' };
+const FIN = { settings: null, apps: [], tab: 'apps', filter: 'all', from: '', to: '', busy: false };
+
+function fin_allowed() { return !!(currentUser && FIN_ROLES.indexOf(currentUser.role) >= 0); }
+function fin_money(n) { return '₱' + Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fin_r2(n) { return Math.round(n * 100) / 100; }
+
+// Same formulas as fin_calc_ in Code.gs (the server recomputes and stores its own estimate)
+function fin_calc(cfg, total, dp, term, today) {
+  let rate = cfg.termRates[term];
+  if (rate === undefined) return { ok: false, message: 'No rate configured for this term.' };
+  let promo = false;
+  if (cfg.promoActive && cfg.promoRate !== '' && (!cfg.promoUntil || String(today) <= cfg.promoUntil)) { rate = Number(cfg.promoRate); promo = true; }
+  const financed = fin_r2(total - dp);
+  if (financed <= 0) return { ok: false, message: 'Down payment leaves nothing to finance.' };
+  const fees = fin_r2(cfg.feeFixed + financed * cfg.feePct / 100);
+  let monthly;
+  if (cfg.calcMethod === 'diminishing') {
+    const i = rate / 100;
+    monthly = i === 0 ? (financed + fees) / term : (financed * i / (1 - Math.pow(1 + i, -term)) + fees / term);
+  } else {
+    monthly = (financed + financed * rate / 100 * term + fees) / term;
+  }
+  monthly = fin_r2(monthly);
+  const totalInst = fin_r2(monthly * term);
+  return { ok: true, financed, rate, fees, promo, monthly, totalInstallments: totalInst, charges: fin_r2(totalInst - financed), totalPayable: fin_r2(dp + totalInst) };
+}
+function fin_dpError(cfg, total, dp) {
+  if (isNaN(dp) || dp < 0) return 'Down payment is invalid.';
+  if (dp >= total) return 'Down payment must be less than the selling price.';
+  if (dp === 0 && !cfg.zeroDpAllowed) return 'Zero down payment is not allowed for this provider.';
+  if (dp > 0 && cfg.minDpAmt > 0 && dp < cfg.minDpAmt) return 'Minimum down payment is ' + fin_money(cfg.minDpAmt) + '.';
+  const pct = dp / total * 100;
+  if (cfg.minDpPct > 0 && pct + 0.0001 < cfg.minDpPct) return 'Minimum down payment is ' + cfg.minDpPct + '% of the price.';
+  if (cfg.maxDpPct < 100 && pct - 0.0001 > cfg.maxDpPct) return 'Maximum down payment is ' + cfg.maxDpPct + '% of the price.';
+  return '';
+}
+function fin_cfg(provider) { return ((FIN.settings || []).find(c => c.provider === provider)) || null; }
+
+async function fin_loadSettings(force) {
+  if (FIN.settings && !force) return true;
+  try {
+    const r = await gasRequest({ action: 'fin_getSettings' }, 30000);
+    if (!r || !r.success) { toast((r && r.message) || 'Could not load financing settings.', 'error'); return false; }
+    FIN.settings = r.data || [];
+    return true;
+  } catch (e) { toast('Could not load financing settings: ' + e.message, 'error'); return false; }
+}
+
+// ── Checkout integration ─────────────────────────────────────
+function fin_checkoutOption() { return fin_allowed() ? '<option value="Installment">Installment</option>' : ''; }
+function fin_checkoutPanelHtml() {
+  return fin_allowed() ? '<div id="finPanel" style="display:none;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px;background:#f8fbff"></div>' : '';
+}
+
+async function fin_onPayChange() {
+  const sel = document.getElementById('paymentMethod');
+  const on = !!sel && sel.value === 'Installment';
+  const panel = document.getElementById('finPanel');
+  const cashEl = document.getElementById('cashInput');
+  const cashField = cashEl ? cashEl.closest('.field') : null;
+  const chg = document.getElementById('changeDisplay');
+  const btn = document.getElementById('checkoutConfirmBtn');
+  if (cashField) cashField.style.display = on ? 'none' : '';
+  if (chg) chg.style.display = on ? 'none' : '';
+  if (btn) btn.textContent = on ? 'Submit Installment Application' : 'Confirm & Save Transaction';
+  if (!panel) return;
+  panel.style.display = on ? 'block' : 'none';
+  if (!on) return;
+  panel.innerHTML = '<div style="font-size:13px;opacity:.7">Loading financing settings...</div>';
+  if (!(await fin_loadSettings(false))) { panel.innerHTML = '<div style="color:#c62828;font-size:13px">Could not load financing settings. Switch payment method and try again.</div>'; return; }
+  fin_renderPanel();
+}
+
+function fin_enabledProviders() { return (FIN.settings || []).filter(c => c.enabled && Object.keys(c.termRates).length); }
+
+function fin_renderPanel() {
+  const panel = document.getElementById('finPanel');
+  if (!panel) return;
+  const provs = fin_enabledProviders();
+  if (!provs.length) {
+    panel.innerHTML = '<div style="font-size:13px;color:#9a3412">No financing provider is enabled with rates yet. Go to Installments > Settings, set the rates, and enable a provider.</div>';
+    return;
+  }
+  const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:0.9rem;background:#fff;box-sizing:border-box';
+  panel.innerHTML =
+    '<div style="font-weight:700;margin-bottom:8px">Installment Application</div>' +
+    '<div class="field"><label>Financing Provider</label><select id="finProvider" style="' + inp + '" onchange="fin_onProviderChange()">' +
+      provs.map(c => '<option value="' + esc(c.provider) + '">' + esc(c.provider) + '</option>').join('') + '</select></div>' +
+    '<div class="field"><label>Customer Name</label><input id="finCustomer" type="text" maxlength="100" style="' + inp + '" placeholder="Full name"></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Down Payment</label><select id="finDpType" style="' + inp + '" onchange="fin_recalc()"></select></div>' +
+    '<div class="field" style="flex:1"><label id="finDpLabel">Amount</label><input id="finDpVal" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div></div>' +
+    '<div class="field"><label>Installment Term</label><select id="finTerm" style="' + inp + '" onchange="fin_recalc()"></select></div>' +
+    '<div id="finCalc" style="margin:6px 0 10px"></div>' +
+    '<div style="font-size:12px;opacity:.75;margin-bottom:4px">Optional: enter these if the provider already gave them.</div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Actual Approved Monthly</label><input id="finApprMonthly" type="number" min="0" step="0.01" style="' + inp + '"></div>' +
+    '<div class="field" style="flex:1"><label>Reference No.</label><input id="finRef" type="text" maxlength="60" style="' + inp + '"></div></div>' +
+    '<div style="font-size:12px;opacity:.75">Status will start as Pending Application. The sale and stock deduction happen only when you Release it in Installments.</div>';
+  fin_onProviderChange();
+}
+
+function fin_onProviderChange() {
+  const cfg = fin_cfg((document.getElementById('finProvider') || {}).value);
+  if (!cfg) return;
+  const dpSel = document.getElementById('finDpType'), termSel = document.getElementById('finTerm');
+  let opts = '<option value="custom">Custom amount</option><option value="percent">Percent of price</option>';
+  if (cfg.fixedDpAmt > 0) opts += '<option value="fixed">Fixed (' + fin_money(cfg.fixedDpAmt) + ')</option>';
+  if (cfg.zeroDpAllowed) opts += '<option value="zero">Zero down payment</option>';
+  dpSel.innerHTML = opts;
+  termSel.innerHTML = FIN_TERMS.filter(t => cfg.termRates[t] !== undefined).map(t => '<option value="' + t + '">' + t + ' months</option>').join('');
+  fin_recalc();
+}
+
+function fin_readDp(cfg, total) {
+  const type = (document.getElementById('finDpType') || {}).value || 'custom';
+  const valEl = document.getElementById('finDpVal'), lab = document.getElementById('finDpLabel');
+  const v = parseFloat(valEl && valEl.value);
+  if (lab) lab.textContent = type === 'percent' ? 'Percent (%)' : 'Amount (₱)';
+  if (valEl) valEl.disabled = (type === 'fixed' || type === 'zero');
+  let dp;
+  if (type === 'zero') dp = 0;
+  else if (type === 'fixed') dp = cfg.fixedDpAmt;
+  else if (type === 'percent') dp = isNaN(v) ? NaN : fin_r2(total * v / 100);
+  else dp = isNaN(v) ? NaN : fin_r2(v);
+  return { type, dp };
+}
+
+function fin_recalc() {
+  const out = document.getElementById('finCalc');
+  if (!out) return;
+  const cfg = fin_cfg((document.getElementById('finProvider') || {}).value);
+  if (!cfg) { out.innerHTML = ''; return; }
+  const total = ws_currentTotal();
+  const { dp } = fin_readDp(cfg, total);
+  const term = parseInt((document.getElementById('finTerm') || {}).value, 10);
+  const row = (a, b, bold) => '<div style="display:flex;justify-content:space-between;padding:3px 0;' + (bold ? 'font-weight:700' : '') + '"><span>' + a + '</span><span>' + b + '</span></div>';
+  const err = isNaN(dp) ? 'Enter the down payment.' : fin_dpError(cfg, total, dp);
+  if (err) { out.innerHTML = row('Total Selling Price', fin_money(total), true) + '<div style="color:#c62828;font-size:13px;margin-top:4px">' + esc(err) + '</div>'; return; }
+  const c = fin_calc(cfg, total, dp, term, localDateStr(new Date()));
+  if (!c.ok) { out.innerHTML = '<div style="color:#c62828;font-size:13px">' + esc(c.message) + '</div>'; return; }
+  out.innerHTML =
+    row('Total Selling Price', fin_money(total)) + row('Down Payment', fin_money(dp)) + row('Amount Financed', fin_money(c.financed), true) +
+    row('Rate used', c.rate + '% per month' + (c.promo ? ' (promo)' : '')) +
+    row('Estimated Monthly', fin_money(c.monthly), true) + row('Total Installment Payments', fin_money(c.totalInstallments)) +
+    row('Financing Charges', fin_money(c.charges)) + row('Total Payable (DP + installments)', fin_money(c.totalPayable)) +
+    '<div style="margin-top:6px;font-size:12px;font-weight:700;color:#9a3412;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;padding:6px 8px">ESTIMATE ONLY. This is not an approved financing quotation. The provider decides the actual approved amount and monthly.</div>';
+}
+
+// Re-run the calculator whenever checkout re-prices (Retail / Wholesale toggle)
+(function () {
+  const orig = ws_renderCheckoutSummary;
+  ws_renderCheckoutSummary = function () { orig.apply(this, arguments); try { fin_recalc(); } catch (e) {} };
+})();
+
+async function fin_processCheckout() {
+  const btn = document.getElementById('checkoutConfirmBtn');
+  const reset = () => { _checkoutInProgress = false; if (btn) { btn.disabled = false; btn.textContent = 'Submit Installment Application'; } };
+  if (!fin_allowed()) { toast('Not allowed.', 'error'); reset(); return; }
+  const cfg = fin_cfg((document.getElementById('finProvider') || {}).value);
+  if (!cfg) { toast('Select a financing provider.', 'error'); reset(); return; }
+  const customer = ((document.getElementById('finCustomer') || {}).value || '').trim();
+  if (!customer) { toast('Enter the customer name.', 'error'); reset(); return; }
+  const cartSnapshot = ws_repriceCart(_checkoutPriceType);
+  if (!cartSnapshot.length) { toast('Cart is empty!', 'warning'); reset(); return; }
+  const total = fin_r2(cartSnapshot.reduce((s, c) => s + c.total, 0));
+  const { type, dp } = fin_readDp(cfg, total);
+  const err = isNaN(dp) ? 'Enter the down payment.' : fin_dpError(cfg, total, dp);
+  if (err) { toast(err, 'error'); reset(); return; }
+  const term = parseInt((document.getElementById('finTerm') || {}).value, 10);
+  const c = fin_calc(cfg, total, dp, term, localDateStr(new Date()));
+  if (!c.ok) { toast(c.message, 'error'); reset(); return; }
+  const items = cartSnapshot.map(i => ({ productId: i.productId, unit: i.unit, name: i.name, barcode: i.barcode || '', price: i.price, qty: i.qty, total: i.total, priceType: i.priceType }));
+  const payload = {
+    action: 'fin_createApplication', provider: cfg.provider, customerName: customer, items: JSON.stringify(items),
+    priceType: _checkoutPriceType === 'wholesale' ? 'wholesale' : 'retail', total, downPayment: dp, dpType: type, term,
+    approvedMonthly: parseFloat((document.getElementById('finApprMonthly') || {}).value) || '',
+    referenceNo: ((document.getElementById('finRef') || {}).value || '').trim()
+  };
+  if (JSON.stringify(payload).length > 4800) { toast('This cart is too large for one application. Split it into two.', 'error'); reset(); return; }
+  closeModalDirect();
+  showLoading('Saving installment application...');
+  try {
+    const res = await gasPost(payload);
+    hideLoading();
+    if (res && res.success) {
+      cart = []; saveCartToStorage();
+      try { renderCart(); } catch (e) {}
+      _checkoutInProgress = false;
+      toast('Application ' + res.id + ' saved as Pending. Stock is not deducted until it is Released.', 'success', 6000);
+    } else {
+      toast('Save failed: ' + ((res && res.message) || 'Unknown error.'), 'error');
+      _checkoutInProgress = false;
+    }
+  } catch (e) {
+    hideLoading(); _checkoutInProgress = false;
+    toast('Network error. Check Installments before trying again, the application may have saved.', 'error', 6000);
+  }
+}
+
+// ── Installments page ────────────────────────────────────────
+async function fin_renderPage() {
+  if (!fin_allowed()) { document.getElementById('pageContent').innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>'; return; }
+  document.getElementById('pageContent').innerHTML =
+    '<div id="finTabBar" class="tab-bar" style="margin-bottom:16px">' +
+      '<button class="tab-btn active" onclick="fin_showTab(\'apps\',this)">Applications</button>' +
+      '<button class="tab-btn" onclick="fin_showTab(\'report\',this)">Reports</button>' +
+      '<button class="tab-btn" onclick="fin_showTab(\'settings\',this)">Financing Settings</button>' +
+    '</div><div id="finContent"></div>';
+  fin_showTab(FIN.tab || 'apps', null);
+  if (FIN.tab && FIN.tab !== 'apps') {
+    const idx = { apps: 0, report: 1, settings: 2 }[FIN.tab];
+    const bs = document.querySelectorAll('#finTabBar .tab-btn');
+    bs.forEach((b, i) => b.classList.toggle('active', i === idx));
+  }
+}
+function fin_showTab(tab, btn) {
+  FIN.tab = tab;
+  if (btn) { document.querySelectorAll('#finTabBar .tab-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active'); }
+  if (tab === 'apps' || tab === 'report') fin_loadApps().then(() => tab === 'apps' ? fin_renderApps() : fin_renderReport());
+  else fin_loadSettings(true).then(ok => { if (ok) fin_renderSettings(); });
+}
+async function fin_loadApps() {
+  const el = document.getElementById('finContent');
+  if (el) el.innerHTML = '<div class="card"><div style="opacity:.7">Loading...</div></div>';
+  try {
+    const r = await gasRequest({ action: 'fin_getApplications' }, 45000);
+    if (r && r.success) FIN.apps = r.data || [];
+    else toast((r && r.message) || 'Could not load applications.', 'error');
+  } catch (e) { toast('Could not load applications: ' + e.message, 'error'); }
+}
+
+function fin_badge(st) {
+  const col = { 'Pending Application': '#b45309', 'Approved': '#1565c0', 'Rejected': '#c62828', 'Released / Completed': '#2e7d32', 'Cancelled': '#6b7280', 'Releasing': '#7c3aed' }[st] || '#555';
+  return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;color:#fff;background:' + col + '">' + esc(st) + '</span>';
+}
+function fin_dateOf(a) { return String(a.createdAt || '').substring(0, 10); }
+function fin_filtered() {
+  return FIN.apps.filter(a => {
+    if (FIN.filter !== 'all' && a.status !== FIN.filter) return false;
+    const d = fin_dateOf(a);
+    if (FIN.from && d < FIN.from) return false;
+    if (FIN.to && d > FIN.to) return false;
+    return true;
+  });
+}
+
+function fin_filterBar(showStatus) {
+  const inp = 'padding:7px;border:1px solid var(--border);border-radius:8px;font-size:0.85rem';
+  return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">' +
+    (showStatus ? '<select style="' + inp + '" onchange="FIN.filter=this.value;fin_renderApps()"><option value="all">All statuses</option>' +
+      Object.keys(FIN_ST).map(k => FIN_ST[k]).map(s => '<option value="' + s + '"' + (FIN.filter === s ? ' selected' : '') + '>' + s + '</option>').join('') + '</select>' : '') +
+    '<label style="font-size:12px">From <input type="date" value="' + FIN.from + '" style="' + inp + '" onchange="FIN.from=this.value;fin_rerender()"></label>' +
+    '<label style="font-size:12px">To <input type="date" value="' + FIN.to + '" style="' + inp + '" onchange="FIN.to=this.value;fin_rerender()"></label>' +
+    '<button class="btn btn-ghost btn-sm" onclick="fin_showTab(FIN.tab,null)">Refresh</button></div>';
+}
+function fin_rerender() { if (FIN.tab === 'report') fin_renderReport(); else fin_renderApps(); }
+
+function fin_renderApps() {
+  const el = document.getElementById('finContent');
+  if (!el) return;
+  const list = fin_filtered();
+  el.innerHTML = '<div class="card"><div class="card-title">Installment Applications</div>' + fin_filterBar(true) +
+    (list.length ? list.map(a =>
+      '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer" onclick="fin_openDetail(\'' + esc(a.id) + '\')">' +
+        '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + esc(a.customerName) + '</b>' + fin_badge(a.status) + '</div>' +
+        '<div style="font-size:12px;opacity:.8;margin-top:2px">' + esc(a.provider) + ' • ' + esc(a.id) + ' • ' + esc(safeFormatDateTime(a.createdAt)) + '</div>' +
+        '<div style="font-size:13px;margin-top:4px">Price ' + fin_money(a.totalSelling) + ' • DP ' + fin_money(a.downPayment) + ' • Financed ' + fin_money(a.financed) + ' • ' + esc(a.term) + ' mos</div>' +
+      '</div>').join('') : '<div style="opacity:.7">No applications found.</div>') + '</div>';
+}
+
+function fin_find(id) { return FIN.apps.find(a => String(a.id) === String(id)); }
+
+async function fin_openDetail(id) {
+  const a = fin_find(id);
+  if (!a) return;
+  let items = [];
+  try { items = JSON.parse(a.items || '[]'); } catch (e) {}
+  const row = (k, v) => '<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:13px"><span style="opacity:.75">' + k + '</span><span style="text-align:right">' + v + '</span></div>';
+  const acts = [];
+  if (a.status === FIN_ST.PENDING) acts.push('<button class="btn btn-primary btn-sm" onclick="fin_openApprove(\'' + esc(a.id) + '\')">Approve</button>');
+  if (a.status === FIN_ST.APPROVED || a.status === FIN_ST.RELEASING) acts.push('<button class="btn btn-primary btn-sm" onclick="fin_release(\'' + esc(a.id) + '\')">Release / Complete</button>');
+  if (a.status === FIN_ST.PENDING || a.status === FIN_ST.APPROVED) {
+    acts.push('<button class="btn btn-danger btn-sm" onclick="fin_openReason(\'' + esc(a.id) + '\',\'' + FIN_ST.REJECTED + '\')">Reject</button>');
+    acts.push('<button class="btn btn-ghost btn-sm" onclick="fin_openReason(\'' + esc(a.id) + '\',\'' + FIN_ST.CANCELLED + '\')">Cancel</button>');
+  }
+  openModal('<div class="modal-title">' + esc(a.customerName) + '</div><div style="margin-bottom:8px">' + fin_badge(a.status) + '</div>' +
+    row('Application', esc(a.id)) + row('Provider', esc(a.provider)) + row('Reference No.', esc(a.referenceNo || '-')) +
+    row('Created', esc(safeFormatDateTime(a.createdAt)) + ' by ' + esc(a.createdBy)) +
+    '<hr style="margin:8px 0;border:none;border-top:1px solid var(--border)">' +
+    items.map(i => row(esc(i.name) + ' (' + esc(i.unit) + ') x' + esc(i.qty), fin_money(i.total))).join('') +
+    row('<b>Total Selling Price</b>', '<b>' + fin_money(a.totalSelling) + '</b>') + row('Down Payment', fin_money(a.downPayment)) +
+    row('Amount Financed', fin_money(a.financed)) + row('Term', esc(a.term) + ' months') +
+    row('Estimated Monthly', fin_money(a.estMonthly) + ' (estimate)') + row('Estimated Total Payable', fin_money(a.estTotalPayable) + ' (estimate)') +
+    '<hr style="margin:8px 0;border:none;border-top:1px solid var(--border)">' +
+    row('Approved Amount', a.approvedAmount !== '' ? fin_money(a.approvedAmount) : '-') + row('Approved Monthly', a.approvedMonthly !== '' ? fin_money(a.approvedMonthly) : '-') +
+    row('Approved Term', a.approvedTerm ? esc(a.approvedTerm) + ' months' : '-') + row('Adjustments', esc(a.adjustments || '-')) +
+    row('Status Note', esc(a.statusNote || '-')) + (a.saleTxId ? row('Sale Transaction', esc(a.saleTxId)) : '') +
+    '<div id="finLog" style="font-size:12px;opacity:.8;margin-top:8px"></div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">' + acts.join('') + '<button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
+  try {
+    const r = await gasRequest({ action: 'fin_getLog', id: a.id });
+    const el = document.getElementById('finLog');
+    if (el && r && r.success && r.data.length) el.innerHTML = '<b>History</b><br>' + r.data.map(l => esc(safeFormatDateTime(l.at)) + ' - ' + esc(l.action) + (l.to ? ' to ' + esc(l.to) : '') + ' by ' + esc(l.by) + (l.note ? ' (' + esc(l.note) + ')' : '')).join('<br>');
+  } catch (e) {}
+}
+
+function fin_openApprove(id) {
+  const a = fin_find(id); if (!a) return;
+  const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box';
+  openModal('<div class="modal-title">Approve Application</div>' +
+    '<div style="font-size:12px;opacity:.75;margin-bottom:8px">Enter what ' + esc(a.provider) + ' actually approved. If the approved amount is lower than the amount financed, the difference is collected from the customer at release.</div>' +
+    '<div class="field"><label>Approved Financing Amount (₱)</label><input id="finApAmt" type="number" step="0.01" value="' + (a.approvedAmount !== '' ? a.approvedAmount : a.financed) + '" style="' + inp + '"></div>' +
+    '<div class="field"><label>Approved Monthly Amortization (₱)</label><input id="finApMo" type="number" step="0.01" value="' + (a.approvedMonthly !== '' ? a.approvedMonthly : '') + '" style="' + inp + '"></div>' +
+    '<div class="field"><label>Approved Term</label><select id="finApTerm" style="' + inp + '">' + FIN_TERMS.map(t => '<option value="' + t + '"' + (Number(a.term) === t ? ' selected' : '') + '>' + t + ' months</option>').join('') + '</select></div>' +
+    '<div class="field"><label>Application / Reference No.</label><input id="finApRef" type="text" maxlength="60" value="' + esc(a.referenceNo || '') + '" style="' + inp + '"></div>' +
+    '<div class="field"><label>Adjustments / Notes</label><input id="finApAdj" type="text" maxlength="300" style="' + inp + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="fin_openDetail(\'' + esc(a.id) + '\')">Back</button><button class="btn btn-primary" id="finApBtn" onclick="fin_submitApprove(\'' + esc(a.id) + '\')">Mark Approved</button></div>');
+}
+function fin_submitApprove(id) {
+  const v = k => (document.getElementById(k) || {}).value;
+  fin_status({ id, toStatus: FIN_ST.APPROVED, approvedAmount: parseFloat(v('finApAmt')), approvedMonthly: parseFloat(v('finApMo')), approvedTerm: parseInt(v('finApTerm'), 10), referenceNo: (v('finApRef') || '').trim(), adjustments: (v('finApAdj') || '').trim() }, 'finApBtn');
+}
+function fin_openReason(id, toStatus) {
+  const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box';
+  openModal('<div class="modal-title">' + (toStatus === FIN_ST.REJECTED ? 'Reject' : 'Cancel') + ' Application</div>' +
+    '<div class="field"><label>Reason (required)</label><input id="finReason" type="text" maxlength="300" style="' + inp + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="fin_openDetail(\'' + esc(id) + '\')">Back</button><button class="btn btn-danger" id="finRsBtn" onclick="fin_submitReason(\'' + esc(id) + '\',\'' + toStatus + '\')">Confirm</button></div>');
+}
+function fin_submitReason(id, toStatus) {
+  const note = ((document.getElementById('finReason') || {}).value || '').trim();
+  if (!note) { toast('Please enter a reason.', 'error'); return; }
+  fin_status({ id, toStatus, note }, 'finRsBtn');
+}
+function fin_release(id) {
+  const a = fin_find(id); if (!a) return;
+  const upfront = Math.max(0, fin_r2(Number(a.totalSelling) - Number(a.approvedAmount || 0)));
+  if (!confirm('Release this application?\n\nThe sale of ' + fin_money(a.totalSelling) + ' will be recorded and stock will be deducted now.\nCollected from customer now: ' + fin_money(upfront) + '\nThis cannot be undone.')) return;
+  fin_status({ id, toStatus: FIN_ST.RELEASED }, null);
+}
+
+async function fin_status(p, btnId) {
+  if (FIN.busy) return;
+  FIN.busy = true;
+  const btn = btnId ? document.getElementById(btnId) : null;
+  if (btn) btn.disabled = true;
+  showLoading('Updating...');
+  try {
+    const res = await gasPost(Object.assign({ action: 'fin_updateStatus' }, p), 60000);
+    hideLoading();
+    if (res && res.success) {
+      if (p.toStatus === FIN_ST.RELEASED && res.saleTxId) fin_afterRelease(res);
+      closeModalDirect();
+      toast('Status: ' + res.status, 'success');
+      FIN.apps = []; fin_showTab(FIN.tab || 'apps', null);
+    } else {
+      toast((res && res.message) || 'Update failed.', 'error', 6000);
+      if (btn) btn.disabled = false;
+    }
+  } catch (e) {
+    hideLoading();
+    toast('Network error. Refresh the list to see the current status.', 'error', 6000);
+    if (btn) btn.disabled = false;
+  } finally { FIN.busy = false; }
+}
+
+// Mirror what a normal checkout does locally, so the released sale appears in Sales Export / Receipts
+function fin_afterRelease(res) {
+  try {
+    const items = JSON.parse(res.items || '[]');
+    const when  = new Date(res.date || Date.now());
+    const cashier = currentUser.name || currentUser.username;
+    const pm = 'Installment - ' + res.provider;
+    saveSalesExportLocal({ txId: res.saleTxId, cashier, date: when, items, paymentMethod: pm });
+    pushSalesExportToGAS({ txId: res.saleTxId, cashier, date: when, items, paymentMethod: pm }).catch(() => {});
+    saveReceiptToLocal({ txId: res.saleTxId, siNum: res.siNumber, cashier, date: when.toISOString(), total: res.total });
+    saveFullReceiptToLocal({ txId: res.saleTxId, siNum: res.siNumber, cashier, date: when, items, total: res.total, cash: res.cash, change: 0 });
+  } catch (e) { console.warn('[FIN] local mirror failed', e); }
+}
+
+// ── Reports ──────────────────────────────────────────────────
+function fin_renderReport() {
+  const el = document.getElementById('finContent');
+  if (!el) return;
+  const list = FIN.apps.filter(a => { const d = fin_dateOf(a); return !(FIN.from && d < FIN.from) && !(FIN.to && d > FIN.to); });
+  const by = st => list.filter(a => a.status === st);
+  const sum = (arr, k) => arr.reduce((s, a) => s + (Number(a[k]) || 0), 0);
+  const rel = by(FIN_ST.RELEASED);
+  const card = (t, v, sub) => '<div style="flex:1;min-width:150px;border:1px solid var(--border);border-radius:10px;padding:10px"><div style="font-size:12px;opacity:.7">' + t + '</div><div style="font-size:20px;font-weight:800">' + v + '</div>' + (sub ? '<div style="font-size:11px;opacity:.65">' + sub + '</div>' : '') + '</div>';
+  const provRows = FIN_PROVIDERS.map(p => {
+    const r = rel.filter(a => a.provider === p), all = list.filter(a => a.provider === p);
+    return '<tr><td style="padding:6px">' + esc(p) + '</td><td style="padding:6px;text-align:right">' + all.length + '</td><td style="padding:6px;text-align:right">' + r.length + '</td><td style="padding:6px;text-align:right">' + fin_money(sum(r, 'totalSelling')) + '</td><td style="padding:6px;text-align:right">' + fin_money(sum(r, 'downPayment')) + '</td><td style="padding:6px;text-align:right">' + fin_money(sum(r, 'approvedAmount')) + '</td></tr>';
+  }).join('');
+  const approvedFinanced = sum(by(FIN_ST.APPROVED).concat(rel), 'approvedAmount');
+  el.innerHTML = '<div class="card"><div class="card-title">Installment Reports</div>' + fin_filterBar(false) +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">' +
+      card('Installment Sales (Released)', fin_money(sum(rel, 'totalSelling')), rel.length + ' completed') +
+      card('Down Payments (Released)', fin_money(sum(rel, 'downPayment'))) +
+      card('Approved Financed Amounts', fin_money(approvedFinanced), 'Approved + Released') + '</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">' +
+      card('Pending', by(FIN_ST.PENDING).length) + card('Approved', by(FIN_ST.APPROVED).length) + card('Rejected', by(FIN_ST.REJECTED).length) +
+      card('Completed', rel.length) + card('Cancelled', by(FIN_ST.CANCELLED).length) + '</div>' +
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="text-align:right;opacity:.7"><td style="padding:6px;text-align:left">Provider</td><td style="padding:6px">Applications</td><td style="padding:6px">Completed</td><td style="padding:6px">Sales</td><td style="padding:6px">Down Payments</td><td style="padding:6px">Financed</td></tr>' + provRows + '</table></div>' +
+    '<div style="font-size:12px;opacity:.7;margin-top:10px">Only Released / Completed applications count as sales, and they appear once in Sales Summary and Sales Export. Pending, Approved, Rejected and Cancelled are never counted as sales.</div></div>';
+}
+
+// ── Settings ─────────────────────────────────────────────────
+function fin_renderSettings() {
+  const el = document.getElementById('finContent');
+  if (!el) return;
+  const inp = 'width:100%;padding:7px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;font-size:0.85rem';
+  el.innerHTML = '<div class="card"><div class="card-title">Financing Settings</div>' +
+    '<div style="font-size:12px;opacity:.8;margin-bottom:10px">Enter the approved rates and fees from each provider. Nothing is pre-filled. A term with no rate is not offered at checkout. All computations are estimates.</div>' +
+    (FIN.settings || []).map((c, n) => {
+      const id = 'fs' + n + '_';
+      const f = (k, label, val, type) => '<div style="flex:1;min-width:130px"><label style="font-size:11px;opacity:.75">' + label + '</label><input id="' + id + k + '" type="' + (type || 'number') + '" step="0.01" min="0" value="' + esc(val === '' || val == null ? '' : val) + '" style="' + inp + '"></div>';
+      const chk = (k, label, v) => '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input id="' + id + k + '" type="checkbox"' + (v ? ' checked' : '') + '> ' + label + '</label>';
+      return '<div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b>' + esc(c.provider) + '</b>' + chk('enabled', 'Enabled', c.enabled) + '</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"><div style="flex:1;min-width:200px"><label style="font-size:11px;opacity:.75">Calculation rule</label><select id="' + id + 'calcMethod" style="' + inp + '"><option value="addon"' + (c.calcMethod === 'addon' ? ' selected' : '') + '>Flat add-on (rate % x months)</option><option value="diminishing"' + (c.calcMethod === 'diminishing' ? ' selected' : '') + '>Reducing balance (monthly rate)</option></select></div></div>' +
+        '<div style="font-size:11px;opacity:.75;margin-bottom:4px">Monthly rate % per term (leave blank = term not supported)</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + FIN_TERMS.map(t => f('t' + t, t + ' mos', c.termRates[t] !== undefined ? c.termRates[t] : '')).join('') + '</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('feeFixed', 'Processing fee (₱ fixed)', c.feeFixed) + f('feePct', 'Processing fee (% of financed)', c.feePct) + f('fixedDpAmt', 'Fixed DP (₱, optional)', c.fixedDpAmt) + '</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('minDpPct', 'Min DP %', c.minDpPct) + f('maxDpPct', 'Max DP %', c.maxDpPct) + f('minDpAmt', 'Min DP (₱)', c.minDpAmt) + '<div style="flex:1;min-width:130px;display:flex;align-items:flex-end">' + chk('zeroDpAllowed', 'Zero DP allowed', c.zeroDpAllowed) + '</div></div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('promoName', 'Promo name', c.promoName, 'text') + f('promoRate', 'Promo monthly rate %', c.promoRate) + f('promoUntil', 'Promo valid until', c.promoUntil, 'date') + '<div style="flex:1;min-width:130px;display:flex;align-items:flex-end">' + chk('promoActive', 'Promo active', c.promoActive) + '</div></div>' +
+        f('notes', 'Source of rates / notes', c.notes, 'text') +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px"><span style="font-size:11px;opacity:.65">' + (c.updatedAt ? 'Updated by ' + esc(c.updatedBy) + ' ' + esc(safeFormatDateTime(c.updatedAt)) : 'Not configured yet') + '</span><button class="btn btn-primary btn-sm" id="' + id + 'btn" onclick="fin_saveProvider(' + n + ')">Save ' + esc(c.provider) + '</button></div></div>';
+    }).join('') + '</div>';
+}
+
+async function fin_saveProvider(n) {
+  const c = FIN.settings[n], id = 'fs' + n + '_';
+  const g = k => document.getElementById(id + k);
+  const rates = {};
+  FIN_TERMS.forEach(t => { const v = g('t' + t).value; if (v !== '') rates[t] = parseFloat(v); });
+  if (g('enabled').checked && !Object.keys(rates).length) { toast('Enter at least one term rate before enabling ' + c.provider + '.', 'error'); return; }
+  const s = {
+    provider: c.provider, enabled: g('enabled').checked, calcMethod: g('calcMethod').value, termRates: rates,
+    feeFixed: g('feeFixed').value, feePct: g('feePct').value, fixedDpAmt: g('fixedDpAmt').value,
+    minDpPct: g('minDpPct').value, maxDpPct: g('maxDpPct').value, minDpAmt: g('minDpAmt').value, zeroDpAllowed: g('zeroDpAllowed').checked,
+    promoName: g('promoName').value, promoRate: g('promoRate').value, promoUntil: g('promoUntil').value, promoActive: g('promoActive').checked, notes: g('notes').value
+  };
+  const btn = g('btn'); if (btn) btn.disabled = true;
+  try {
+    const r = await gasPost({ action: 'fin_saveSettings', settings: JSON.stringify(s) });
+    if (r && r.success) { toast(c.provider + ' settings saved', 'success'); await fin_loadSettings(true); fin_renderSettings(); }
+    else { toast((r && r.message) || 'Save failed.', 'error'); if (btn) btn.disabled = false; }
+  } catch (e) { toast('Network error: ' + e.message, 'error'); if (btn) btn.disabled = false; }
 }
