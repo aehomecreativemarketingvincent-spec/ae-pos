@@ -1,6 +1,7 @@
 /* =============================================
    AE HOME POS SYSTEM - app.js
    ============================================= */
+
 // ─── CONFIG ───────────────────────────────────
 const GAS_URL = "https://script.google.com/macros/s/AKfycbyV3mAGgpQxiKDFmm5Jq7FGs4ah42r2Yb0c_StXQsftuwp5QmcjTacELHFoB_LIYXM8/exec";
 
@@ -82,13 +83,13 @@ const ROLE_NAV = {
     { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
     { id: 'priceChecker',   icon: '', label: 'Price Checker' },
     { id: 'incentives',     icon: '', label: 'Incentives' },
+    { id: 'ihAdmin',    icon: '', label: 'In-House Installment' },
   ],
   agent: [
     { id: 'incentives', icon: '', label: 'Incentives' },
   ],
   verifier: [
     { id: 'incentives', icon: '', label: 'Incentives' },
-    { id: 'ihAdmin',    icon: '', label: 'In-House Installment' },
   ],
   employee: [
     { id: 'ihMy',       icon: '', label: 'Installment Application' },
@@ -8232,7 +8233,8 @@ const IH_METHODS  = ['GCash', 'Bank Transfer', 'Cash', 'Salary Deduction', 'Othe
 const IH = { ins: [], pays: [], emps: [], tab: 'verify', filter: 'all', q: '', today: '', busy: false, refBase: null, upl: null, proof: {} };
 
 function ih_isAdmin() { return !!currentUser && currentUser.role === 'admin'; }
-function ih_isStaff() { return !!currentUser && (currentUser.role === 'admin' || currentUser.role === 'verifier'); }
+function ih_isStaff() { return !!currentUser && (currentUser.role === 'admin' || currentUser.role === 'clerk'); }   // Admin + Clerk only (Clerk: payments only)
+function ih_isPayer() { return ih_isStaff(); }
 function ih_isEmp()   { return !!currentUser && currentUser.role === 'employee'; }
 function ih_money(n) { return '₱' + Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function ih_date(s) {
@@ -8334,7 +8336,7 @@ async function ih_viewProof(payId) {
 // ── payment modal (employee submits proof; admin can also record) ──
 function ih_openPayModal(insId) {
   const ins = ih_insById(insId); if (!ins) return;
-  const admin = ih_isAdmin();
+  const admin = ih_isPayer();
   const remaining = Math.max(0, Math.round((ins.balance - ins.pending) * 100) / 100);
   if (remaining <= 0) { toast('There is nothing left to pay, or the remaining balance is already waiting for verification.', 'info', 5000); return; }
   IH.upl = null; IH.refBase = 'p' + Date.now().toString(36) + ih_rand(5);
@@ -8374,7 +8376,7 @@ async function ih_submitPay(insId) {
   if (!date) { toast('Enter the date paid.', 'error'); return; }
   const remaining = Math.round((ins.balance - ins.pending) * 100) / 100;
   if (amount > remaining + 0.005) { toast('The amount is more than the remaining balance (' + ih_money(remaining) + ').', 'error'); return; }
-  const needPhoto = !ih_isAdmin();
+  const needPhoto = !ih_isPayer();
   if (needPhoto && !IH.upl) { toast('Please attach a photo of your proof of payment.', 'error'); return; }
   IH.busy = true;
   const go = g('ihPGo'), cancel = g('ihPCancel'), prog = g('ihPProg');
@@ -8398,7 +8400,7 @@ async function ih_submitPay(insId) {
     if (res && res.success) {
       IH.upl = null; IH.refBase = null;
       closeModalDirect();
-      toast(ih_isAdmin() ? 'Payment recorded.' : 'Payment submitted. Please wait for verification.', 'success', 5000);
+      toast(ih_isPayer() ? 'Payment recorded.' : 'Payment submitted. Please wait for verification.', 'success', 5000);
       await ih_refreshCurrent();
     } else {
       if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc((res && res.message) || 'Could not save the payment.') + '</span>';
@@ -8571,7 +8573,7 @@ function ih_openDetail(id) {
       '<div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">' + (p.hasProof ? '<button class="btn btn-ghost btn-sm" onclick="ih_viewProof(\'' + esc(p.id) + '\')">View Photo</button>' : '') +
       (p.status === 'Pending' ? '<button class="btn btn-primary btn-sm" onclick="ih_verify(\'' + esc(p.id) + '\')">Verify</button><button class="btn btn-danger btn-sm" onclick="ih_openReject(\'' + esc(p.id) + '\')">Reject</button>' : '') + '</div></div>').join('') : '<div style="opacity:.7;font-size:13px">No payments yet.</div>') + '</details>' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">' +
-    (ih_isAdmin() && i.status === 'Active' ? '<button class="btn btn-primary btn-sm" onclick="ih_openPayModal(\'' + esc(i.id) + '\')">Record Payment</button><button class="btn btn-danger btn-sm" onclick="ih_openCancel(\'' + esc(i.id) + '\')">Cancel Installment</button>' : '') +
+    (ih_isPayer() && i.status === 'Active' ? '<button class="btn btn-primary btn-sm" onclick="ih_openPayModal(\'' + esc(i.id) + '\')">Record Payment</button>' : '') + (ih_isAdmin() && i.status === 'Active' ? '<button class="btn btn-danger btn-sm" onclick="ih_openCancel(\'' + esc(i.id) + '\')">Cancel Installment</button>' : '') +
     '<button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
 }
 function ih_openCancel(id) {
