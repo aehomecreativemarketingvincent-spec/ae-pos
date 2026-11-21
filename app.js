@@ -63,7 +63,7 @@ const ROLE_NAV = {
     { id: 'wholesalers',    icon: '', label: 'Wholesalers' },
     { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
     { id: 'priceChecker',   icon: '', label: 'Price Checker' },
-    { id: 'installments',   icon: '', label: 'Installments' },
+    { id: 'ihAdmin',        icon: '', label: 'In-House Installment' },
     { id: 'incentives',     icon: '', label: 'Incentives' },
   ],
   cashier: [
@@ -89,6 +89,10 @@ const ROLE_NAV = {
   ],
   verifier: [
     { id: 'incentives', icon: '', label: 'Incentives' },
+    { id: 'ihAdmin',    icon: '', label: 'In-House Installment' },
+  ],
+  employee: [
+    { id: 'ihMy',       icon: '', label: 'Installment Application' },
   ],
   viewer: [
     { id: 'dashboard', icon: '', label: 'Dashboard' },
@@ -481,7 +485,7 @@ function inc_notifyPlay() {
 }
 
 // Phone-style banner that slides down from the top: who sent it, what it is, tap to open Incentives
-function inc_banner(title, body, kind, ms) {
+function inc_banner(title, body, kind, ms, page) {
   try {
     let host = document.getElementById('incBannerHost');
     if (!host) {
@@ -508,7 +512,7 @@ function inc_banner(title, body, kind, ms) {
     };
     el.onclick = function() {
       close();
-      try { if (typeof navigateTo === 'function') navigateTo('incentives'); } catch (e) {}
+      try { if (typeof navigateTo === 'function') navigateTo(page || 'incentives'); } catch (e) {}
     };
     host.appendChild(el);
     requestAnimationFrame(function() { requestAnimationFrame(function() { el.style.transform = 'translateY(0)'; el.style.opacity = '1'; }); });
@@ -718,7 +722,7 @@ function initApp() {
   buildNav(role);
 
   // Default page
-  const defaultPages = { admin: 'dashboard', cashier: 'pos', clerk: 'inventory', viewer: 'dashboard', agent: 'incentives', verifier: 'incentives' };
+  const defaultPages = { admin: 'dashboard', cashier: 'pos', clerk: 'inventory', viewer: 'dashboard', agent: 'incentives', verifier: 'incentives', employee: 'ihMy' };
   navigateTo(defaultPages[role] || 'dashboard');
 }
 
@@ -749,7 +753,8 @@ function navigateTo(page) {
     wholesalers: 'Wholesalers Information',
     inventoryAudit: 'Inventory Audit',
     priceChecker:   'Price Checker',
-    installments:   'Installment Financing',
+    ihAdmin:        'In-House Installment',
+    ihMy:           'Installment Application',
     incentives:     'Incentive Tracker'
   };
  document.getElementById('topbarTitle').textContent = titles[page] || page;
@@ -791,7 +796,8 @@ function renderPage(page) {
     wholesalers: renderWholesalers,
     inventoryAudit: audit_renderPage,
     priceChecker:   pcx_renderPage,
-    installments:   fin_renderPage,
+    ihAdmin:        ih_renderAdmin,
+    ihMy:           ih_renderMy,
     incentives:     inc_renderPage,
   };
   if (pages[page]) pages[page]();
@@ -814,7 +820,7 @@ function handleAuthError(res) {
 // ─── GAS REQUEST ─────────────────────────────
 // Read-only actions are safe to retry automatically when the server is busy / the network blips.
 // Writes (gasPost) are never auto-retried, to avoid saving twice.
-const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|pc_get|fin_get)/;   // not the session poller: it must never add load
+const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|pc_get|ih_get)/;   // not the session poller: it must never add load
 async function gasRequest(params, timeoutMs = 30000) {
   const canRetry = GAS_READ_RE.test(String((params && params.action) || ''));
   let lastErr;
@@ -1763,16 +1769,14 @@ function openCheckout() {
 <div id="wsMissingWarn" style="display:none;background:#fff7ed;border:1px solid #fdba74;color:#9a3412;border-radius:8px;padding:10px 12px;font-size:0.8rem;margin-bottom:10px"></div>
 <div class="field">
 <label for="paymentMethod">Payment Method</label>
-<select id="paymentMethod" name="paymentMethod" onchange="fin_onPayChange()" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:var(--font-main);font-size:0.9rem;background:white">
+<select id="paymentMethod" name="paymentMethod" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:var(--font-main);font-size:0.9rem;background:white">
   <option value="Cash Sale">Cash Sale</option>
   <option value="GCash">GCash</option>
   <option value="Card">Card</option>
   <option value="Charge Sale">Charge Sale</option>
   <option value="Receivable">Receivable</option>
-  ${fin_checkoutOption()}
 </select>
 </div>
-${fin_checkoutPanelHtml()}
 <div class="field">
 <label for="cashInput">Cash Received (₱)</label>
 <input type="number" id="cashInput" name="cashInput" placeholder="0.00" min="0" step="0.01" oninput="updateChange(ws_currentTotal())">
@@ -1802,11 +1806,6 @@ async function processCheckout(total) {
   _checkoutInProgress = true;
   const confirmBtn = document.getElementById('checkoutConfirmBtn') || document.querySelector('#modalBox .btn-primary');
   if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Saving...'; }
-
-  // Installment is an application, not a sale: handled separately (nothing is deducted here)
-  if ((document.getElementById('paymentMethod')?.value) === 'Installment') {
-    if (!ws_missingItems(_checkoutPriceType).length) { return fin_processCheckout(); }
-  }
 
   // Wholesale guard: never save a wholesale sale with a missing (zero) wholesale price
   const _wsMissing = ws_missingItems(_checkoutPriceType);
@@ -3380,6 +3379,7 @@ function openEditCashierModal(id) {
             <option value="clerk" ${c.role==='clerk'?'selected':''}>Inventory Clerk</option>
             <option value="agent" ${c.role==='agent'?'selected':''}>Sales Agent (Incentives only)</option>
             <option value="verifier" ${c.role==='verifier'?'selected':''}>Incentive Verifier (Verify/Reject only)</option>
+            <option value="employee" ${c.role==='employee'?'selected':''}>Employee (Installment only)</option>
             <option value="admin" ${c.role==='admin'?'selected':''}>Admin</option>
           </select>
         </div>
@@ -8224,538 +8224,630 @@ function pcx_closeScanner() {
 
 
 // ═══════════════════════════════════════════════════════════════
-// INSTALLMENT FINANCING (admin only for now: widen FIN_ROLES later, and the server ACL)
-// An application is NOT a sale. The sale is recorded (stock deducted) only on Release.
-// All figures here are ESTIMATES from admin-configured rates, never approved quotations.
+// IN-HOUSE INSTALLMENT (employees). Monitoring only: nothing here touches Sales or Inventory.
+// Admin: create installments, verify payments, manage employee accounts.
+// Verifier: verify / reject payment proofs. Employee: see own installments and upload proof of payment.
 // ═══════════════════════════════════════════════════════════════
-const FIN_ROLES     = ['admin'];
-const FIN_PROVIDERS = ['Skyro', 'Home Credit', 'Salmon', 'Billease', 'PayJoy', 'Tonik', 'Credit Card'];
-const FIN_TERMS     = [6, 9, 12, 18, 24];
-const FIN_ST = { PENDING: 'Pending Application', APPROVED: 'Approved', REJECTED: 'Rejected', RELEASED: 'Released / Completed', CANCELLED: 'Cancelled', RELEASING: 'Releasing' };
-const FIN = { settings: null, apps: [], tab: 'apps', filter: 'all', from: '', to: '', busy: false };
+const IH_PARTNERS = ['Skyro', 'Home Credit', 'Salmon', 'Billease', 'PayJoy', 'Tonik', 'Credit Card'];
+const IH_METHODS  = ['GCash', 'Bank Transfer', 'Cash', 'Salary Deduction', 'Other'];
+const IH = { ins: [], pays: [], emps: [], tab: 'verify', filter: 'all', q: '', today: '', busy: false, refBase: null, upl: null, proof: {} };
 
-function fin_allowed() { return !!(currentUser && FIN_ROLES.indexOf(currentUser.role) >= 0); }
-function fin_money(n) { return '₱' + Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-function fin_r2(n) { return Math.round(n * 100) / 100; }
-
-// Same formulas as fin_calc_ in Code.gs (the server recomputes and stores its own estimate)
-function fin_calc(cfg, total, dp, term, today) {
-  const financed = fin_r2(total - dp);
-  if (financed <= 0) return { ok: false, message: 'Down payment leaves nothing to finance.' };
-  let rate = cfg.termRates[term];
-  let promo = false;
-  if (cfg.promoActive && cfg.promoRate !== '' && (!cfg.promoUntil || String(today) <= cfg.promoUntil)) { rate = Number(cfg.promoRate); promo = true; }
-  // blank rate is NOT 0%: no estimate, the approved quotation is entered instead
-  if (rate === undefined) return { ok: true, noRate: true, financed };
-  const fees = fin_r2(cfg.feeFixed + financed * cfg.feePct / 100);
-  let monthly;
-  if (cfg.calcMethod === 'diminishing') {
-    const i = rate / 100;
-    monthly = i === 0 ? (financed + fees) / term : (financed * i / (1 - Math.pow(1 + i, -term)) + fees / term);
-  } else {
-    monthly = (financed + financed * rate / 100 * term + fees) / term;
-  }
-  monthly = fin_r2(monthly);
-  const totalInst = fin_r2(monthly * term);
-  return { ok: true, financed, rate, fees, promo, monthly, totalInstallments: totalInst, charges: fin_r2(totalInst - financed), totalPayable: fin_r2(dp + totalInst) };
+function ih_isAdmin() { return !!currentUser && currentUser.role === 'admin'; }
+function ih_isStaff() { return !!currentUser && (currentUser.role === 'admin' || currentUser.role === 'verifier'); }
+function ih_isEmp()   { return !!currentUser && currentUser.role === 'employee'; }
+function ih_money(n) { return '₱' + Number(n || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function ih_date(s) {
+  if (!s) return '-';
+  const p = String(s).substring(0, 10).split('-');
+  if (p.length !== 3) return esc(s);
+  const m = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][parseInt(p[1], 10) - 1] || p[1];
+  return m + ' ' + parseInt(p[2], 10) + ', ' + p[0];
 }
-function fin_dpError(cfg, total, dp) {
-  if (isNaN(dp) || dp < 0) return 'Down payment is invalid.';
-  if (dp >= total) return 'Down payment must be less than the selling price.';
-  if (dp === 0 && !cfg.zeroDpAllowed) return 'Zero down payment is not allowed for this provider.';
-  if (dp > 0 && cfg.minDpAmt > 0 && dp < cfg.minDpAmt) return 'Minimum down payment is ' + fin_money(cfg.minDpAmt) + '.';
-  const pct = dp / total * 100;
-  if (cfg.minDpPct > 0 && pct + 0.0001 < cfg.minDpPct) return 'Minimum down payment is ' + cfg.minDpPct + '% of the price.';
-  if (cfg.maxDpPct < 100 && pct - 0.0001 > cfg.maxDpPct) return 'Maximum down payment is ' + cfg.maxDpPct + '% of the price.';
-  return '';
-}
-function fin_termError(cfg, term, financed) {
-  if ((cfg.terms || []).indexOf(term) < 0) return 'The ' + term + '-month term is not available for ' + cfg.provider + '.';
-  const min = (cfg.minFinanced || {})[term];
-  if (min > 0 && !(financed > min)) return 'The ' + term + '-month term needs a financed amount above ' + fin_money(min) + '.';
-  return '';
-}
-function fin_cfg(provider) { return ((FIN.settings || []).find(c => c.provider === provider)) || null; }
-
-async function fin_loadSettings(force) {
-  if (FIN.settings && !force) return true;
-  try {
-    const r = await gasRequest({ action: 'fin_getSettings' }, 30000);
-    if (!r || !r.success) { toast((r && r.message) || 'Could not load financing settings.', 'error'); return false; }
-    FIN.settings = r.data || [];
-    return true;
-  } catch (e) { toast('Could not load financing settings: ' + e.message, 'error'); return false; }
-}
-
-// ── Checkout integration ─────────────────────────────────────
-function fin_checkoutOption() { return fin_allowed() ? '<option value="Installment">Installment</option>' : ''; }
-function fin_checkoutPanelHtml() {
-  return fin_allowed() ? '<div id="finPanel" style="display:none;border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px;background:#f8fbff"></div>' : '';
-}
-
-async function fin_onPayChange() {
-  const sel = document.getElementById('paymentMethod');
-  const on = !!sel && sel.value === 'Installment';
-  const panel = document.getElementById('finPanel');
-  const cashEl = document.getElementById('cashInput');
-  const cashField = cashEl ? cashEl.closest('.field') : null;
-  const chg = document.getElementById('changeDisplay');
-  const btn = document.getElementById('checkoutConfirmBtn');
-  if (cashField) cashField.style.display = on ? 'none' : '';
-  if (chg) chg.style.display = on ? 'none' : '';
-  if (btn) btn.textContent = on ? 'Submit Installment Application' : 'Confirm & Save Transaction';
-  if (!panel) return;
-  panel.style.display = on ? 'block' : 'none';
-  if (!on) return;
-  panel.innerHTML = '<div style="font-size:13px;opacity:.7">Loading financing settings...</div>';
-  if (!(await fin_loadSettings(false))) { panel.innerHTML = '<div style="color:#c62828;font-size:13px">Could not load financing settings. Switch payment method and try again.</div>'; return; }
-  fin_renderPanel();
-}
-
-function fin_enabledProviders() { return (FIN.settings || []).filter(c => c.enabled && (c.terms || []).length); }
-
-function fin_renderPanel() {
-  const panel = document.getElementById('finPanel');
-  if (!panel) return;
-  const provs = fin_enabledProviders();
-  if (!provs.length) {
-    panel.innerHTML = '<div style="font-size:13px;color:#9a3412">No financing provider is enabled yet. Go to Installments > Financing Settings, switch on the terms, and enable a provider.</div>';
-    return;
-  }
-  const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:0.9rem;background:#fff;box-sizing:border-box';
-  panel.innerHTML =
-    '<div id="finTitle" style="font-weight:800;margin-bottom:8px;color:var(--green,#2e7d32)"></div>' +
-    '<div class="field"><label>Financing Provider</label><select id="finProvider" style="' + inp + '" onchange="fin_onProviderChange()">' +
-      provs.map(c => '<option value="' + esc(c.provider) + '">' + esc(c.provider) + '</option>').join('') + '</select></div>' +
-    '<div class="field"><label>Customer Name</label><input id="finCustomer" type="text" maxlength="100" style="' + inp + '" placeholder="Full name"></div>' +
-    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Down Payment</label><select id="finDpType" style="' + inp + '" onchange="fin_recalc()"></select></div>' +
-    '<div class="field" style="flex:1"><label id="finDpLabel">Amount</label><input id="finDpVal" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div></div>' +
-    '<div class="field"><label>Installment Term</label><select id="finTerm" style="' + inp + '" onchange="fin_recalc()"></select></div>' +
-    '<div id="finCalc" style="margin:6px 0 10px"></div>' +
-    '<div style="font-weight:700;font-size:13px;margin:8px 0 4px">Actual Approved Quotation (from the provider)</div>' +
-    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Approved Financed Amount</label><input id="finApprAmt" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div>' +
-    '<div class="field" style="flex:1"><label>Approved Monthly Payment</label><input id="finApprMonthly" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div></div>' +
-    '<div id="finDiffWrap" class="field" style="display:none"><label>Reason for the difference</label><input id="finDiffReason" type="text" maxlength="300" style="' + inp + '"></div>' +
-    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Fees</label><select id="finFeeType" style="' + inp + '" onchange="fin_recalc()"><option value="">Not specified</option><option value="none">No fees</option><option value="included">Already included in quotation</option><option value="separate">Separate fee</option></select></div>' +
-    '<div class="field" id="finFeeAmtWrap" style="flex:1;display:none"><label>Fee Amount</label><input id="finFeeAmt" type="number" min="0" step="0.01" style="' + inp + '" oninput="fin_recalc()"></div></div>' +
-    '<div class="field"><label>Application / Reference No.</label><input id="finRef" type="text" maxlength="60" style="' + inp + '"></div>' +
-    '<div style="font-size:12px;margin-bottom:6px">Financing Status: <b>Pending Application</b></div>' +
-    '<div id="finNotice" style="font-size:12px;opacity:.8"></div>';
-  fin_onProviderChange();
-}
-
-function fin_onProviderChange() {
-  const cfg = fin_cfg((document.getElementById('finProvider') || {}).value);
-  if (!cfg) return;
-  const dpSel = document.getElementById('finDpType');
-  let opts = '<option value="custom">Custom amount</option><option value="percent">Percent of price</option>';
-  if (cfg.fixedDpAmt > 0) opts += '<option value="fixed">Fixed (' + fin_money(cfg.fixedDpAmt) + ')</option>';
-  if (cfg.zeroDpAllowed) opts += '<option value="zero">Zero down payment</option>';
-  dpSel.innerHTML = opts;
-  const t = document.getElementById('finTitle'); if (t) t.textContent = cfg.provider.toUpperCase() + ' INSTALLMENT FINANCING';
-  const n = document.getElementById('finNotice');
-  if (n) n.textContent = 'Financing terms and monthly amortization are subject to ' + cfg.provider + ' approval. Final amounts must follow the approved financing quotation. The sale and stock deduction happen only when the application is Released in Installments.';
-  const termSel = document.getElementById('finTerm'); if (termSel) termSel.dataset.sig = '';
-  fin_recalc();
-}
-
-// Term list: every switched-on term is shown; ones that do not qualify for this financed amount are disabled with the reason.
-function fin_refreshTerms(cfg, financed) {
-  const sel = document.getElementById('finTerm'); if (!sel) return;
-  const sig = cfg.provider + '|' + (cfg.terms || []).map(t => t + (fin_termError(cfg, t, financed) ? 'x' : 'o')).join(',');
-  if (sel.dataset.sig === sig) return;
-  const cur = parseInt(sel.value, 10);
-  sel.dataset.sig = sig;
-  sel.innerHTML = FIN_TERMS.filter(t => (cfg.terms || []).indexOf(t) >= 0).map(t => {
-    const bad = fin_termError(cfg, t, financed);
-    return '<option value="' + t + '"' + (bad ? ' disabled' : '') + '>' + t + ' months' + (bad ? ' (needs financed above ' + fin_money(cfg.minFinanced[t]) + ')' : '') + '</option>';
-  }).join('');
-  const ok = Array.from(sel.options).find(o => !o.disabled && Number(o.value) === cur) || Array.from(sel.options).find(o => !o.disabled);
-  if (ok) sel.value = ok.value;
-}
-
-function fin_readDp(cfg, total) {
-  const type = (document.getElementById('finDpType') || {}).value || 'custom';
-  const valEl = document.getElementById('finDpVal'), lab = document.getElementById('finDpLabel');
-  const v = parseFloat(valEl && valEl.value);
-  if (lab) lab.textContent = type === 'percent' ? 'Percent (%)' : 'Amount (₱)';
-  if (valEl) valEl.disabled = (type === 'fixed' || type === 'zero');
-  let dp;
-  if (type === 'zero') dp = 0;
-  else if (type === 'fixed') dp = cfg.fixedDpAmt;
-  else if (type === 'percent') dp = isNaN(v) ? NaN : fin_r2(total * v / 100);
-  else dp = isNaN(v) ? NaN : fin_r2(v);
-  return { type, dp };
-}
-
-function fin_quoteInputs() {
-  const v = id => (document.getElementById(id) || {}).value;
-  return { approvedAmount: parseFloat(v('finApprAmt')) || '', approvedMonthly: parseFloat(v('finApprMonthly')) || '', diffReason: (v('finDiffReason') || '').trim(), feeTreatment: v('finFeeType') || '', feeAmount: parseFloat(v('finFeeAmt')) || '' };
-}
-
-function fin_recalc() {
-  const out = document.getElementById('finCalc');
-  if (!out) return;
-  const cfg = fin_cfg((document.getElementById('finProvider') || {}).value);
-  if (!cfg) { out.innerHTML = ''; return; }
-  const total = ws_currentTotal();
-  const { dp } = fin_readDp(cfg, total);
-  const row = (a, b, bold) => '<div style="display:flex;justify-content:space-between;padding:3px 0;' + (bold ? 'font-weight:700' : '') + '"><span>' + a + '</span><span>' + b + '</span></div>';
-  const err = isNaN(dp) ? 'Enter the down payment.' : fin_dpError(cfg, total, dp);
-  if (err) { out.innerHTML = row('Selling Price', fin_money(total), true) + '<div style="color:#c62828;font-size:13px;margin-top:4px">' + esc(err) + '</div>'; return; }
-  const financed = fin_r2(total - dp);
-  fin_refreshTerms(cfg, financed);
-  const term = parseInt((document.getElementById('finTerm') || {}).value, 10);
-  const q = fin_quoteInputs();
-  const diffWrap = document.getElementById('finDiffWrap');
-  if (diffWrap) diffWrap.style.display = (q.approvedAmount !== '' && Math.abs(q.approvedAmount - financed) > 0.01) ? 'block' : 'none';
-  const feeWrap = document.getElementById('finFeeAmtWrap');
-  if (feeWrap) feeWrap.style.display = q.feeTreatment === 'separate' ? 'block' : 'none';
-  if (!term) { out.innerHTML = row('Selling Price', fin_money(total), true) + row('Down Payment', fin_money(dp)) + row('Amount Financed', fin_money(financed), true) + '<div style="color:#c62828;font-size:13px;margin-top:4px">No term is available for this financed amount.</div>'; return; }
-  const c = fin_calc(cfg, total, dp, term, localDateStr(new Date()));
-  if (!c.ok) { out.innerHTML = '<div style="color:#c62828;font-size:13px">' + esc(c.message) + '</div>'; return; }
-  let html = row('Selling Price', fin_money(total)) + row('Down Payment', fin_money(dp)) + row('Amount Financed', fin_money(financed), true);
-  if (c.noRate) {
-    html += '<div style="margin:6px 0;font-size:13px;color:#9a3412;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;padding:6px 8px">Interest rate not configured. Enter the actual approved financing quotation.</div>';
-  } else {
-    html += row('Rate used', c.rate + '% per month' + (c.promo ? ' (promo)' : '')) + row('Estimated Monthly Payment', fin_money(c.monthly), true) +
-      '<div style="margin-top:4px;font-size:12px;font-weight:700;color:#9a3412;background:#fff7ed;border:1px solid #fdba74;border-radius:6px;padding:6px 8px">ESTIMATE ONLY' +
-      (cfg.calcMethod === 'diminishing' ? ' (monthly reducing balance, not an exact copy of the provider\'s own computation)' : '') + '. Not an approved quotation.</div>';
-  }
-  if (q.approvedMonthly !== '') {
-    const effDp = q.approvedAmount !== '' ? fin_r2(total - q.approvedAmount) : dp;
-    const inst = fin_r2(q.approvedMonthly * term);
-    const fee = (q.feeTreatment === 'separate' && q.feeAmount !== '') ? q.feeAmount : 0;
-    html += '<div style="margin-top:6px;border-top:1px dashed var(--border);padding-top:4px">' + row('Actual Approved Monthly', fin_money(q.approvedMonthly), true) +
-      row('Total Installment Payments (' + term + ' x monthly)', fin_money(inst)) + (fee ? row('Separate Fees', fin_money(fee)) : '') +
-      row('Total Customer Payable', fin_money(fin_r2(effDp + inst + fee)), true) + '</div>';
-  }
-  out.innerHTML = html;
-}
-
-// Re-run the calculator whenever checkout re-prices (Retail / Wholesale toggle)
-(function () {
-  const orig = ws_renderCheckoutSummary;
-  ws_renderCheckoutSummary = function () { orig.apply(this, arguments); try { fin_recalc(); } catch (e) {} };
-})();
-
-async function fin_processCheckout() {
-  const btn = document.getElementById('checkoutConfirmBtn');
-  const reset = () => { _checkoutInProgress = false; if (btn) { btn.disabled = false; btn.textContent = 'Submit Installment Application'; } };
-  if (!fin_allowed()) { toast('Not allowed.', 'error'); reset(); return; }
-  const cfg = fin_cfg((document.getElementById('finProvider') || {}).value);
-  if (!cfg) { toast('Select a financing provider.', 'error'); reset(); return; }
-  const customer = ((document.getElementById('finCustomer') || {}).value || '').trim();
-  if (!customer) { toast('Enter the customer name.', 'error'); reset(); return; }
-  const cartSnapshot = ws_repriceCart(_checkoutPriceType);
-  if (!cartSnapshot.length) { toast('Cart is empty!', 'warning'); reset(); return; }
-  const total = fin_r2(cartSnapshot.reduce((s, c) => s + c.total, 0));
-  const { type, dp } = fin_readDp(cfg, total);
-  const err = isNaN(dp) ? 'Enter the down payment.' : fin_dpError(cfg, total, dp);
-  if (err) { toast(err, 'error'); reset(); return; }
-  const term = parseInt((document.getElementById('finTerm') || {}).value, 10);
-  const c = fin_calc(cfg, total, dp, term, localDateStr(new Date()));
-  if (!c.ok) { toast(c.message, 'error'); reset(); return; }
-  const tErr = fin_termError(cfg, term, c.financed);
-  if (tErr) { toast(tErr, 'error'); reset(); return; }
-  const q = fin_quoteInputs();
-  if (q.approvedAmount !== '' && Math.abs(q.approvedAmount - c.financed) > 0.01 && !q.diffReason) { toast('Enter the reason why the approved amount differs from the calculated balance.', 'error'); reset(); return; }
-  const items = cartSnapshot.map(i => ({ productId: i.productId, unit: i.unit, name: i.name, barcode: i.barcode || '', price: i.price, qty: i.qty, total: i.total, priceType: i.priceType }));
-  const payload = {
-    action: 'fin_createApplication', provider: cfg.provider, customerName: customer, items: JSON.stringify(items),
-    priceType: _checkoutPriceType === 'wholesale' ? 'wholesale' : 'retail', total, downPayment: dp, dpType: type, term,
-    approvedAmount: q.approvedAmount, approvedMonthly: q.approvedMonthly, diffReason: q.diffReason, feeTreatment: q.feeTreatment, feeAmount: q.feeAmount,
-    referenceNo: ((document.getElementById('finRef') || {}).value || '').trim()
-  };
-  if (JSON.stringify(payload).length > 4800) { toast('This cart is too large for one application. Split it into two.', 'error'); reset(); return; }
-  closeModalDirect();
-  showLoading('Saving installment application...');
-  try {
-    const res = await gasPost(payload);
-    hideLoading();
-    if (res && res.success) {
-      cart = []; saveCartToStorage();
-      try { renderCart(); } catch (e) {}
-      _checkoutInProgress = false;
-      toast('Application ' + res.id + ' saved as Pending. Stock is not deducted until it is Released.', 'success', 6000);
-    } else {
-      toast('Save failed: ' + ((res && res.message) || 'Unknown error.'), 'error');
-      _checkoutInProgress = false;
-    }
-  } catch (e) {
-    hideLoading(); _checkoutInProgress = false;
-    toast('Network error. Check Installments before trying again, the application may have saved.', 'error', 6000);
-  }
-}
-
-// ── Installments page ────────────────────────────────────────
-async function fin_renderPage() {
-  if (!fin_allowed()) { document.getElementById('pageContent').innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>'; return; }
-  document.getElementById('pageContent').innerHTML =
-    '<div id="finTabBar" class="tab-bar" style="margin-bottom:16px">' +
-      '<button class="tab-btn active" onclick="fin_showTab(\'apps\',this)">Applications</button>' +
-      '<button class="tab-btn" onclick="fin_showTab(\'report\',this)">Reports</button>' +
-      '<button class="tab-btn" onclick="fin_showTab(\'settings\',this)">Financing Settings</button>' +
-    '</div><div id="finContent"></div>';
-  fin_showTab(FIN.tab || 'apps', null);
-  if (FIN.tab && FIN.tab !== 'apps') {
-    const idx = { apps: 0, report: 1, settings: 2 }[FIN.tab];
-    const bs = document.querySelectorAll('#finTabBar .tab-btn');
-    bs.forEach((b, i) => b.classList.toggle('active', i === idx));
-  }
-}
-function fin_showTab(tab, btn) {
-  FIN.tab = tab;
-  if (btn) { document.querySelectorAll('#finTabBar .tab-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active'); }
-  if (tab === 'apps' || tab === 'report') fin_loadApps().then(() => tab === 'apps' ? fin_renderApps() : fin_renderReport());
-  else fin_loadSettings(true).then(ok => { if (ok) fin_renderSettings(); });
-}
-async function fin_loadApps() {
-  const el = document.getElementById('finContent');
-  if (el) el.innerHTML = '<div class="card"><div style="opacity:.7">Loading...</div></div>';
-  try {
-    const r = await gasRequest({ action: 'fin_getApplications' }, 45000);
-    if (r && r.success) FIN.apps = r.data || [];
-    else toast((r && r.message) || 'Could not load applications.', 'error');
-  } catch (e) { toast('Could not load applications: ' + e.message, 'error'); }
-}
-
-function fin_badge(st) {
-  const col = { 'Pending Application': '#b45309', 'Approved': '#1565c0', 'Rejected': '#c62828', 'Released / Completed': '#2e7d32', 'Cancelled': '#6b7280', 'Releasing': '#7c3aed' }[st] || '#555';
+function ih_badge(st) {
+  const col = { Pending: '#b45309', Verified: '#2e7d32', Rejected: '#c62828', Active: '#1565c0', Completed: '#2e7d32', Cancelled: '#6b7280', Paid: '#2e7d32', Partial: '#b45309', Overdue: '#c62828', Upcoming: '#6b7280', Approved: '#2e7d32' }[st] || '#555';
   return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;color:#fff;background:' + col + '">' + esc(st) + '</span>';
 }
-function fin_dateOf(a) { return String(a.createdAt || '').substring(0, 10); }
-function fin_filtered() {
-  return FIN.apps.filter(a => {
-    if (FIN.filter !== 'all' && a.status !== FIN.filter) return false;
-    const d = fin_dateOf(a);
-    if (FIN.from && d < FIN.from) return false;
-    if (FIN.to && d > FIN.to) return false;
+function ih_rand(n) { let s = ''; const c = 'abcdefghijklmnopqrstuvwxyz0123456789'; for (let i = 0; i < n; i++) s += c[Math.floor(Math.random() * c.length)]; return s; }
+function ih_sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function ih_hash(str) { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
+const IH_INP = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;font-size:0.9rem;background:#fff';
+
+async function ih_load() {
+  const calls = [gasRequest({ action: 'ih_getInstallments' }, 45000), gasRequest({ action: 'ih_getPayments' }, 45000)];
+  if (ih_isAdmin()) calls.push(gasRequest({ action: 'ih_getEmployees' }, 45000));
+  try {
+    const r = await Promise.all(calls);
+    if (r[0] && r[0].success) { IH.ins = r[0].data || []; IH.today = r[0].today || IH.today; } else toast((r[0] && r[0].message) || 'Could not load installments.', 'error');
+    if (r[1] && r[1].success) IH.pays = r[1].data || [];
+    if (r[2] && r[2].success) IH.emps = r[2].data || [];
     return true;
+  } catch (e) { toast('Could not load: ' + e.message, 'error'); return false; }
+}
+function ih_insById(id) { return IH.ins.find(i => String(i.id) === String(id)); }
+
+// ── photo: compress, then send in small pieces ───────────────
+function ih_compress(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const W = img.naturalWidth, H = img.naturalHeight;
+      if (!W || !H) { reject(new Error('Could not read this image.')); return; }
+      let out = null;
+      for (const dim of [1100, 900, 750, 600, 480]) {
+        const sc = Math.min(1, dim / Math.max(W, H)), w = Math.max(1, Math.round(W * sc)), h = Math.max(1, Math.round(H * sc));
+        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+        const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
+        for (const q of [0.7, 0.55, 0.4]) {
+          const d = cv.toDataURL('image/jpeg', q);
+          out = d.split(',')[1];
+          if (Math.floor(out.length * 3 / 4) <= 90000) return resolve(out);
+        }
+      }
+      resolve(out);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read this image. Try another photo.')); };
+    img.src = url;
   });
 }
 
-function fin_filterBar(showStatus) {
-  const inp = 'padding:7px;border:1px solid var(--border);border-radius:8px;font-size:0.85rem';
-  return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">' +
-    (showStatus ? '<select style="' + inp + '" onchange="FIN.filter=this.value;fin_renderApps()"><option value="all">All statuses</option>' +
-      Object.keys(FIN_ST).map(k => FIN_ST[k]).map(s => '<option value="' + s + '"' + (FIN.filter === s ? ' selected' : '') + '>' + s + '</option>').join('') + '</select>' : '') +
-    '<label style="font-size:12px">From <input type="date" value="' + FIN.from + '" style="' + inp + '" onchange="FIN.from=this.value;fin_rerender()"></label>' +
-    '<label style="font-size:12px">To <input type="date" value="' + FIN.to + '" style="' + inp + '" onchange="FIN.to=this.value;fin_rerender()"></label>' +
-    '<button class="btn btn-ghost btn-sm" onclick="fin_showTab(FIN.tab,null)">Refresh</button></div>';
-}
-function fin_rerender() { if (FIN.tab === 'report') fin_renderReport(); else fin_renderApps(); }
-
-function fin_renderApps() {
-  const el = document.getElementById('finContent');
-  if (!el) return;
-  const list = fin_filtered();
-  el.innerHTML = '<div class="card"><div class="card-title">Installment Applications</div>' + fin_filterBar(true) +
-    (list.length ? list.map(a =>
-      '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer" onclick="fin_openDetail(\'' + esc(a.id) + '\')">' +
-        '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + esc(a.customerName) + '</b>' + fin_badge(a.status) + '</div>' +
-        '<div style="font-size:12px;opacity:.8;margin-top:2px">' + esc(a.provider) + ' • ' + esc(a.id) + ' • ' + esc(safeFormatDateTime(a.createdAt)) + '</div>' +
-        '<div style="font-size:13px;margin-top:4px">Price ' + fin_money(a.totalSelling) + ' • DP ' + fin_money(a.downPayment) + ' • Financed ' + fin_money(a.financed) + ' • ' + esc(a.term) + ' mos</div>' +
-      '</div>').join('') : '<div style="opacity:.7">No applications found.</div>') + '</div>';
-}
-
-function fin_find(id) { return FIN.apps.find(a => String(a.id) === String(id)); }
-
-async function fin_openDetail(id) {
-  const a = fin_find(id);
-  if (!a) return;
-  let items = [];
-  try { items = JSON.parse(a.items || '[]'); } catch (e) {}
-  const row = (k, v) => '<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:13px"><span style="opacity:.75">' + k + '</span><span style="text-align:right">' + v + '</span></div>';
-  const acts = [];
-  if (a.status === FIN_ST.PENDING) acts.push('<button class="btn btn-primary btn-sm" onclick="fin_openApprove(\'' + esc(a.id) + '\')">Approve</button>');
-  if (a.status === FIN_ST.APPROVED || a.status === FIN_ST.RELEASING) acts.push('<button class="btn btn-primary btn-sm" onclick="fin_release(\'' + esc(a.id) + '\')">Release / Complete</button>');
-  if (a.status === FIN_ST.PENDING || a.status === FIN_ST.APPROVED) {
-    acts.push('<button class="btn btn-danger btn-sm" onclick="fin_openReason(\'' + esc(a.id) + '\',\'' + FIN_ST.REJECTED + '\')">Reject</button>');
-    acts.push('<button class="btn btn-ghost btn-sm" onclick="fin_openReason(\'' + esc(a.id) + '\',\'' + FIN_ST.CANCELLED + '\')">Cancel</button>');
+async function ih_uploadProof(b64, onProg) {
+  const SZ = 3800, total = Math.ceil(b64.length / SZ);
+  if (total > 80) throw new Error('The photo is too large. Try a smaller one.');
+  const uploadId = ih_rand(24);
+  let next = 0, done = 0, failed = null;
+  async function worker() {
+    while (!failed && next < total) {
+      const i = next++;
+      let ok = false, msg = '';
+      for (let a = 0; a < 3 && !ok; a++) {
+        try {
+          const r = await gasPost({ action: 'ih_proofChunk', uploadId, idx: i, total, chunk: b64.substr(i * SZ, SZ) }, 30000);
+          if (r && r.success) ok = true; else msg = (r && r.message) || 'Upload failed';
+        } catch (e) { msg = e.message; await ih_sleep(800 * (a + 1)); }
+      }
+      if (!ok) { failed = new Error(msg || 'Upload failed'); return; }
+      done++; if (onProg) onProg(done, total);
+    }
   }
-  openModal('<div class="modal-title">' + esc(a.customerName) + '</div><div style="margin-bottom:8px">' + fin_badge(a.status) + '</div>' +
-    row('Application', esc(a.id)) + row('Provider', esc(a.provider)) + row('Reference No.', esc(a.referenceNo || '-')) +
-    row('Created', esc(safeFormatDateTime(a.createdAt)) + ' by ' + esc(a.createdBy)) +
-    '<hr style="margin:8px 0;border:none;border-top:1px solid var(--border)">' +
-    items.map(i => row(esc(i.name) + ' (' + esc(i.unit) + ') x' + esc(i.qty), fin_money(i.total))).join('') +
-    row('<b>Total Selling Price</b>', '<b>' + fin_money(a.totalSelling) + '</b>') + row('Down Payment', fin_money(a.downPayment)) +
-    row('Amount Financed', fin_money(a.financed)) + row('Term', esc(a.term) + ' months') +
-    row('Estimated Monthly', a.estMonthly !== '' && a.estMonthly != null ? fin_money(a.estMonthly) + ' (estimate)' : 'No rate configured') + row('Estimated Total Payable', a.estTotalPayable !== '' && a.estTotalPayable != null ? fin_money(a.estTotalPayable) + ' (estimate)' : '-') +
-    '<hr style="margin:8px 0;border:none;border-top:1px solid var(--border)">' +
-    row('Approved Amount', a.approvedAmount !== '' ? fin_money(a.approvedAmount) : '-') + row('Approved Monthly', a.approvedMonthly !== '' ? fin_money(a.approvedMonthly) : '-') +
-    row('Approved Term', a.approvedTerm ? esc(a.approvedTerm) + ' months' : '-') +
-    row('Total Installment Payments', a.approvedTotalInst !== '' && a.approvedTotalInst != null ? fin_money(a.approvedTotalInst) : '-') +
-    row('Total Customer Payable', a.approvedTotalPayable !== '' && a.approvedTotalPayable != null ? fin_money(a.approvedTotalPayable) : '-') +
-    row('Fees', a.feeTreatment ? esc({ none: 'No fees', included: 'Included in quotation', separate: 'Separate: ' + fin_money(a.feeAmount) }[a.feeTreatment] || '') : '-') +
-    row('Reason for difference', esc(a.diffReason || '-')) + row('Adjustments', esc(a.adjustments || '-')) +
-    row('Status Note', esc(a.statusNote || '-')) + (a.saleTxId ? row('Sale Transaction', esc(a.saleTxId)) : '') +
-    '<div id="finLog" style="font-size:12px;opacity:.8;margin-top:8px"></div>' +
-    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">' + acts.join('') + '<button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
-  try {
-    const r = await gasRequest({ action: 'fin_getLog', id: a.id });
-    const el = document.getElementById('finLog');
-    if (el && r && r.success && r.data.length) el.innerHTML = '<b>History</b><br>' + r.data.map(l => esc(safeFormatDateTime(l.at)) + ' - ' + esc(l.action) + (l.to ? ' to ' + esc(l.to) : '') + ' by ' + esc(l.by) + (l.note ? ' (' + esc(l.note) + ')' : '')).join('<br>');
-  } catch (e) {}
+  await Promise.all([worker(), worker(), worker()]);
+  if (failed) throw failed;
+  return { uploadId, total };
 }
 
-function fin_openApprove(id) {
-  const a = fin_find(id); if (!a) return;
-  const cfg = fin_cfg(a.provider);
-  const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box';
-  const terms = cfg && (cfg.terms || []).length ? FIN_TERMS.filter(t => cfg.terms.indexOf(t) >= 0) : FIN_TERMS;
-  const need = cfg ? cfg.requireQuote : true;
-  openModal('<div class="modal-title">Approve Application</div>' +
-    '<div style="font-size:12px;opacity:.75;margin-bottom:8px">Enter what ' + esc(a.provider) + ' actually approved' + (need ? ' (required before the sale can be completed)' : '') + '. If the approved amount differs from the calculated balance of ' + fin_money(a.financed) + ', the difference is collected from the customer at release and a reason is required.</div>' +
-    '<div class="field"><label>Approved Financed Amount (₱)</label><input id="finApAmt" type="number" step="0.01" value="' + (a.approvedAmount !== '' ? a.approvedAmount : a.financed) + '" style="' + inp + '"></div>' +
-    '<div class="field"><label>Actual Approved Monthly Payment (₱)</label><input id="finApMo" type="number" step="0.01" value="' + (a.approvedMonthly !== '' ? a.approvedMonthly : '') + '" style="' + inp + '"></div>' +
-    '<div class="field"><label>Approved Term</label><select id="finApTerm" style="' + inp + '">' + terms.map(t => '<option value="' + t + '"' + (Number(a.approvedTerm || a.term) === t ? ' selected' : '') + '>' + t + ' months</option>').join('') + '</select></div>' +
-    '<div class="field"><label>Reason for difference (if any)</label><input id="finApDiff" type="text" maxlength="300" value="' + esc(a.diffReason || '') + '" style="' + inp + '"></div>' +
-    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Fees</label><select id="finApFee" style="' + inp + '"><option value="">Not specified</option><option value="none">No fees</option><option value="included">Already included in quotation</option><option value="separate">Separate fee</option></select></div>' +
-    '<div class="field" style="flex:1"><label>Fee Amount (if separate)</label><input id="finApFeeAmt" type="number" min="0" step="0.01" value="' + (a.feeAmount !== '' && a.feeAmount != null ? a.feeAmount : '') + '" style="' + inp + '"></div></div>' +
-    '<div class="field"><label>Application / Reference No.</label><input id="finApRef" type="text" maxlength="60" value="' + esc(a.referenceNo || '') + '" style="' + inp + '"></div>' +
-    '<div class="field"><label>Notes</label><input id="finApAdj" type="text" maxlength="300" style="' + inp + '"></div>' +
-    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="fin_openDetail(\'' + esc(a.id) + '\')">Back</button><button class="btn btn-primary" id="finApBtn" onclick="fin_submitApprove(\'' + esc(a.id) + '\')">Mark Approved</button></div>');
-  const fs = document.getElementById('finApFee'); if (fs) fs.value = a.feeTreatment || '';
-}
-function fin_submitApprove(id) {
-  const v = k => (document.getElementById(k) || {}).value;
-  fin_status({ id, toStatus: FIN_ST.APPROVED, approvedAmount: parseFloat(v('finApAmt')) || 0, approvedMonthly: parseFloat(v('finApMo')) || 0, approvedTerm: parseInt(v('finApTerm'), 10),
-    diffReason: (v('finApDiff') || '').trim(), feeTreatment: v('finApFee') || '', feeAmount: parseFloat(v('finApFeeAmt')) || 0,
-    referenceNo: (v('finApRef') || '').trim(), adjustments: (v('finApAdj') || '').trim() }, 'finApBtn');
-}
-function fin_openReason(id, toStatus) {
-  const inp = 'width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box';
-  openModal('<div class="modal-title">' + (toStatus === FIN_ST.REJECTED ? 'Reject' : 'Cancel') + ' Application</div>' +
-    '<div class="field"><label>Reason (required)</label><input id="finReason" type="text" maxlength="300" style="' + inp + '"></div>' +
-    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="fin_openDetail(\'' + esc(id) + '\')">Back</button><button class="btn btn-danger" id="finRsBtn" onclick="fin_submitReason(\'' + esc(id) + '\',\'' + toStatus + '\')">Confirm</button></div>');
-}
-function fin_submitReason(id, toStatus) {
-  const note = ((document.getElementById('finReason') || {}).value || '').trim();
-  if (!note) { toast('Please enter a reason.', 'error'); return; }
-  fin_status({ id, toStatus, note }, 'finRsBtn');
-}
-function fin_release(id) {
-  const a = fin_find(id); if (!a) return;
-  const upfront = Math.max(0, fin_r2(Number(a.totalSelling) - Number(a.approvedAmount || 0)));
-  if (!confirm('Release this application?\n\nThe sale of ' + fin_money(a.totalSelling) + ' will be recorded and stock will be deducted now.\nCollected from customer now: ' + fin_money(upfront) + '\nThis cannot be undone.')) return;
-  fin_status({ id, toStatus: FIN_ST.RELEASED }, null);
+// ── proof viewer ─────────────────────────────────────────────
+async function ih_viewProof(payId) {
+  openModal('<div class="modal-title">Proof of Payment</div><div id="ihProofBox" style="text-align:center;min-height:80px">Loading photo...</div><div style="text-align:right;margin-top:10px"><button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
+  try {
+    let data = IH.proof[payId];
+    if (!data) {
+      const r = await gasRequest({ action: 'ih_getProof', id: payId }, 60000);
+      if (!r || !r.success) throw new Error((r && r.message) || 'Could not load the photo.');
+      data = r.data;
+      const keys = Object.keys(IH.proof); if (keys.length >= 8) delete IH.proof[keys[0]];
+      IH.proof[payId] = data;
+    }
+    const box = document.getElementById('ihProofBox');
+    if (box) { box.innerHTML = ''; const im = document.createElement('img'); im.src = data; im.style.cssText = 'max-width:100%;max-height:70vh;border-radius:8px'; box.appendChild(im); }
+  } catch (e) { const box = document.getElementById('ihProofBox'); if (box) box.textContent = e.message; }
 }
 
-async function fin_status(p, btnId) {
-  if (FIN.busy) return;
-  FIN.busy = true;
-  const btn = btnId ? document.getElementById(btnId) : null;
-  if (btn) btn.disabled = true;
-  showLoading('Updating...');
+// ── payment modal (employee submits proof; admin can also record) ──
+function ih_openPayModal(insId) {
+  const ins = ih_insById(insId); if (!ins) return;
+  const admin = ih_isAdmin();
+  const remaining = Math.max(0, Math.round((ins.balance - ins.pending) * 100) / 100);
+  if (remaining <= 0) { toast('There is nothing left to pay, or the remaining balance is already waiting for verification.', 'info', 5000); return; }
+  IH.upl = null; IH.refBase = 'p' + Date.now().toString(36) + ih_rand(5);
+  const amt = Math.min(Number(ins.monthly), remaining);
+  openModal('<div class="modal-title">' + (admin ? 'Record Payment' : 'Upload Proof of Payment') + '</div>' +
+    '<div style="font-size:13px;margin-bottom:8px">' + esc(ins.itemsText) + '<br>Remaining balance: <b>' + ih_money(remaining) + '</b></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Amount Paid (₱)</label><input id="ihPAmt" type="number" min="0" step="0.01" value="' + amt + '" style="' + IH_INP + '"></div>' +
+    '<div class="field" style="flex:1"><label>Date Paid</label><input id="ihPDate" type="date" value="' + esc(IH.today || '') + '" style="' + IH_INP + '"></div></div>' +
+    '<div class="field"><label>Payment Method</label><select id="ihPMethod" style="' + IH_INP + '">' + IH_METHODS.map(m => '<option>' + esc(m) + '</option>').join('') + '</select></div>' +
+    '<div class="field"><label>Note (optional)</label><input id="ihPNote" type="text" maxlength="200" style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>Photo of ' + (admin ? 'proof (optional)' : 'receipt or proof (required)') + '</label>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn btn-primary btn-sm" onclick="document.getElementById(\'ihPCam\').click()">Take Photo</button>' +
+    '<button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById(\'ihPFile\').click()">Choose from Gallery</button></div>' +
+    '<input id="ihPCam" type="file" accept="image/*" capture="environment" style="display:none" onchange="ih_onPhoto(this)">' +
+    '<input id="ihPFile" type="file" accept="image/*" style="display:none" onchange="ih_onPhoto(this)">' +
+    '<div id="ihPPrev" style="margin-top:8px"></div></div>' +
+    '<div id="ihPProg" style="font-size:13px;margin:6px 0"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" id="ihPCancel" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="ihPGo" onclick="ih_submitPay(\'' + esc(ins.id) + '\')">' + (admin ? 'Record' : 'Submit Payment') + '</button></div>');
+}
+function ih_onPhoto(input) {
+  const f = input.files && input.files[0]; input.value = '';
+  if (!f) return;
+  if (!/^image\//.test(f.type || '')) { toast('Please choose an image.', 'error'); return; }
+  IH.upl = { file: f, b64: null, uploadId: null, total: 0 };
+  const prev = document.getElementById('ihPPrev');
+  if (prev) { prev.innerHTML = ''; const im = document.createElement('img'); im.src = URL.createObjectURL(f); im.style.cssText = 'max-width:100%;max-height:200px;border-radius:8px;border:1px solid var(--border)'; prev.appendChild(im); }
+}
+async function ih_submitPay(insId) {
+  if (IH.busy) return;
+  const g = id => document.getElementById(id), v = id => (g(id) || {}).value;
+  const ins = ih_insById(insId); if (!ins) return;
+  const amount = Math.round(parseFloat(v('ihPAmt')) * 100) / 100, date = v('ihPDate');
+  if (!(amount > 0)) { toast('Enter the amount paid.', 'error'); return; }
+  if (!date) { toast('Enter the date paid.', 'error'); return; }
+  const remaining = Math.round((ins.balance - ins.pending) * 100) / 100;
+  if (amount > remaining + 0.005) { toast('The amount is more than the remaining balance (' + ih_money(remaining) + ').', 'error'); return; }
+  const needPhoto = !ih_isAdmin();
+  if (needPhoto && !IH.upl) { toast('Please attach a photo of your proof of payment.', 'error'); return; }
+  IH.busy = true;
+  const go = g('ihPGo'), cancel = g('ihPCancel'), prog = g('ihPProg');
+  if (go) go.disabled = true; if (cancel) cancel.disabled = true;
   try {
-    const res = await gasPost(Object.assign({ action: 'fin_updateStatus' }, p), 60000);
-    hideLoading();
+    let up = null;
+    if (IH.upl) {
+      if (!IH.upl.uploadId) {
+        if (prog) prog.textContent = 'Preparing photo...';
+        IH.upl.b64 = await ih_compress(IH.upl.file);
+        const r = await ih_uploadProof(IH.upl.b64, (d, t) => { if (prog) prog.textContent = 'Uploading photo ' + d + ' of ' + t + '... please do not close this window.'; });
+        IH.upl.uploadId = r.uploadId; IH.upl.total = r.total;
+      }
+      up = IH.upl;
+    }
+    if (prog) prog.textContent = 'Saving payment...';
+    const payload = { action: 'ih_submitPayment', installmentId: ins.id, amount, paidDate: date, method: v('ihPMethod'), note: (v('ihPNote') || '').trim(),
+      clientRef: IH.refBase + '-' + ih_hash([ins.id, amount, date, v('ihPMethod'), up ? up.uploadId : ''].join('|')) };
+    if (up) { payload.uploadId = up.uploadId; payload.chunks = up.total; }
+    const res = await gasPost(payload, 60000);
     if (res && res.success) {
-      if (p.toStatus === FIN_ST.RELEASED && res.saleTxId) fin_afterRelease(res);
+      IH.upl = null; IH.refBase = null;
       closeModalDirect();
-      toast('Status: ' + res.status, 'success');
-      FIN.apps = []; fin_showTab(FIN.tab || 'apps', null);
+      toast(ih_isAdmin() ? 'Payment recorded.' : 'Payment submitted. Please wait for verification.', 'success', 5000);
+      await ih_refreshCurrent();
     } else {
-      toast((res && res.message) || 'Update failed.', 'error', 6000);
-      if (btn) btn.disabled = false;
+      if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc((res && res.message) || 'Could not save the payment.') + '</span>';
+      if (go) go.disabled = false; if (cancel) cancel.disabled = false;
     }
   } catch (e) {
+    if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc(e.message) + ' You can press the button again to retry.</span>';
+    if (go) go.disabled = false; if (cancel) cancel.disabled = false;
+  } finally { IH.busy = false; }
+}
+async function ih_refreshCurrent() {
+  await ih_load();
+  if (ih_isEmp()) ih_drawMy(); else ih_drawAdminTab();
+}
+
+// ═════════ EMPLOYEE PAGE ═════════
+async function ih_renderMy() {
+  const pc = document.getElementById('pageContent');
+  if (!ih_isEmp()) { pc.innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>'; return; }
+  pc.innerHTML = '<div class="card"><div style="opacity:.7">Loading your installments...</div></div>';
+  await ih_load();
+  ih_drawMy();
+}
+function ih_scheduleTable(ins) {
+  return '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="opacity:.7;text-align:left"><td style="padding:5px">#</td><td style="padding:5px">Due Date</td><td style="padding:5px;text-align:right">Amount</td><td style="padding:5px">Status</td></tr>' +
+    (ins.schedule || []).map(s => '<tr style="border-top:1px solid rgba(128,128,128,.2)"><td style="padding:5px">' + s.n + '</td><td style="padding:5px">' + ih_date(s.due) + '</td><td style="padding:5px;text-align:right">' + ih_money(s.amount) + '</td><td style="padding:5px">' + ih_badge(s.status) + '</td></tr>').join('') + '</table></div>';
+}
+function ih_payRows(list, showProof) {
+  if (!list.length) return '<div style="opacity:.7;font-size:13px">No payments yet.</div>';
+  return list.map(p => '<div style="border-top:1px solid rgba(128,128,128,.2);padding:7px 0;font-size:13px"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + ih_money(p.amount) + '</b>' + ih_badge(p.status) + '</div>' +
+    '<div style="opacity:.75">' + ih_date(p.paidDate) + ' • ' + esc(p.method) + (p.note ? ' • ' + esc(p.note) : '') + '</div>' +
+    (p.status === 'Rejected' && p.reason ? '<div style="color:#c62828">Rejected: ' + esc(p.reason) + '</div>' : '') +
+    (p.hasProof && showProof ? '<button class="btn btn-ghost btn-sm" style="margin-top:4px" onclick="ih_viewProof(\'' + esc(p.id) + '\')">View Photo</button>' : '') + '</div>').join('');
+}
+function ih_drawMy() {
+  const pc = document.getElementById('pageContent');
+  if (!pc || currentPage !== 'ihMy') return;
+  const active = IH.ins.filter(i => i.status === 'Active');
+  const owe = active.reduce((s, i) => s + i.balance, 0);
+  const dues = active.map(i => i.nextDue).filter(Boolean).sort();
+  const overdue = active.reduce((s, i) => s + i.overdueCount, 0);
+  const card = (t, v, sub, bad) => '<div style="flex:1;min-width:140px;border:1px solid var(--border);border-radius:10px;padding:10px"><div style="font-size:12px;opacity:.7">' + t + '</div><div style="font-size:20px;font-weight:800;' + (bad ? 'color:#c62828' : '') + '">' + v + '</div>' + (sub ? '<div style="font-size:11px;opacity:.65">' + sub + '</div>' : '') + '</div>';
+  pc.innerHTML = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">' + card('Total Balance', ih_money(owe)) + card('Next Due Date', dues.length ? ih_date(dues[0]) : '-', '', dues.length && dues[0] < IH.today) + card('Overdue Payments', overdue, '', overdue > 0) + '</div>' +
+    (IH.ins.length ? IH.ins.map(i => {
+      const pays = IH.pays.filter(p => String(p.installmentId) === String(i.id));
+      const pct = i.totalDue > 0 ? Math.min(100, Math.round(i.paid / i.totalDue * 100)) : 0;
+      return '<div class="card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div class="card-title" style="margin:0">' + esc(i.itemsText) + '</div>' + ih_badge(i.status) + '</div>' +
+        '<div style="font-size:12px;opacity:.7;margin:4px 0 8px">' + esc(i.id) + ' • started ' + ih_date(i.createdAt) + '</div>' +
+        '<div style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px;margin-bottom:8px"><span>Price <b>' + ih_money(i.totalPrice) + '</b></span><span>Down Payment <b>' + ih_money(i.downPayment) + '</b></span><span>Monthly <b>' + ih_money(i.monthly) + '</b> x ' + esc(i.term) + '</span><span>Computed by <b>' + esc(i.computedBy) + '</b></span></div>' +
+        '<div style="background:rgba(128,128,128,.2);border-radius:8px;height:10px;overflow:hidden"><div style="width:' + pct + '%;height:100%;background:#2e7d32"></div></div>' +
+        '<div style="display:flex;justify-content:space-between;font-size:13px;margin:4px 0 10px"><span>Paid ' + ih_money(i.paid) + (i.pending > 0 ? ' (+' + ih_money(i.pending) + ' waiting for verification)' : '') + '</span><span>Balance <b>' + ih_money(i.balance) + '</b></span></div>' +
+        (i.status === 'Active' ? '<button class="btn btn-primary btn-sm" onclick="ih_openPayModal(\'' + esc(i.id) + '\')">Upload Payment Proof</button>' : '') +
+        '<details style="margin-top:10px"><summary style="cursor:pointer;font-weight:600">Payment Schedule</summary>' + ih_scheduleTable(i) + '</details>' +
+        '<details style="margin-top:8px"' + (pays.some(p => p.status === 'Pending') ? ' open' : '') + '><summary style="cursor:pointer;font-weight:600">My Payments (' + pays.length + ')</summary>' + ih_payRows(pays, true) + '</details></div>';
+    }).join('') : '<div class="card"><div style="opacity:.8">You have no installments yet. Please see your Admin once your item has been recorded.</div></div>');
+}
+
+// ═════════ ADMIN / VERIFIER PAGE ═════════
+async function ih_renderAdmin() {
+  const pc = document.getElementById('pageContent');
+  if (!ih_isStaff()) { pc.innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>'; return; }
+  pc.innerHTML = '<div id="ihTabBar" class="tab-bar" style="margin-bottom:16px"></div><div id="ihContent"><div class="card"><div style="opacity:.7">Loading...</div></div></div>';
+  await ih_load();
+  ih_drawAdminTab();
+}
+function ih_setTab(t) { IH.tab = t; ih_drawAdminTab(); }
+function ih_drawTabs() {
+  const bar = document.getElementById('ihTabBar'); if (!bar) return;
+  const pend = IH.pays.filter(p => p.status === 'Pending').length;
+  const tabs = [['verify', 'Payments to Verify' + (pend ? ' (' + pend + ')' : '')], ['installments', 'Installments']];
+  if (ih_isAdmin()) tabs.push(['employees', 'Employees' + (IH.emps.filter(e => e.status === 'Pending').length ? ' (' + IH.emps.filter(e => e.status === 'Pending').length + ')' : '')]);
+  tabs.push(['report', 'Reports']);
+  bar.innerHTML = tabs.map(t => '<button class="tab-btn' + (IH.tab === t[0] ? ' active' : '') + '" onclick="ih_setTab(\'' + t[0] + '\')">' + t[1] + '</button>').join('');
+}
+function ih_drawAdminTab() {
+  if (currentPage !== 'ihAdmin') return;
+  if (IH.tab === 'employees' && !ih_isAdmin()) IH.tab = 'verify';
+  ih_drawTabs();
+  const el = document.getElementById('ihContent'); if (!el) return;
+  if (IH.tab === 'verify') el.innerHTML = ih_htmlVerify();
+  else if (IH.tab === 'installments') el.innerHTML = ih_htmlInstallments();
+  else if (IH.tab === 'employees') el.innerHTML = ih_htmlEmployees();
+  else el.innerHTML = ih_htmlReport();
+}
+
+function ih_htmlVerify() {
+  const pend = IH.pays.filter(p => p.status === 'Pending');
+  const done = IH.pays.filter(p => p.status !== 'Pending').slice(0, 25);
+  const insTxt = id => { const i = ih_insById(id); return i ? esc(i.itemsText) : ''; };
+  return '<div class="card"><div class="card-title">Payments Waiting for Verification</div>' +
+    (pend.length ? pend.map(p => '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + esc(p.employeeName) + '</b><b>' + ih_money(p.amount) + '</b></div>' +
+      '<div style="font-size:12px;opacity:.8;margin:2px 0">' + insTxt(p.installmentId) + '</div>' +
+      '<div style="font-size:12px;opacity:.8">Paid ' + ih_date(p.paidDate) + ' • ' + esc(p.method) + (p.note ? ' • ' + esc(p.note) : '') + ' • sent ' + esc(safeFormatDateTime(p.submittedAt)) + '</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">' + (p.hasProof ? '<button class="btn btn-ghost btn-sm" onclick="ih_viewProof(\'' + esc(p.id) + '\')">View Photo</button>' : '') +
+      '<button class="btn btn-primary btn-sm" onclick="ih_verify(\'' + esc(p.id) + '\')">Verify</button><button class="btn btn-danger btn-sm" onclick="ih_openReject(\'' + esc(p.id) + '\')">Reject</button></div></div>').join('') : '<div style="opacity:.7">Nothing waiting. All caught up.</div>') + '</div>' +
+    '<div class="card"><div class="card-title">Recently Decided</div>' + (done.length ? done.map(p => '<div style="border-top:1px solid rgba(128,128,128,.2);padding:6px 0;font-size:13px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>' + esc(p.employeeName) + ' • ' + ih_money(p.amount) + ' • ' + ih_date(p.paidDate) + '</span><span>' + ih_badge(p.status) + ' <span style="opacity:.7;font-size:11px">by ' + esc(p.decidedBy || '') + '</span></span></div>').join('') : '<div style="opacity:.7">None yet.</div>') + '</div>';
+}
+async function ih_verify(id) {
+  if (IH.busy) return;
+  if (!confirm('Verify this payment? It will be counted toward the balance.')) return;
+  IH.busy = true; showLoading('Verifying...');
+  try {
+    const r = await gasPost({ action: 'ih_verifyPayment', id });
     hideLoading();
-    toast('Network error. Refresh the list to see the current status.', 'error', 6000);
-    if (btn) btn.disabled = false;
-  } finally { FIN.busy = false; }
+    if (r && r.success) { toast('Payment verified', 'success'); await ih_refreshCurrent(); closeModalDirect(); }
+    else toast((r && r.message) || 'Could not verify.', 'error', 6000);
+  } catch (e) { hideLoading(); toast('Network error: ' + e.message, 'error'); }
+  finally { IH.busy = false; }
 }
-
-// Mirror what a normal checkout does locally, so the released sale appears in Sales Export / Receipts
-function fin_afterRelease(res) {
+function ih_openReject(id) {
+  openModal('<div class="modal-title">Reject Payment</div><div class="field"><label>Reason (required)</label><input id="ihRjReason" type="text" maxlength="200" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-danger" id="ihRjBtn" onclick="ih_doReject(\'' + esc(id) + '\')">Reject</button></div>');
+}
+async function ih_doReject(id) {
+  const reason = ((document.getElementById('ihRjReason') || {}).value || '').trim();
+  if (!reason) { toast('Please enter a reason.', 'error'); return; }
+  if (IH.busy) return;
+  IH.busy = true; const b = document.getElementById('ihRjBtn'); if (b) b.disabled = true;
   try {
-    const items = JSON.parse(res.items || '[]');
-    const when  = new Date(res.date || Date.now());
-    const cashier = currentUser.name || currentUser.username;
-    const pm = 'Installment - ' + res.provider;
-    saveSalesExportLocal({ txId: res.saleTxId, cashier, date: when, items, paymentMethod: pm });
-    pushSalesExportToGAS({ txId: res.saleTxId, cashier, date: when, items, paymentMethod: pm }).catch(() => {});
-    saveReceiptToLocal({ txId: res.saleTxId, siNum: res.siNumber, cashier, date: when.toISOString(), total: res.total });
-    saveFullReceiptToLocal({ txId: res.saleTxId, siNum: res.siNumber, cashier, date: when, items, total: res.total, cash: res.cash, change: 0 });
-  } catch (e) { console.warn('[FIN] local mirror failed', e); }
+    const r = await gasPost({ action: 'ih_rejectPayment', id, reason });
+    if (r && r.success) { closeModalDirect(); toast('Payment rejected', 'success'); await ih_refreshCurrent(); }
+    else { toast((r && r.message) || 'Could not reject.', 'error'); if (b) b.disabled = false; }
+  } catch (e) { toast('Network error: ' + e.message, 'error'); if (b) b.disabled = false; }
+  finally { IH.busy = false; }
 }
 
-// ── Reports ──────────────────────────────────────────────────
-function fin_renderReport() {
-  const el = document.getElementById('finContent');
-  if (!el) return;
-  const list = FIN.apps.filter(a => { const d = fin_dateOf(a); return !(FIN.from && d < FIN.from) && !(FIN.to && d > FIN.to); });
-  const by = st => list.filter(a => a.status === st);
-  const sum = (arr, k) => arr.reduce((s, a) => s + (Number(a[k]) || 0), 0);
-  const rel = by(FIN_ST.RELEASED);
-  const card = (t, v, sub) => '<div style="flex:1;min-width:150px;border:1px solid var(--border);border-radius:10px;padding:10px"><div style="font-size:12px;opacity:.7">' + t + '</div><div style="font-size:20px;font-weight:800">' + v + '</div>' + (sub ? '<div style="font-size:11px;opacity:.65">' + sub + '</div>' : '') + '</div>';
-  const provRows = FIN_PROVIDERS.map(p => {
-    const r = rel.filter(a => a.provider === p), all = list.filter(a => a.provider === p);
-    return '<tr><td style="padding:6px">' + esc(p) + '</td><td style="padding:6px;text-align:right">' + all.length + '</td><td style="padding:6px;text-align:right">' + r.length + '</td><td style="padding:6px;text-align:right">' + fin_money(sum(r, 'totalSelling')) + '</td><td style="padding:6px;text-align:right">' + fin_money(sum(r, 'downPayment')) + '</td><td style="padding:6px;text-align:right">' + fin_money(sum(r, 'approvedAmount')) + '</td></tr>';
-  }).join('');
-  const approvedFinanced = sum(by(FIN_ST.APPROVED).concat(rel), 'approvedAmount');
-  el.innerHTML = '<div class="card"><div class="card-title">Installment Reports</div>' + fin_filterBar(false) +
-    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">' +
-      card('Installment Sales (Released)', fin_money(sum(rel, 'totalSelling')), rel.length + ' completed') +
-      card('Down Payments (Released)', fin_money(sum(rel, 'downPayment'))) +
-      card('Approved Financed Amounts', fin_money(approvedFinanced), 'Approved + Released') + '</div>' +
-    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">' +
-      card('Pending', by(FIN_ST.PENDING).length) + card('Approved', by(FIN_ST.APPROVED).length) + card('Rejected', by(FIN_ST.REJECTED).length) +
-      card('Completed', rel.length) + card('Cancelled', by(FIN_ST.CANCELLED).length) + '</div>' +
-    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="text-align:right;opacity:.7"><td style="padding:6px;text-align:left">Provider</td><td style="padding:6px">Applications</td><td style="padding:6px">Completed</td><td style="padding:6px">Sales</td><td style="padding:6px">Down Payments</td><td style="padding:6px">Financed</td></tr>' + provRows + '</table></div>' +
-    '<div style="font-size:12px;opacity:.7;margin-top:10px">Only Released / Completed applications count as sales, and they appear once in Sales Summary and Sales Export. Pending, Approved, Rejected and Cancelled are never counted as sales.</div></div>';
+function ih_htmlInstallments() {
+  const q = IH.q.toLowerCase();
+  const list = IH.ins.filter(i => (IH.filter === 'all' || i.status === IH.filter) &&
+    (!q || (i.employeeName + ' ' + i.employeeId + ' ' + i.itemsText + ' ' + i.branch).toLowerCase().indexOf(q) >= 0));
+  return '<div class="card"><div class="card-title">In-House Installments</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><input type="text" placeholder="Search employee, ID, item or branch" value="' + esc(IH.q) + '" style="' + IH_INP + ';flex:1;min-width:180px" oninput="IH.q=this.value;ih_redrawList()">' +
+    '<select style="' + IH_INP + ';width:auto" onchange="IH.filter=this.value;ih_redrawList()">' + ['all', 'Active', 'Completed', 'Cancelled'].map(s => '<option value="' + s + '"' + (IH.filter === s ? ' selected' : '') + '>' + (s === 'all' ? 'All statuses' : s) + '</option>').join('') + '</select>' +
+    '<button class="btn btn-ghost btn-sm" onclick="ih_refreshCurrent()">Refresh</button>' + (ih_isAdmin() ? '<button class="btn btn-primary btn-sm" onclick="ih_openCreate()">New Installment</button>' : '') + '</div>' +
+    '<div id="ihList">' + ih_listHtml(list) + '</div></div>';
 }
-
-// ── Settings ─────────────────────────────────────────────────
-function fin_renderSettings() {
-  const el = document.getElementById('finContent');
-  if (!el) return;
-  const inp = 'width:100%;padding:7px;border:1px solid var(--border);border-radius:8px;box-sizing:border-box;font-size:0.85rem';
-  el.innerHTML = '<div class="card"><div class="card-title">Financing Settings</div>' +
-    '<div style="font-size:12px;opacity:.8;margin-bottom:10px">Switch terms on or off independently of the rate. A blank rate is never treated as 0%: checkout then asks for the actual approved quotation. Enter only verified rates and fees. All computations are estimates.</div>' +
-    (FIN.settings || []).map((c, n) => {
-      const id = 'fs' + n + '_';
-      const f = (k, label, val, type) => '<div style="flex:1;min-width:130px"><label style="font-size:11px;opacity:.75">' + label + '</label><input id="' + id + k + '" type="' + (type || 'number') + '" step="0.01" min="0" value="' + esc(val === '' || val == null ? '' : val) + '" style="' + inp + '"></div>';
-      const chk = (k, label, v) => '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input id="' + id + k + '" type="checkbox"' + (v ? ' checked' : '') + '> ' + label + '</label>';
-      const termRow = t => '<div style="border:1px solid var(--border);border-radius:8px;padding:6px;min-width:150px;flex:1">' +
-        chk('on' + t, '<b>' + t + ' months</b>', (c.terms || []).indexOf(t) >= 0) +
-        '<div style="margin-top:4px"><label style="font-size:11px;opacity:.75">Monthly rate % (blank = not configured)</label><input id="' + id + 't' + t + '" type="number" step="0.01" min="0" value="' + (c.termRates[t] !== undefined ? c.termRates[t] : '') + '" style="' + inp + '"></div>' +
-        '<div style="margin-top:4px"><label style="font-size:11px;opacity:.75">Financed must exceed ₱ (blank = no minimum)</label><input id="' + id + 'm' + t + '" type="number" step="0.01" min="0" value="' + ((c.minFinanced || {})[t] !== undefined ? c.minFinanced[t] : '') + '" style="' + inp + '"></div></div>';
-      return '<div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b>' + esc(c.provider) + '</b>' + chk('enabled', 'Enabled', c.enabled) + '</div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"><div style="flex:1;min-width:200px"><label style="font-size:11px;opacity:.75">Calculation rule</label><select id="' + id + 'calcMethod" style="' + inp + '"><option value="addon"' + (c.calcMethod === 'addon' ? ' selected' : '') + '>Flat add-on (rate % x months)</option><option value="diminishing"' + (c.calcMethod === 'diminishing' ? ' selected' : '') + '>Reducing Balance (Monthly Rate)</option></select></div></div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + FIN_TERMS.map(termRow).join('') + '</div>' +
-        '<div style="margin-bottom:8px">' + chk('requireQuote', 'Require Actual Approved Quotation Before Completing Sale', c.requireQuote) + '</div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('feeFixed', 'Processing fee (₱ fixed)', c.feeFixed) + f('feePct', 'Processing fee (% of financed)', c.feePct) + f('fixedDpAmt', 'Fixed DP (₱, optional)', c.fixedDpAmt) + '</div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('minDpPct', 'Min DP %', c.minDpPct) + f('maxDpPct', 'Max DP %', c.maxDpPct) + f('minDpAmt', 'Min DP (₱)', c.minDpAmt) + '<div style="flex:1;min-width:130px;display:flex;align-items:flex-end">' + chk('zeroDpAllowed', 'Zero DP allowed', c.zeroDpAllowed) + '</div></div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">' + f('promoName', 'Promo name', c.promoName, 'text') + f('promoRate', 'Promo monthly rate %', c.promoRate) + f('promoUntil', 'Promo valid until', c.promoUntil, 'date') + '<div style="flex:1;min-width:130px;display:flex;align-items:flex-end">' + chk('promoActive', 'Promo active', c.promoActive) + '</div></div>' +
-        f('notes', 'Source of rates / notes', c.notes, 'text') +
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px"><span style="font-size:11px;opacity:.65">' + (c.updatedAt ? 'Updated by ' + esc(c.updatedBy) + ' ' + esc(safeFormatDateTime(c.updatedAt)) : 'Not saved yet') + '</span><button class="btn btn-primary btn-sm" id="' + id + 'btn" onclick="fin_saveProvider(' + n + ')">Save ' + esc(c.provider) + '</button></div></div>';
-    }).join('') + '</div>';
+function ih_listHtml(list) {
+  if (!list.length) return '<div style="opacity:.7">No installments found.</div>';
+  return list.map(i => '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer" onclick="ih_openDetail(\'' + esc(i.id) + '\')">' +
+    '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + esc(i.employeeName) + '</b>' + ih_badge(i.status) + '</div>' +
+    '<div style="font-size:12px;opacity:.8">' + esc(i.employeeId) + ' • ' + esc(i.branch) + ' • ' + esc(i.itemsText) + '</div>' +
+    '<div style="font-size:13px;margin-top:4px">Monthly ' + ih_money(i.monthly) + ' x ' + esc(i.term) + ' • Balance <b>' + ih_money(i.balance) + '</b>' + (i.status === 'Active' && i.nextDue ? ' • Next due ' + ih_date(i.nextDue) : '') +
+    (i.overdueCount > 0 && i.status === 'Active' ? ' <span style="color:#c62828;font-weight:700">• ' + i.overdueCount + ' overdue</span>' : '') + '</div></div>').join('');
 }
-
-async function fin_saveProvider(n) {
-  const c = FIN.settings[n], id = 'fs' + n + '_';
-  const g = k => document.getElementById(id + k);
-  const rates = {}, minFin = {}, termsOn = [];
-  FIN_TERMS.forEach(t => {
-    const r = g('t' + t).value; if (r !== '') rates[t] = parseFloat(r);
-    const m = g('m' + t).value; if (m !== '') minFin[t] = parseFloat(m);
-    if (g('on' + t).checked) termsOn.push(t);
-  });
-  if (g('enabled').checked && !termsOn.length) { toast('Switch on at least one term before enabling ' + c.provider + '.', 'error'); return; }
-  const s = {
-    provider: c.provider, enabled: g('enabled').checked, calcMethod: g('calcMethod').value, termRates: rates, termsOn, minFinanced: minFin,
-    requireQuote: g('requireQuote').checked,
-    feeFixed: g('feeFixed').value, feePct: g('feePct').value, fixedDpAmt: g('fixedDpAmt').value,
-    minDpPct: g('minDpPct').value, maxDpPct: g('maxDpPct').value, minDpAmt: g('minDpAmt').value, zeroDpAllowed: g('zeroDpAllowed').checked,
-    promoName: g('promoName').value, promoRate: g('promoRate').value, promoUntil: g('promoUntil').value, promoActive: g('promoActive').checked, notes: g('notes').value
-  };
-  const btn = g('btn'); if (btn) btn.disabled = true;
+function ih_redrawList() {
+  const q = IH.q.toLowerCase();
+  const list = IH.ins.filter(i => (IH.filter === 'all' || i.status === IH.filter) && (!q || (i.employeeName + ' ' + i.employeeId + ' ' + i.itemsText + ' ' + i.branch).toLowerCase().indexOf(q) >= 0));
+  const el = document.getElementById('ihList'); if (el) el.innerHTML = ih_listHtml(list);
+}
+function ih_openDetail(id) {
+  const i = ih_insById(id); if (!i) return;
+  const pays = IH.pays.filter(p => String(p.installmentId) === String(i.id));
+  const row = (k, v) => '<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:13px"><span style="opacity:.75">' + k + '</span><span style="text-align:right">' + v + '</span></div>';
+  let items = []; try { items = JSON.parse(i.items || '[]'); } catch (e) {}
+  openModal('<div class="modal-title">' + esc(i.employeeName) + '</div><div style="margin-bottom:6px">' + ih_badge(i.status) + '</div>' +
+    row('Employee ID', esc(i.employeeId)) + row('Branch', esc(i.branch)) + row('Installment', esc(i.id)) +
+    '<hr style="margin:6px 0;border:none;border-top:1px solid var(--border)">' +
+    items.map(x => row(esc(x.name) + ' x' + esc(x.qty), ih_money(x.qty * x.price))).join('') +
+    row('<b>Total Price</b>', '<b>' + ih_money(i.totalPrice) + '</b>') + row('Down Payment', ih_money(i.downPayment)) + row('Financed', ih_money(i.financed)) +
+    row('Monthly Payment', ih_money(i.monthly) + ' x ' + esc(i.term)) + row('Total Payable', ih_money(i.totalPayable)) +
+    row('Computed by', esc(i.computedBy)) + (i.basis ? row('Basis', esc(i.basis)) : '') + (i.notes ? row('Notes', esc(i.notes)) : '') +
+    row('First Due Date', ih_date(i.startDate)) + row('Paid (verified)', ih_money(i.paid)) + row('Waiting verification', ih_money(i.pending)) + row('<b>Balance</b>', '<b>' + ih_money(i.balance) + '</b>') +
+    (i.statusNote ? row('Status note', esc(i.statusNote)) : '') +
+    '<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">Payment Schedule</summary>' + ih_scheduleTable(i) + '</details>' +
+    '<details style="margin-top:8px" open><summary style="cursor:pointer;font-weight:600">Payments (' + pays.length + ')</summary>' +
+    (pays.length ? pays.map(p => '<div style="border-top:1px solid rgba(128,128,128,.2);padding:6px 0;font-size:13px"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + ih_money(p.amount) + '</b>' + ih_badge(p.status) + '</div><div style="opacity:.75">' + ih_date(p.paidDate) + ' • ' + esc(p.method) + (p.note ? ' • ' + esc(p.note) : '') + (p.decidedBy ? ' • by ' + esc(p.decidedBy) : '') + '</div>' +
+      (p.reason ? '<div style="color:#c62828">' + esc(p.reason) + '</div>' : '') +
+      '<div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">' + (p.hasProof ? '<button class="btn btn-ghost btn-sm" onclick="ih_viewProof(\'' + esc(p.id) + '\')">View Photo</button>' : '') +
+      (p.status === 'Pending' ? '<button class="btn btn-primary btn-sm" onclick="ih_verify(\'' + esc(p.id) + '\')">Verify</button><button class="btn btn-danger btn-sm" onclick="ih_openReject(\'' + esc(p.id) + '\')">Reject</button>' : '') + '</div></div>').join('') : '<div style="opacity:.7;font-size:13px">No payments yet.</div>') + '</details>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">' +
+    (ih_isAdmin() && i.status === 'Active' ? '<button class="btn btn-primary btn-sm" onclick="ih_openPayModal(\'' + esc(i.id) + '\')">Record Payment</button><button class="btn btn-danger btn-sm" onclick="ih_openCancel(\'' + esc(i.id) + '\')">Cancel Installment</button>' : '') +
+    '<button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
+}
+function ih_openCancel(id) {
+  openModal('<div class="modal-title">Cancel Installment</div><div style="font-size:12px;opacity:.8;margin-bottom:8px">Existing payments stay on record. This stops further payments.</div><div class="field"><label>Reason (required)</label><input id="ihCnReason" type="text" maxlength="300" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="ih_openDetail(\'' + esc(id) + '\')">Back</button><button class="btn btn-danger" id="ihCnBtn" onclick="ih_doCancel(\'' + esc(id) + '\')">Cancel Installment</button></div>');
+}
+async function ih_doCancel(id) {
+  const reason = ((document.getElementById('ihCnReason') || {}).value || '').trim();
+  if (!reason) { toast('Please enter a reason.', 'error'); return; }
+  if (IH.busy) return; IH.busy = true;
+  const b = document.getElementById('ihCnBtn'); if (b) b.disabled = true;
   try {
-    const r = await gasPost({ action: 'fin_saveSettings', settings: JSON.stringify(s) });
-    if (r && r.success) { toast(c.provider + ' settings saved', 'success'); await fin_loadSettings(true); fin_renderSettings(); }
-    else { toast((r && r.message) || 'Save failed.', 'error'); if (btn) btn.disabled = false; }
-  } catch (e) { toast('Network error: ' + e.message, 'error'); if (btn) btn.disabled = false; }
+    const r = await gasPost({ action: 'ih_cancelInstallment', id, reason });
+    if (r && r.success) { closeModalDirect(); toast('Installment cancelled', 'success'); await ih_refreshCurrent(); }
+    else { toast((r && r.message) || 'Could not cancel.', 'error'); if (b) b.disabled = false; }
+  } catch (e) { toast('Network error: ' + e.message, 'error'); if (b) b.disabled = false; }
+  finally { IH.busy = false; }
 }
+
+// ── create installment (admin) ──
+let ih_itemSeq = 0;
+function ih_openCreate() {
+  const emps = IH.emps.filter(e => e.status === 'Approved');
+  if (!emps.length) { toast('No approved employee accounts yet. Approve a sign-up in the Employees tab first.', 'warning', 5000); return; }
+  IH.refBase = 'i' + Date.now().toString(36) + ih_rand(5); ih_itemSeq = 0;
+  const d = new Date(); d.setMonth(d.getMonth() + 1);
+  const dueDefault = localDateStr(d);
+  openModal('<div class="modal-title">New In-House Installment</div>' +
+    '<div class="field"><label>Employee</label><select id="ihCEmp" style="' + IH_INP + '">' + emps.map(e => '<option value="' + esc(e.userId) + '">' + esc(e.name) + ' (' + esc(e.employeeId) + ', ' + esc(e.branch) + ')</option>').join('') + '</select></div>' +
+    '<div style="font-weight:700;font-size:13px;margin:6px 0">Items taken</div><div id="ihCItems"></div>' +
+    '<button type="button" class="btn btn-ghost btn-sm" onclick="ih_addItemRow()">+ Add Item</button>' +
+    '<div style="display:flex;gap:8px;margin-top:10px"><div class="field" style="flex:1"><label>Down Payment (collected)</label><input id="ihCDp" type="number" min="0" step="0.01" value="0" style="' + IH_INP + '" oninput="ih_calcCreate()"></div>' +
+    '<div class="field" style="flex:1"><label>Term (months)</label><input id="ihCTerm" type="number" min="1" max="60" step="1" value="6" style="' + IH_INP + '" oninput="ih_calcCreate()"></div></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Monthly Payment (₱)</label><input id="ihCMonthly" type="number" min="0" step="0.01" style="' + IH_INP + '" oninput="ih_calcCreate()"></div>' +
+    '<div class="field" style="flex:1"><label>First Due Date</label><input id="ihCStart" type="date" value="' + esc(dueDefault) + '" style="' + IH_INP + '"></div></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Computed by</label><select id="ihCBy" style="' + IH_INP + '" onchange="ih_calcCreate()">' + IH_PARTNERS.map(p => '<option>' + esc(p) + '</option>').join('') + '<option value="__other">Other (type below)</option></select></div>' +
+    '<div class="field" style="flex:1" id="ihCByWrap"><label>Other: name</label><input id="ihCByOther" type="text" maxlength="60" style="' + IH_INP + '" placeholder="Person or company"></div></div>' +
+    '<div class="field"><label>Basis of computation</label><input id="ihCBasis" type="text" maxlength="300" style="' + IH_INP + '" placeholder="e.g. Skyro quotation ref, rate used"></div>' +
+    '<div class="field"><label>Notes (optional)</label><input id="ihCNotes" type="text" maxlength="300" style="' + IH_INP + '"></div>' +
+    '<div id="ihCSum" style="font-size:13px;background:#f8fbff;border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:10px"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="ihCGo" onclick="ih_submitCreate()">Create Installment</button></div>');
+  ih_addItemRow(); ih_calcCreate();
+}
+function ih_addItemRow() {
+  const box = document.getElementById('ihCItems'); if (!box) return;
+  const n = ++ih_itemSeq, d = document.createElement('div');
+  d.id = 'ihRow' + n; d.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;align-items:center';
+  d.innerHTML = '<input class="ihIName" type="text" maxlength="120" placeholder="Item name" style="' + IH_INP + ';flex:3" oninput="ih_calcCreate()">' +
+    '<input class="ihIQty" type="number" min="1" step="1" value="1" style="' + IH_INP + ';flex:1;min-width:52px" oninput="ih_calcCreate()">' +
+    '<input class="ihIPrice" type="number" min="0" step="0.01" placeholder="Price" style="' + IH_INP + ';flex:2" oninput="ih_calcCreate()">' +
+    '<button type="button" class="btn btn-ghost btn-sm" onclick="this.parentNode.remove();ih_calcCreate()">x</button>';
+  box.appendChild(d);
+}
+function ih_readItems() {
+  return Array.from(document.querySelectorAll('#ihCItems > div')).map(r => ({
+    name: r.querySelector('.ihIName').value.trim(), qty: parseFloat(r.querySelector('.ihIQty').value) || 0, price: parseFloat(r.querySelector('.ihIPrice').value) || 0
+  })).filter(x => x.name || x.price);
+}
+function ih_calcCreate() {
+  const w = document.getElementById('ihCByWrap'), by = document.getElementById('ihCBy');
+  if (w && by) w.style.display = by.value === '__other' ? 'block' : 'none';
+  const sum = document.getElementById('ihCSum'); if (!sum) return;
+  const items = ih_readItems(), total = Math.round(items.reduce((s, x) => s + x.qty * x.price, 0) * 100) / 100;
+  const dp = parseFloat((document.getElementById('ihCDp') || {}).value) || 0, term = parseInt((document.getElementById('ihCTerm') || {}).value, 10) || 0, mo = parseFloat((document.getElementById('ihCMonthly') || {}).value) || 0;
+  const fin = Math.round((total - dp) * 100) / 100, payable = Math.round((dp + mo * term) * 100) / 100;
+  let warn = '';
+  if (total > 0 && dp >= total) warn = 'Down payment must be less than the total price.';
+  else if (term > 0 && mo > 0 && mo * term < fin - 0.5) warn = 'Monthly x term is less than the financed amount.';
+  sum.innerHTML = 'Total Price <b>' + ih_money(total) + '</b> • Financed <b>' + ih_money(Math.max(0, fin)) + '</b><br>Total Payable (DP + monthly x term) <b>' + ih_money(payable) + '</b>' +
+    (mo > 0 && term > 0 && fin > 0 ? ' • Difference vs price <b>' + ih_money(payable - total) + '</b>' : '') + (warn ? '<div style="color:#c62828;margin-top:4px">' + esc(warn) + '</div>' : '');
+}
+async function ih_submitCreate() {
+  if (IH.busy) return;
+  const v = id => (document.getElementById(id) || {}).value;
+  const items = ih_readItems();
+  if (!items.length || items.some(x => !x.name || !(x.qty > 0))) { toast('Complete every item (name and quantity).', 'error'); return; }
+  const by = v('ihCBy') === '__other' ? (v('ihCByOther') || '').trim() : v('ihCBy');
+  if (!by) { toast('Enter who computed this.', 'error'); return; }
+  const total = Math.round(items.reduce((s, x) => s + x.qty * x.price, 0) * 100) / 100;
+  const dp = parseFloat(v('ihCDp')) || 0, term = parseInt(v('ihCTerm'), 10), mo = parseFloat(v('ihCMonthly'));
+  if (!(total > 0)) { toast('Enter the item prices.', 'error'); return; }
+  if (dp >= total) { toast('Down payment must be less than the total price.', 'error'); return; }
+  if (!(term >= 1 && term <= 60)) { toast('Term must be 1 to 60 months.', 'error'); return; }
+  if (!(mo > 0)) { toast('Enter the monthly payment.', 'error'); return; }
+  if (mo * term < (total - dp) - 0.5) { toast('Monthly x term is less than the financed amount.', 'error'); return; }
+  if (!v('ihCStart')) { toast('Enter the first due date.', 'error'); return; }
+  const payload = { action: 'ih_createInstallment', userId: v('ihCEmp'), items: JSON.stringify(items), downPayment: dp, term, monthly: mo, computedBy: by,
+    basis: (v('ihCBasis') || '').trim(), notes: (v('ihCNotes') || '').trim(), startDate: v('ihCStart') };
+  payload.clientRef = IH.refBase + '-' + ih_hash(JSON.stringify([payload.userId, payload.items, dp, term, mo, payload.startDate]));
+  IH.busy = true; const b = document.getElementById('ihCGo'); if (b) b.disabled = true;
+  try {
+    const r = await gasPost(payload);
+    if (r && r.success) { IH.refBase = null; closeModalDirect(); toast('Installment created', 'success'); IH.tab = 'installments'; await ih_refreshCurrent(); }
+    else { toast((r && r.message) || 'Could not create.', 'error', 6000); if (b) b.disabled = false; }
+  } catch (e) { toast('Network error. Check the list before trying again, it may have saved.', 'error', 6000); if (b) b.disabled = false; }
+  finally { IH.busy = false; }
+}
+
+// ── employees tab (admin) ──
+function ih_htmlEmployees() {
+  const sec = (title, list, acts) => '<div class="card"><div class="card-title">' + title + '</div>' + (list.length ? list.map(e =>
+    '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + esc(e.name) + '</b>' + ih_badge(e.status) + '</div>' +
+    '<div style="font-size:12px;opacity:.85">Employee ID <b>' + esc(e.employeeId) + '</b> • ' + esc(e.branch) + (e.contact ? ' • ' + esc(e.contact) : '') + ' • signed up ' + esc(safeFormatDateTime(e.createdAt)) + '</div>' +
+    (e.reason ? '<div style="font-size:12px;color:#c62828">Reason: ' + esc(e.reason) + '</div>' : '') +
+    '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' + acts(e) + '</div></div>').join('') : '<div style="opacity:.7">None.</div>') + '</div>';
+  const emps = IH.emps;
+  return sec('Waiting for Approval', emps.filter(e => e.status === 'Pending'), e => '<button class="btn btn-primary btn-sm" onclick="ih_decideEmp(\'' + esc(e.userId) + '\',\'Approved\')">Approve</button><button class="btn btn-danger btn-sm" onclick="ih_openEmpReject(\'' + esc(e.userId) + '\')">Reject</button>') +
+    sec('Approved Employees', emps.filter(e => e.status === 'Approved'), e => '<button class="btn btn-ghost btn-sm" onclick="ih_openEmpReject(\'' + esc(e.userId) + '\')">Deactivate</button>') +
+    sec('Rejected', emps.filter(e => e.status === 'Rejected'), e => '<button class="btn btn-ghost btn-sm" onclick="ih_decideEmp(\'' + esc(e.userId) + '\',\'Approved\')">Approve Instead</button>');
+}
+async function ih_decideEmp(userId, decision, reason) {
+  if (IH.busy) return;
+  if (decision === 'Approved' && !confirm('Approve this employee? They will be able to log in.')) return;
+  IH.busy = true; showLoading('Saving...');
+  try {
+    const r = await gasPost({ action: 'ih_decideEmployee', userId, decision, reason: reason || '' });
+    hideLoading();
+    if (r && r.success) { closeModalDirect(); toast('Employee ' + decision.toLowerCase(), 'success'); await ih_refreshCurrent(); }
+    else toast((r && r.message) || 'Could not save.', 'error');
+  } catch (e) { hideLoading(); toast('Network error: ' + e.message, 'error'); }
+  finally { IH.busy = false; }
+}
+function ih_openEmpReject(userId) {
+  openModal('<div class="modal-title">Reject or Deactivate Employee</div><div class="field"><label>Reason (required)</label><input id="ihErReason" type="text" maxlength="200" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-danger" onclick="ih_submitEmpReject(\'' + esc(userId) + '\')">Confirm</button></div>');
+}
+function ih_submitEmpReject(userId) {
+  const reason = ((document.getElementById('ihErReason') || {}).value || '').trim();
+  if (!reason) { toast('Please enter a reason.', 'error'); return; }
+  ih_decideEmp(userId, 'Rejected', reason);
+}
+
+// ── reports ──
+function ih_htmlReport() {
+  const active = IH.ins.filter(i => i.status === 'Active');
+  const sum = (a, k) => a.reduce((s, x) => s + (Number(x[k]) || 0), 0);
+  const outstanding = sum(active, 'balance'), collected = IH.pays.filter(p => p.status === 'Verified').reduce((s, p) => s + Number(p.amount || 0), 0);
+  const overdueIns = active.filter(i => i.overdueCount > 0);
+  const card = (t, v, s, bad) => '<div style="flex:1;min-width:150px;border:1px solid var(--border);border-radius:10px;padding:10px"><div style="font-size:12px;opacity:.7">' + t + '</div><div style="font-size:20px;font-weight:800;' + (bad ? 'color:#c62828' : '') + '">' + v + '</div>' + (s ? '<div style="font-size:11px;opacity:.65">' + s + '</div>' : '') + '</div>';
+  const byBranch = {};
+  active.forEach(i => { const b = i.branch || '-'; (byBranch[b] = byBranch[b] || { n: 0, bal: 0 }); byBranch[b].n++; byBranch[b].bal += i.balance; });
+  const rows = Object.keys(byBranch).sort().map(b => '<tr style="border-top:1px solid rgba(128,128,128,.2)"><td style="padding:6px">' + esc(b) + '</td><td style="padding:6px;text-align:right">' + byBranch[b].n + '</td><td style="padding:6px;text-align:right">' + ih_money(byBranch[b].bal) + '</td></tr>').join('');
+  const od = overdueIns.sort((a, b) => b.overdueCount - a.overdueCount).slice(0, 15).map(i => '<div style="border-top:1px solid rgba(128,128,128,.2);padding:6px 0;font-size:13px;cursor:pointer" onclick="ih_openDetail(\'' + esc(i.id) + '\')">' + esc(i.employeeName) + ' (' + esc(i.branch) + ') • ' + i.overdueCount + ' overdue • balance ' + ih_money(i.balance) + '</div>').join('');
+  return '<div class="card"><div class="card-title">In-House Installment Reports</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' +
+    card('Active Installments', active.length, IH.ins.filter(i => i.status === 'Completed').length + ' completed') + card('Total Outstanding', ih_money(outstanding)) +
+    card('Total Collected (verified)', ih_money(collected)) + card('Awaiting Verification', IH.pays.filter(p => p.status === 'Pending').length) + card('With Overdue Payments', overdueIns.length, '', overdueIns.length > 0) + '</div>' +
+    '<div style="font-weight:700;margin:8px 0 4px">By Branch (active)</div><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="opacity:.7"><td style="padding:6px">Branch</td><td style="padding:6px;text-align:right">Installments</td><td style="padding:6px;text-align:right">Outstanding</td></tr>' + (rows || '<tr><td style="padding:6px;opacity:.7" colspan="3">No active installments.</td></tr>') + '</table>' +
+    '<div style="font-weight:700;margin:14px 0 4px">Overdue</div>' + (od || '<div style="opacity:.7;font-size:13px">No overdue payments.</div>') + '</div>';
+}
+
+// ── notifications: banner and chime (reuses the existing incentive chime and banner) ──
+let ih_notifyTimer = null, ih_notifyState = null;
+async function ih_notifyCheck() {
+  if (!currentUser || (!ih_isStaff() && !ih_isEmp())) return;
+  if (document.hidden && ih_isEmp()) return;
+  let r;
+  try { r = await gasRequest({ action: 'ih_getPayments' }); } catch (e) { return; }
+  if (!r || !r.success || !currentUser) return;
+  const pays = r.data || [], uid = String(currentUser.id || currentUser.username || '');
+  const baseline = !ih_notifyState || ih_notifyState.user !== uid;
+  if (baseline) ih_notifyState = { user: uid, pending: new Set(), status: {} };
+  const st = ih_notifyState;
+  if (ih_isStaff()) {
+    const pend = pays.filter(p => p.status === 'Pending');
+    const fresh = baseline ? [] : pend.filter(p => !st.pending.has(p.id));
+    st.pending = new Set(pend.map(p => p.id));
+    if (fresh.length) {
+      try { inc_notifyPlay(); } catch (e) {}
+      fresh.slice(0, 3).forEach(p => inc_banner(p.employeeName, 'Sent a payment of ' + ih_money(p.amount) + ' for verification', 'info', 9000, 'ihAdmin'));
+      if (fresh.length > 3) inc_banner('In-House Installment', (fresh.length - 3) + ' more payments waiting for verification', 'info', 9000, 'ihAdmin');
+    }
+  } else {
+    const changed = [];
+    pays.forEach(p => { const prev = st.status[p.id]; if (!baseline && prev === 'Pending' && p.status !== 'Pending') changed.push(p); st.status[p.id] = p.status; });
+    if (changed.length) {
+      try { inc_notifyPlay(); } catch (e) {}
+      changed.slice(0, 3).forEach(p => inc_banner(p.decidedBy || 'In-House Installment', 'Your payment of ' + ih_money(p.amount) + ' was ' + p.status.toLowerCase() + (p.reason ? ': ' + p.reason : ''), p.status === 'Verified' ? 'success' : 'warning', 10000, 'ihMy'));
+    }
+    if (baseline) ih_dueReminder();
+  }
+}
+// once a day on login: payments due within 3 days or overdue
+async function ih_dueReminder() {
+  try {
+    const key = 'ih_due_' + localDateStr(new Date());
+    if (lsGet(key, false)) return;
+    const r = await gasRequest({ action: 'ih_getInstallments' });
+    if (!r || !r.success) return;
+    const today = r.today || localDateStr(new Date());
+    const soon = new Date(today + 'T00:00:00'); soon.setDate(soon.getDate() + 3);
+    const lim = localDateStr(soon);
+    const act = (r.data || []).filter(i => i.status === 'Active' && i.nextDue);
+    const over = act.filter(i => i.overdueCount > 0), due = act.filter(i => i.overdueCount === 0 && i.nextDue <= lim);
+    if (over.length) inc_banner('Payment Overdue', 'You have an overdue installment payment. Please pay and upload your proof.', 'warning', 12000, 'ihMy');
+    else if (due.length) inc_banner('Payment Reminder', 'An installment payment is due on ' + ih_date(due[0].nextDue) + '.', 'info', 12000, 'ihMy');
+    if (over.length || due.length) lsSet(key, true);
+  } catch (e) {}
+}
+function ih_notifyStart() {
+  ih_notifyStop();
+  if (!currentUser || (!ih_isStaff() && !ih_isEmp())) return;
+  ih_notifyCheck();
+  ih_notifyTimer = setInterval(ih_notifyCheck, 50000 + Math.floor(Math.random() * 6000));
+}
+function ih_notifyStop() { if (ih_notifyTimer) { clearInterval(ih_notifyTimer); ih_notifyTimer = null; } ih_notifyState = null; }
+(function () {
+  const s0 = inc_notifyStart, p0 = inc_notifyStop;
+  inc_notifyStart = function () { try { s0.apply(this, arguments); } catch (e) {} ih_notifyStart(); };
+  inc_notifyStop  = function () { try { p0.apply(this, arguments); } catch (e) {} ih_notifyStop(); };
+})();
+
+// ── login screen: employee sign-up (added from here so index.html stays untouched) ──
+function ih_showSignup() {
+  document.querySelectorAll('#loginScreen .login-card').forEach(c => { c.style.display = 'none'; });
+  const p = document.getElementById('ihSignupPanel'); if (p) p.style.display = 'block';
+  ['ihName', 'ihEmpId', 'ihUser', 'ihContact', 'ihPass', 'ihPass2'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  ih_signupMsg('', '');
+}
+function ih_hideSignup() {
+  const p = document.getElementById('ihSignupPanel'); if (p) p.style.display = 'none';
+  const lc = document.querySelector('#loginScreen .login-card'); if (lc) lc.style.display = 'block';
+}
+function ih_signupMsg(msg, type) {
+  const el = document.getElementById('ihSignupMsg'); if (!el) return;
+  el.textContent = msg; el.style.color = type === 'error' ? 'var(--red,#ef4444)' : type === 'ok' ? 'var(--green,#059669)' : 'var(--text3,#6b7280)';
+}
+async function ih_doSignup() {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim();
+  const name = v('ihName'), empId = v('ihEmpId').toUpperCase(), user = v('ihUser').toLowerCase(), branch = (document.getElementById('ihBranch') || {}).value || '', contact = v('ihContact');
+  const pass = (document.getElementById('ihPass') || {}).value || '', pass2 = (document.getElementById('ihPass2') || {}).value || '';
+  if (!name) { ih_signupMsg('Full name is required.', 'error'); return; }
+  if (!/^[A-Z0-9\-]{3,20}$/.test(empId)) { ih_signupMsg('Enter your Employee ID (letters, numbers or dashes).', 'error'); return; }
+  if (!/^[a-z0-9._]{3,30}$/.test(user)) { ih_signupMsg('Username: 3-30 letters, numbers, dots or underscores.', 'error'); return; }
+  if (!branch) { ih_signupMsg('Please select your branch.', 'error'); return; }
+  if (contact && !/^[0-9+\- ]{7,20}$/.test(contact)) { ih_signupMsg('Contact number is invalid.', 'error'); return; }
+  if (pass.length < 6) { ih_signupMsg('Password must be at least 6 characters.', 'error'); return; }
+  if (pass !== pass2) { ih_signupMsg('Passwords do not match.', 'error'); return; }
+  const btn = document.getElementById('ihSignupBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
+  ih_signupMsg('Creating account...', '');
+  try {
+    const res = await gasPost({ action: 'registerEmployee', name, employeeId: empId, username: user, password: pass, branch, contact });
+    if (res && res.success) {
+      ih_signupMsg('Account created. Please wait for Admin approval before you can sign in.', 'ok');
+      if (btn) { btn.textContent = 'Done'; }
+    } else {
+      ih_signupMsg((res && res.message) || 'Could not create the account.', 'error');
+      if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
+    }
+  } catch (e) {
+    ih_signupMsg('Network error. Please try again.', 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
+  }
+}
+function ih_injectSignup() {
+  try {
+    const form = document.querySelector('#loginScreen .login-card .login-form');
+    if (form && !document.getElementById('ihSignupLink')) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.id = 'ihSignupLink'; b.className = 'btn-link'; b.textContent = 'Employee? Create an installment account';
+      b.onclick = ih_showSignup; form.appendChild(b);
+    }
+    const screen = document.getElementById('loginScreen');
+    if (screen && !document.getElementById('ihSignupPanel')) {
+      const branchOpts = (document.getElementById('regBranch') || {}).innerHTML || '<option value="">Select your branch</option>';
+      const d = document.createElement('div');
+      d.id = 'ihSignupPanel'; d.className = 'login-card'; d.style.display = 'none';
+      d.innerHTML = '<div class="login-logo"><div class="login-logo-text">AE HOME</div><p>Employee Installment Sign Up</p></div><div class="login-form">' +
+        '<div class="form-group"><label for="ihName">Full Name</label><input type="text" id="ihName" placeholder="Your full name" autocomplete="off" maxlength="60"></div>' +
+        '<div class="form-group"><label for="ihEmpId">Employee ID</label><input type="text" id="ihEmpId" placeholder="Your company Employee ID" autocomplete="off" maxlength="20"></div>' +
+        '<div class="form-group"><label for="ihUser">Username</label><input type="text" id="ihUser" placeholder="Letters, numbers, . or _" autocomplete="off" maxlength="30"></div>' +
+        '<div class="form-group"><label for="ihBranch">Branch</label><select id="ihBranch">' + branchOpts + '</select></div>' +
+        '<div class="form-group"><label for="ihContact">Contact No. (optional)</label><input type="text" id="ihContact" placeholder="09xx xxx xxxx" autocomplete="off" maxlength="20"></div>' +
+        '<div class="form-group"><label for="ihPass">Password</label><input type="password" id="ihPass" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
+        '<div class="form-group"><label for="ihPass2">Confirm Password</label><input type="password" id="ihPass2" placeholder="Re-enter password" autocomplete="new-password"></div>' +
+        '<button class="btn-login" id="ihSignupBtn" onclick="ih_doSignup()">Create Account</button>' +
+        '<button type="button" class="btn-link" onclick="ih_hideSignup()">Back to Sign In</button></div>' +
+        '<div id="ihSignupMsg" style="margin-top:10px;font-size:0.82rem;text-align:center;min-height:18px"></div>';
+      screen.appendChild(d);
+    }
+  } catch (e) { console.warn('[IH] signup inject failed', e); }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ih_injectSignup); else ih_injectSignup();
