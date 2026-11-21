@@ -8344,6 +8344,7 @@ function ih_openPayModal(insId) {
     '<div style="font-size:13px;margin-bottom:8px">' + esc(ins.itemsText) + '<br>Remaining balance: <b>' + ih_money(remaining) + '</b></div>' +
     '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Amount Paid (₱)</label><input id="ihPAmt" type="number" min="0" step="0.01" value="' + amt + '" style="' + IH_INP + '"></div>' +
     '<div class="field" style="flex:1"><label>Date Paid</label><input id="ihPDate" type="date" value="' + esc(IH.today || '') + '" style="' + IH_INP + '"></div></div>' +
+    (admin ? '' : '<details id="ihPOptsBox" style="margin-bottom:10px"><summary style="cursor:pointer;font-weight:600">Where to pay (GCash / Bank / QR)</summary><div id="ihPOpts" style="margin-top:8px">Loading...</div></details>') +
     '<div class="field"><label>Payment Method</label><select id="ihPMethod" style="' + IH_INP + '">' + IH_METHODS.map(m => '<option>' + esc(m) + '</option>').join('') + '</select></div>' +
     '<div class="field"><label>Note (optional)</label><input id="ihPNote" type="text" maxlength="200" style="' + IH_INP + '"></div>' +
     '<div class="field"><label>Photo of ' + (admin ? 'proof (optional)' : 'receipt or proof (required)') + '</label>' +
@@ -8354,7 +8355,9 @@ function ih_openPayModal(insId) {
     '<div id="ihPPrev" style="margin-top:8px"></div></div>' +
     '<div id="ihPProg" style="font-size:13px;margin:6px 0"></div>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" id="ihPCancel" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="ihPGo" onclick="ih_submitPay(\'' + esc(ins.id) + '\')">' + (admin ? 'Record' : 'Submit Payment') + '</button></div>');
+  if (!admin) ih_fillPayOpts();
 }
+function ih_fillPayOpts() { ih_loadOpts(false).then(() => { const b = document.getElementById('ihPOpts'); if (b) b.innerHTML = ih_optsHtml(); }); }
 function ih_onPhoto(input) {
   const f = input.files && input.files[0]; input.value = '';
   if (!f) return;
@@ -8439,7 +8442,7 @@ function ih_drawMy() {
   const dues = active.map(i => i.nextDue).filter(Boolean).sort();
   const overdue = active.reduce((s, i) => s + i.overdueCount, 0);
   const card = (t, v, sub, bad) => '<div style="flex:1;min-width:140px;border:1px solid var(--border);border-radius:10px;padding:10px"><div style="font-size:12px;opacity:.7">' + t + '</div><div style="font-size:20px;font-weight:800;' + (bad ? 'color:#c62828' : '') + '">' + v + '</div>' + (sub ? '<div style="font-size:11px;opacity:.65">' + sub + '</div>' : '') + '</div>';
-  pc.innerHTML = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">' + card('Total Balance', ih_money(owe)) + card('Next Due Date', dues.length ? ih_date(dues[0]) : '-', '', dues.length && dues[0] < IH.today) + card('Overdue Payments', overdue, '', overdue > 0) + '</div>' +
+  pc.innerHTML = '<div style="margin-bottom:10px"><button class="btn btn-ghost btn-sm" onclick="ih_openHowToPay()">How to Pay (GCash / Bank / QR)</button></div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">' + card('Total Balance', ih_money(owe)) + card('Next Due Date', dues.length ? ih_date(dues[0]) : '-', '', dues.length && dues[0] < IH.today) + card('Overdue Payments', overdue, '', overdue > 0) + '</div>' +
     (IH.ins.length ? IH.ins.map(i => {
       const pays = IH.pays.filter(p => String(p.installmentId) === String(i.id));
       const pct = i.totalDue > 0 ? Math.min(100, Math.round(i.paid / i.totalDue * 100)) : 0;
@@ -8468,17 +8471,19 @@ function ih_drawTabs() {
   const pend = IH.pays.filter(p => p.status === 'Pending').length;
   const tabs = [['verify', 'Payments to Verify' + (pend ? ' (' + pend + ')' : '')], ['installments', 'Installments']];
   if (ih_isAdmin()) tabs.push(['employees', 'Employees' + (IH.emps.filter(e => e.status === 'Pending').length ? ' (' + IH.emps.filter(e => e.status === 'Pending').length + ')' : '')]);
+  if (ih_isAdmin()) tabs.push(['options', 'Payment Options']);
   tabs.push(['report', 'Reports']);
   bar.innerHTML = tabs.map(t => '<button class="tab-btn' + (IH.tab === t[0] ? ' active' : '') + '" onclick="ih_setTab(\'' + t[0] + '\')">' + t[1] + '</button>').join('');
 }
 function ih_drawAdminTab() {
   if (currentPage !== 'ihAdmin') return;
-  if (IH.tab === 'employees' && !ih_isAdmin()) IH.tab = 'verify';
+  if ((IH.tab === 'employees' || IH.tab === 'options') && !ih_isAdmin()) IH.tab = 'verify';
   ih_drawTabs();
   const el = document.getElementById('ihContent'); if (!el) return;
   if (IH.tab === 'verify') el.innerHTML = ih_htmlVerify();
   else if (IH.tab === 'installments') el.innerHTML = ih_htmlInstallments();
   else if (IH.tab === 'employees') el.innerHTML = ih_htmlEmployees();
+  else if (IH.tab === 'options' && ih_isAdmin()) { if (IH.opts) el.innerHTML = ih_htmlOptions(); else { el.innerHTML = '<div class="card"><div style="opacity:.7">Loading...</div></div>'; ih_showOptionsTab(); } }
   else el.innerHTML = ih_htmlReport();
 }
 
@@ -8851,3 +8856,139 @@ function ih_injectSignup() {
   } catch (e) { console.warn('[IH] signup inject failed', e); }
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ih_injectSignup); else ih_injectSignup();
+
+// ═════════ PAYMENT OPTIONS (GCash / bank + QR) ═════════
+// Admin manages them; employees (and verifiers) only read them so they know where to send the payment.
+const IH_OPT_TYPES = ['GCash', 'Maya', 'Bank Transfer', 'Other'];
+IH.opts = null; IH.optQr = {}; IH.optUpl = null; IH.optEdit = null;
+async function ih_loadOpts(force) {
+  if (IH.opts && !force) return IH.opts;
+  try {
+    const r = await gasRequest({ action: 'ih_getPayOptions' }, 45000);
+    if (r && r.success) IH.opts = r.data || []; else { toast((r && r.message) || 'Could not load payment options.', 'error'); if (!IH.opts) IH.opts = []; }
+  } catch (e) { toast('Could not load payment options: ' + e.message, 'error'); if (!IH.opts) IH.opts = []; }
+  return IH.opts;
+}
+function ih_copyText(t) {
+  try { navigator.clipboard.writeText(String(t)).then(() => toast('Copied', 'success', 1500), () => toast('Could not copy. Please copy it manually.', 'error')); }
+  catch (e) { toast('Could not copy. Please copy it manually.', 'error'); }
+}
+function ih_optCard(o, admin) {
+  const row = (k, v, copy) => v ? '<div style="font-size:13px"><span style="opacity:.65">' + k + ':</span> <b>' + esc(v) + '</b>' + (copy ? ' <button type="button" class="btn btn-ghost btn-sm" style="padding:1px 8px" data-copy="' + esc(v) + '" onclick="ih_copyText(this.getAttribute(\'data-copy\'))">Copy</button>' : '') + '</div>' : '';
+  return '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px' + (o.active ? '' : ';opacity:.55') + '">' +
+    '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + esc(o.label) + '</b><span style="font-size:12px;opacity:.75">' + esc(o.type) + (o.active ? '' : ' (hidden from employees)') + '</span></div>' +
+    row('Bank', o.bankName) + row('Account Name', o.accountName) + row('Number', o.accountNumber, true) +
+    (o.instructions ? '<div style="font-size:12px;opacity:.8;margin-top:4px">' + esc(o.instructions) + '</div>' : '') +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">' +
+    (o.hasQr ? '<button type="button" class="btn btn-primary btn-sm" onclick="ih_viewQr(\'' + esc(o.id) + '\')">View QR Code</button>' : '') +
+    (admin ? '<button type="button" class="btn btn-ghost btn-sm" onclick="ih_openOptEdit(\'' + esc(o.id) + '\')">Edit</button><button type="button" class="btn btn-danger btn-sm" onclick="ih_deleteOpt(\'' + esc(o.id) + '\')">Delete</button>' : '') +
+    '</div></div>';
+}
+function ih_optsHtml() {
+  const list = (IH.opts || []).filter(o => o.active);
+  return list.length ? list.map(o => ih_optCard(o, false)).join('') : '<div style="opacity:.75;font-size:13px">No online payment details have been set up yet. Please ask your Admin.</div>';
+}
+async function ih_viewQr(id) {
+  openModal('<div class="modal-title">QR Code</div><div id="ihQrBox" style="text-align:center;min-height:80px">Loading...</div><div style="text-align:right;margin-top:10px"><button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
+  try {
+    let data = IH.optQr[id];
+    if (!data) {
+      const r = await gasRequest({ action: 'ih_getPayQr', id }, 60000);
+      if (!r || !r.success) throw new Error((r && r.message) || 'Could not load the QR code.');
+      data = r.data; const ks = Object.keys(IH.optQr); if (ks.length >= 6) delete IH.optQr[ks[0]]; IH.optQr[id] = data;
+    }
+    const box = document.getElementById('ihQrBox');
+    if (box) { box.innerHTML = ''; const im = document.createElement('img'); im.src = data; im.style.cssText = 'max-width:100%;max-height:70vh;border-radius:8px;background:#fff'; box.appendChild(im); }
+  } catch (e) { const box = document.getElementById('ihQrBox'); if (box) box.textContent = e.message; }
+}
+// employee: "How to Pay" window
+async function ih_openHowToPay() {
+  openModal('<div class="modal-title">How to Pay</div><div id="ihHowBox">Loading...</div><div style="text-align:right;margin-top:10px"><button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
+  await ih_loadOpts(true);
+  const box = document.getElementById('ihHowBox'); if (box) box.innerHTML = ih_optsHtml();
+}
+// admin tab
+function ih_htmlOptions() {
+  const list = IH.opts || [];
+  return '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><div class="card-title" style="margin:0">Payment Options for Employees</div><button class="btn btn-primary btn-sm" onclick="ih_openOptEdit(\'\')">Add Option</button></div>' +
+    '<div style="font-size:12px;opacity:.75;margin-bottom:10px">Employees see these (GCash, bank, QR code) when they pay online.</div>' +
+    (list.length ? list.map(o => ih_optCard(o, true)).join('') : '<div style="opacity:.75">No payment options yet. Press Add Option.</div>') + '</div>';
+}
+async function ih_showOptionsTab() {
+  const el = document.getElementById('ihContent'); if (el && !IH.opts) el.innerHTML = '<div class="card"><div style="opacity:.7">Loading...</div></div>';
+  await ih_loadOpts(true);
+  if (IH.tab === 'options' && currentPage === 'ihAdmin') { const e2 = document.getElementById('ihContent'); if (e2) e2.innerHTML = ih_htmlOptions(); }
+}
+function ih_openOptEdit(id) {
+  if (!ih_isAdmin()) return;
+  const o = id ? (IH.opts || []).find(x => x.id === id) : null; IH.optEdit = o || null; IH.optUpl = null; IH.refBase = null;
+  const v = k => o ? esc(o[k] || '') : '';
+  openModal('<div class="modal-title">' + (o ? 'Edit' : 'Add') + ' Payment Option</div>' +
+    '<div class="field"><label>Type</label><select id="ihOType" style="' + IH_INP + '">' + IH_OPT_TYPES.map(t => '<option' + (o && o.type === t ? ' selected' : '') + '>' + t + '</option>').join('') + '</select></div>' +
+    '<div class="field"><label>Name of this option</label><input id="ihOLabel" type="text" maxlength="60" placeholder="Example: Company GCash" value="' + v('label') + '" style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>Bank name (for bank transfer)</label><input id="ihOBank" type="text" maxlength="60" value="' + v('bankName') + '" style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>Account name</label><input id="ihOAccName" type="text" maxlength="80" value="' + v('accountName') + '" style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>Account / GCash number</label><input id="ihOAccNo" type="text" maxlength="40" value="' + v('accountNumber') + '" style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>Instructions (optional)</label><input id="ihOIns" type="text" maxlength="300" placeholder="Example: Put your Employee ID in the message" value="' + v('instructions') + '" style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>QR code image (optional)</label>' + (o && o.hasQr ? '<div style="font-size:12px;margin-bottom:4px">A QR code is saved. Choose a new one to replace it. <label style="margin-left:6px"><input type="checkbox" id="ihORemQr"> Remove it</label></div>' : '') +
+    '<button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById(\'ihOFile\').click()">Choose QR Image</button>' +
+    '<input id="ihOFile" type="file" accept="image/*" style="display:none" onchange="ih_onOptPhoto(this)"><div id="ihOPrev" style="margin-top:8px"></div></div>' +
+    '<label style="display:flex;gap:6px;align-items:center;font-size:13px;margin-bottom:8px"><input type="checkbox" id="ihOActive"' + (!o || o.active ? ' checked' : '') + '> Show to employees</label>' +
+    '<div id="ihOProg" style="font-size:13px;margin:6px 0"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" id="ihOCancel" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="ihOGo" onclick="ih_saveOpt()">Save</button></div>');
+}
+function ih_onOptPhoto(input) {
+  const f = input.files && input.files[0]; input.value = '';
+  if (!f) return;
+  if (!/^image\//.test(f.type || '')) { toast('Please choose an image.', 'error'); return; }
+  IH.optUpl = { file: f, uploadId: null, total: 0 };
+  const prev = document.getElementById('ihOPrev');
+  if (prev) { prev.innerHTML = ''; const im = document.createElement('img'); im.src = URL.createObjectURL(f); im.style.cssText = 'max-width:100%;max-height:200px;border-radius:8px;border:1px solid var(--border);background:#fff'; prev.appendChild(im); }
+}
+async function ih_saveOpt() {
+  if (IH.busy || !ih_isAdmin()) return;
+  const g = id => document.getElementById(id), v = id => ((g(id) || {}).value || '').trim();
+  const o = IH.optEdit;
+  if (!v('ihOLabel')) { toast('Enter a name for this option.', 'error'); return; }
+  const hasQr = !!(IH.optUpl || (o && o.hasQr && !(g('ihORemQr') || {}).checked));
+  if (!v('ihOAccNo') && !hasQr) { toast('Enter the account / GCash number, or upload a QR code.', 'error'); return; }
+  IH.busy = true;
+  const go = g('ihOGo'), cancel = g('ihOCancel'), prog = g('ihOProg');
+  if (go) go.disabled = true; if (cancel) cancel.disabled = true;
+  try {
+    const payload = { action: 'ih_savePayOption', id: o ? o.id : '', type: v('ihOType'), label: v('ihOLabel'), bankName: v('ihOBank'), accountName: v('ihOAccName'), accountNumber: v('ihOAccNo'),
+      instructions: v('ihOIns'), active: !!(g('ihOActive') || {}).checked, removeQr: !!(g('ihORemQr') || {}).checked, keepQr: !!(o && o.hasQr) };
+    if (IH.optUpl) {
+      if (!IH.optUpl.uploadId) {
+        if (prog) prog.textContent = 'Preparing image...';
+        const b64 = await ih_compress(IH.optUpl.file);
+        const r = await ih_uploadProof(b64, (d, t) => { if (prog) prog.textContent = 'Uploading image ' + d + ' of ' + t + '...'; });
+        IH.optUpl.uploadId = r.uploadId; IH.optUpl.total = r.total;
+      }
+      payload.uploadId = IH.optUpl.uploadId; payload.chunks = IH.optUpl.total;
+    }
+    if (prog) prog.textContent = 'Saving...';
+    const res = await gasPost(payload, 60000);
+    if (res && res.success) {
+      IH.optUpl = null; IH.optEdit = null; IH.optQr = {}; closeModalDirect(); toast('Payment option saved.', 'success');
+      await ih_loadOpts(true); if (IH.tab === 'options') ih_drawAdminTab();
+    } else {
+      if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc((res && res.message) || 'Could not save.') + '</span>';
+      if (go) go.disabled = false; if (cancel) cancel.disabled = false;
+    }
+  } catch (e) {
+    if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc(e.message) + ' You can press Save to retry.</span>';
+    if (go) go.disabled = false; if (cancel) cancel.disabled = false;
+  } finally { IH.busy = false; }
+}
+async function ih_deleteOpt(id) {
+  if (!ih_isAdmin() || IH.busy) return;
+  const o = (IH.opts || []).find(x => x.id === id); if (!o) return;
+  if (!confirm('Delete "' + o.label + '"? Employees will no longer see it.')) return;
+  IH.busy = true;
+  try {
+    const r = await gasPost({ action: 'ih_deletePayOption', id }, 45000);
+    if (r && r.success) { IH.optQr = {}; toast('Deleted.', 'success'); await ih_loadOpts(true); ih_drawAdminTab(); }
+    else toast((r && r.message) || 'Could not delete.', 'error');
+  } catch (e) { toast('Could not delete: ' + e.message, 'error'); } finally { IH.busy = false; }
+}
