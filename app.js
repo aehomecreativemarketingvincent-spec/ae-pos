@@ -1,7 +1,6 @@
 /* =============================================
    AE HOME POS SYSTEM - app.js
    ============================================= */
-
 // ─── CONFIG ───────────────────────────────────
 const GAS_URL = "https://script.google.com/macros/s/AKfycbyV3mAGgpQxiKDFmm5Jq7FGs4ah42r2Yb0c_StXQsftuwp5QmcjTacELHFoB_LIYXM8/exec";
 
