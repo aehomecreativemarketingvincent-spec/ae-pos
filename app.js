@@ -4311,7 +4311,7 @@ async function renderWholesalers() {
       (canAdd ? '<button class="btn btn-primary" onclick="openAddWholesalerModal()">+ Add Wholesaler</button>' : '') +
     '</div>' +
     '<div class="card">' +
-      '<div id="wholesalerTable"><div class="loading-spinner"><div class="spinner"></div> Loading...</div></div>' +
+      '<div id="wholesalerTable"><div class="loading-spinner"><div class="spinner"></div> Loading...</div>' + ih_barHtml() + '</div>' +
     '</div>';
 
   await loadWholesalers();
@@ -8380,19 +8380,19 @@ async function ih_submitPay(insId) {
   if (needPhoto && !IH.upl) { toast('Please attach a photo of your proof of payment.', 'error'); return; }
   IH.busy = true;
   const go = g('ihPGo'), cancel = g('ihPCancel'), prog = g('ihPProg');
-  if (go) go.disabled = true; if (cancel) cancel.disabled = true;
+  if (go) { go.disabled = true; go.classList.add('ih-busy'); } if (cancel) cancel.disabled = true;
   try {
     let up = null;
     if (IH.upl) {
       if (!IH.upl.uploadId) {
-        if (prog) prog.textContent = 'Preparing photo...';
+        ih_setProg(prog, 'Preparing photo...', 5);
         IH.upl.b64 = await ih_compress(IH.upl.file);
-        const r = await ih_uploadProof(IH.upl.b64, (d, t) => { if (prog) prog.textContent = 'Uploading photo ' + d + ' of ' + t + '... please do not close this window.'; });
+        const r = await ih_uploadProof(IH.upl.b64, (d, t) => { ih_setProg(prog, 'Uploading photo ' + d + ' of ' + t + '... please do not close this window.', 10 + Math.round(80 * d / t)); });
         IH.upl.uploadId = r.uploadId; IH.upl.total = r.total;
       }
       up = IH.upl;
     }
-    if (prog) prog.textContent = 'Saving payment...';
+    ih_setProg(prog, 'Saving payment...', 95);
     const payload = { action: 'ih_submitPayment', installmentId: ins.id, amount, paidDate: date, method: v('ihPMethod'), note: (v('ihPNote') || '').trim(),
       clientRef: IH.refBase + '-' + ih_hash([ins.id, amount, date, v('ihPMethod'), up ? up.uploadId : ''].join('|')) };
     if (up) { payload.uploadId = up.uploadId; payload.chunks = up.total; }
@@ -8404,11 +8404,11 @@ async function ih_submitPay(insId) {
       await ih_refreshCurrent();
     } else {
       if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc((res && res.message) || 'Could not save the payment.') + '</span>';
-      if (go) go.disabled = false; if (cancel) cancel.disabled = false;
+      if (go) { go.disabled = false; go.classList.remove('ih-busy'); } if (cancel) cancel.disabled = false;
     }
   } catch (e) {
     if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc(e.message) + ' You can press the button again to retry.</span>';
-    if (go) go.disabled = false; if (cancel) cancel.disabled = false;
+    if (go) { go.disabled = false; go.classList.remove('ih-busy'); } if (cancel) cancel.disabled = false;
   } finally { IH.busy = false; }
 }
 async function ih_refreshCurrent() {
@@ -8420,7 +8420,7 @@ async function ih_refreshCurrent() {
 async function ih_renderMy() {
   const pc = document.getElementById('pageContent');
   if (!ih_isEmp()) { pc.innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>'; return; }
-  pc.innerHTML = '<div class="card"><div style="opacity:.7">Loading your installments...</div></div>';
+  pc.innerHTML = '<div class="card"><div style="opacity:.7">Loading your installments...</div>' + ih_barHtml() + '</div>';
   await ih_load();
   ih_drawMy();
 }
@@ -8484,7 +8484,7 @@ function ih_drawAdminTab() {
   if (IH.tab === 'verify') el.innerHTML = ih_htmlVerify();
   else if (IH.tab === 'installments') el.innerHTML = ih_htmlInstallments();
   else if (IH.tab === 'employees') el.innerHTML = ih_htmlEmployees();
-  else if (IH.tab === 'options' && ih_isAdmin()) { if (IH.opts) el.innerHTML = ih_htmlOptions(); else { el.innerHTML = '<div class="card"><div style="opacity:.7">Loading...</div></div>'; ih_showOptionsTab(); } }
+  else if (IH.tab === 'options' && ih_isAdmin()) { if (IH.opts) el.innerHTML = ih_htmlOptions(); else { el.innerHTML = '<div class="card"><div style="opacity:.7">Loading...</div>' + ih_barHtml() + '</div>'; ih_showOptionsTab(); } }
   else el.innerHTML = ih_htmlReport();
 }
 
@@ -8520,13 +8520,13 @@ async function ih_doReject(id) {
   const reason = ((document.getElementById('ihRjReason') || {}).value || '').trim();
   if (!reason) { toast('Please enter a reason.', 'error'); return; }
   if (IH.busy) return;
-  IH.busy = true; const b = document.getElementById('ihRjBtn'); if (b) b.disabled = true;
+  IH.busy = true; const b = document.getElementById('ihRjBtn'); if (b) b.disabled = true; showLoading('Rejecting payment...');
   try {
     const r = await gasPost({ action: 'ih_rejectPayment', id, reason });
     if (r && r.success) { closeModalDirect(); toast('Payment rejected', 'success'); await ih_refreshCurrent(); }
     else { toast((r && r.message) || 'Could not reject.', 'error'); if (b) b.disabled = false; }
   } catch (e) { toast('Network error: ' + e.message, 'error'); if (b) b.disabled = false; }
-  finally { IH.busy = false; }
+  finally { IH.busy = false; hideLoading(); }
 }
 
 function ih_htmlInstallments() {
@@ -8593,13 +8593,13 @@ async function ih_doCancel(id) {
   const reason = ((document.getElementById('ihCnReason') || {}).value || '').trim();
   if (!reason) { toast('Please enter a reason.', 'error'); return; }
   if (IH.busy) return; IH.busy = true;
-  const b = document.getElementById('ihCnBtn'); if (b) b.disabled = true;
+  const b = document.getElementById('ihCnBtn'); if (b) b.disabled = true; showLoading('Cancelling installment...');
   try {
     const r = await gasPost({ action: 'ih_cancelInstallment', id, reason });
     if (r && r.success) { closeModalDirect(); toast('Installment cancelled', 'success'); await ih_refreshCurrent(); }
     else { toast((r && r.message) || 'Could not cancel.', 'error'); if (b) b.disabled = false; }
   } catch (e) { toast('Network error: ' + e.message, 'error'); if (b) b.disabled = false; }
-  finally { IH.busy = false; }
+  finally { IH.busy = false; hideLoading(); }
 }
 
 // ── create installment (admin) ──
@@ -8672,13 +8672,13 @@ async function ih_submitCreate() {
   const payload = { action: 'ih_createInstallment', userId: v('ihCEmp'), items: JSON.stringify(items), downPayment: dp, term, monthly: mo, computedBy: by,
     basis: (v('ihCBasis') || '').trim(), notes: (v('ihCNotes') || '').trim(), startDate: v('ihCStart') };
   payload.clientRef = IH.refBase + '-' + ih_hash(JSON.stringify([payload.userId, payload.items, dp, term, mo, payload.startDate]));
-  IH.busy = true; const b = document.getElementById('ihCGo'); if (b) b.disabled = true;
+  IH.busy = true; const b = document.getElementById('ihCGo'); if (b) b.disabled = true; showLoading('Creating installment...');
   try {
     const r = await gasPost(payload);
     if (r && r.success) { IH.refBase = null; closeModalDirect(); toast('Installment created', 'success'); IH.tab = 'installments'; await ih_refreshCurrent(); }
     else { toast((r && r.message) || 'Could not create.', 'error', 6000); if (b) b.disabled = false; }
   } catch (e) { toast('Network error. Check the list before trying again, it may have saved.', 'error', 6000); if (b) b.disabled = false; }
-  finally { IH.busy = false; }
+  finally { IH.busy = false; hideLoading(); }
 }
 
 // ── employees tab (admin) ──
@@ -8839,8 +8839,8 @@ async function ih_doSignup() {
   if (pass.length < 6) { ih_signupMsg('Password must be at least 6 characters.', 'error'); return; }
   if (pass !== pass2) { ih_signupMsg('Passwords do not match.', 'error'); return; }
   const btn = document.getElementById('ihSignupBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
-  ih_signupMsg('Creating account...', '');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; btn.classList.add('ih-busy'); }
+  ih_signupMsg('Creating account... please wait.', ''); ih_signupBar(true);
   try {
     const res = await gasPost({ action: 'registerEmployee', name, employeeId: empId, username: user, password: pass, branch, contact });
     if (res && res.success) {
@@ -8853,7 +8853,7 @@ async function ih_doSignup() {
   } catch (e) {
     ih_signupMsg('Network error. Please try again.', 'error');
     if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
-  }
+  } finally { ih_signupBar(false); if (btn) btn.classList.remove('ih-busy'); }
 }
 function ih_injectSignup() {
   try {
@@ -8872,7 +8872,7 @@ function ih_injectSignup() {
         '<div class="form-group"><label for="ihName">Full Name</label><input type="text" id="ihName" placeholder="Your full name" autocomplete="off" maxlength="60"></div>' +
         '<div class="form-group"><label for="ihEmpId">Employee ID</label><input type="text" id="ihEmpId" placeholder="Your company Employee ID" autocomplete="off" maxlength="20"></div>' +
         '<div class="form-group"><label for="ihUser">Username</label><input type="text" id="ihUser" placeholder="Letters, numbers, . or _" autocomplete="off" maxlength="30"></div>' +
-        '<div class="form-group"><label for="ihBranch">Branch</label><select id="ihBranch">' + branchOpts + '</select></div>' +
+        '<div class="form-group"><label for="ihBranch">Branch</label><select id="ihBranch" style="width:100%;padding:11px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:inherit;font-size:0.9rem;background:#fff">' + branchOpts + '</select></div>' +
         '<div class="form-group"><label for="ihContact">Contact No. (optional)</label><input type="text" id="ihContact" placeholder="09xx xxx xxxx" autocomplete="off" maxlength="20"></div>' +
         '<div class="form-group"><label for="ihPass">Password</label><input type="password" id="ihPass" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
         '<div class="form-group"><label for="ihPass2">Confirm Password</label><input type="password" id="ihPass2" placeholder="Re-enter password" autocomplete="new-password"></div>' +
@@ -8943,7 +8943,7 @@ function ih_htmlOptions() {
     (list.length ? list.map(o => ih_optCard(o, true)).join('') : '<div style="opacity:.75">No payment options yet. Press Add Option.</div>') + '</div>';
 }
 async function ih_showOptionsTab() {
-  const el = document.getElementById('ihContent'); if (el && !IH.opts) el.innerHTML = '<div class="card"><div style="opacity:.7">Loading...</div></div>';
+  const el = document.getElementById('ihContent'); if (el && !IH.opts) el.innerHTML = '<div class="card"><div style="opacity:.7">Loading...</div>' + ih_barHtml() + '</div>';
   await ih_loadOpts(true);
   if (IH.tab === 'options' && currentPage === 'ihAdmin') { const e2 = document.getElementById('ihContent'); if (e2) e2.innerHTML = ih_htmlOptions(); }
 }
@@ -8982,41 +8982,70 @@ async function ih_saveOpt() {
   if (!v('ihOAccNo') && !hasQr) { toast('Enter the account / GCash number, or upload a QR code.', 'error'); return; }
   IH.busy = true;
   const go = g('ihOGo'), cancel = g('ihOCancel'), prog = g('ihOProg');
-  if (go) go.disabled = true; if (cancel) cancel.disabled = true;
+  if (go) { go.disabled = true; go.classList.add('ih-busy'); } if (cancel) cancel.disabled = true;
   try {
     const payload = { action: 'ih_savePayOption', id: o ? o.id : '', type: v('ihOType'), label: v('ihOLabel'), bankName: v('ihOBank'), accountName: v('ihOAccName'), accountNumber: v('ihOAccNo'),
       instructions: v('ihOIns'), active: !!(g('ihOActive') || {}).checked, removeQr: !!(g('ihORemQr') || {}).checked, keepQr: !!(o && o.hasQr) };
     if (IH.optUpl) {
       if (!IH.optUpl.uploadId) {
-        if (prog) prog.textContent = 'Preparing image...';
+        ih_setProg(prog, 'Preparing image...', 5);
         const b64 = await ih_compress(IH.optUpl.file);
-        const r = await ih_uploadProof(b64, (d, t) => { if (prog) prog.textContent = 'Uploading image ' + d + ' of ' + t + '...'; });
+        const r = await ih_uploadProof(b64, (d, t) => { ih_setProg(prog, 'Uploading image ' + d + ' of ' + t + '...', 10 + Math.round(80 * d / t)); });
         IH.optUpl.uploadId = r.uploadId; IH.optUpl.total = r.total;
       }
       payload.uploadId = IH.optUpl.uploadId; payload.chunks = IH.optUpl.total;
     }
-    if (prog) prog.textContent = 'Saving...';
+    ih_setProg(prog, 'Saving...', 95);
     const res = await gasPost(payload, 60000);
     if (res && res.success) {
       IH.optUpl = null; IH.optEdit = null; IH.optQr = {}; closeModalDirect(); toast('Payment option saved.', 'success');
       await ih_loadOpts(true); if (IH.tab === 'options') ih_drawAdminTab();
     } else {
       if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc((res && res.message) || 'Could not save.') + '</span>';
-      if (go) go.disabled = false; if (cancel) cancel.disabled = false;
+      if (go) { go.disabled = false; go.classList.remove('ih-busy'); } if (cancel) cancel.disabled = false;
     }
   } catch (e) {
     if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc(e.message) + ' You can press Save to retry.</span>';
-    if (go) go.disabled = false; if (cancel) cancel.disabled = false;
+    if (go) { go.disabled = false; go.classList.remove('ih-busy'); } if (cancel) cancel.disabled = false;
   } finally { IH.busy = false; }
 }
 async function ih_deleteOpt(id) {
   if (!ih_isAdmin() || IH.busy) return;
   const o = (IH.opts || []).find(x => x.id === id); if (!o) return;
   if (!confirm('Delete "' + o.label + '"? Employees will no longer see it.')) return;
-  IH.busy = true;
+  IH.busy = true; showLoading('Deleting...');
   try {
     const r = await gasPost({ action: 'ih_deletePayOption', id }, 45000);
     if (r && r.success) { IH.optQr = {}; toast('Deleted.', 'success'); await ih_loadOpts(true); ih_drawAdminTab(); }
     else toast((r && r.message) || 'Could not delete.', 'error');
-  } catch (e) { toast('Could not delete: ' + e.message, 'error'); } finally { IH.busy = false; }
+  } catch (e) { toast('Could not delete: ' + e.message, 'error'); } finally { IH.busy = false; hideLoading(); }
+}
+
+// ═════════ PROGRESS / LOADING ANIMATIONS (In-House only) ═════════
+(function () {
+  try {
+    if (document.getElementById('ihProgCss')) return;
+    const st = document.createElement('style'); st.id = 'ihProgCss';
+    st.textContent = '.ih-track{height:8px;background:rgba(128,128,128,.22);border-radius:6px;overflow:hidden;margin-top:6px}' +
+      '.ih-fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#1e90ff,#00c85a);transition:width .35s ease}' +
+      '.ih-fill.ind{width:40%!important;animation:ihInd 1.1s ease-in-out infinite}' +
+      '@keyframes ihInd{0%{margin-left:-40%}100%{margin-left:100%}}' +
+      '@keyframes ihSpin{to{transform:rotate(360deg)}}' +
+      '.ih-busy::before{content:"";display:inline-block;width:12px;height:12px;margin-right:8px;vertical-align:-2px;border:2px solid rgba(255,255,255,.5);border-top-color:#fff;border-radius:50%;animation:ihSpin .7s linear infinite}';
+    document.head.appendChild(st);
+  } catch (e) {}
+})();
+function ih_barHtml(pct) {
+  const p = (typeof pct === 'number') ? Math.max(0, Math.min(100, pct)) : null;
+  return '<div class="ih-track"><div class="ih-fill' + (p === null ? ' ind' : '') + '"' + (p === null ? '' : ' style="width:' + p + '%"') + '></div></div>';
+}
+function ih_setProg(el, label, pct) {
+  if (!el) return;
+  el.innerHTML = '<div>' + esc(label) + (typeof pct === 'number' ? ' (' + Math.max(0, Math.min(100, pct)) + '%)' : '') + '</div>' + ih_barHtml(pct);
+}
+function ih_signupBar(on) {
+  const m = document.getElementById('ihSignupMsg'); if (!m) return;
+  let b = document.getElementById('ihSignupBar');
+  if (on) { if (!b) { b = document.createElement('div'); b.id = 'ihSignupBar'; m.insertAdjacentElement('afterend', b); } b.innerHTML = ih_barHtml(); }
+  else if (b) b.remove();
 }
