@@ -8545,7 +8545,16 @@ function ih_listHtml(list) {
     '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + esc(i.employeeName) + '</b>' + ih_badge(i.status) + '</div>' +
     '<div style="font-size:12px;opacity:.8">' + esc(i.employeeId) + ' • ' + esc(i.branch) + ' • ' + esc(i.itemsText) + '</div>' +
     '<div style="font-size:13px;margin-top:4px">Monthly ' + ih_money(i.monthly) + ' x ' + esc(i.term) + ' • Balance <b>' + ih_money(i.balance) + '</b>' + (i.status === 'Active' && i.nextDue ? ' • Next due ' + ih_date(i.nextDue) : '') +
-    (i.overdueCount > 0 && i.status === 'Active' ? ' <span style="color:#c62828;font-weight:700">• ' + i.overdueCount + ' overdue</span>' : '') + '</div></div>').join('');
+    (i.overdueCount > 0 && i.status === 'Active' ? ' <span style="color:#c62828;font-weight:700">• ' + i.overdueCount + ' overdue</span>' : '') + '</div>' + ih_monthStrip(i) + '</div>').join('');
+}
+// month-by-month payment status for the Admin / Clerk list (Paid, Partial, Overdue, Upcoming)
+function ih_monthStrip(i) {
+  const sch = i.schedule || []; if (!sch.length) return '';
+  const col = { Paid: '#2e7d32', Partial: '#ef6c00', Overdue: '#c62828', Upcoming: 'rgba(128,128,128,.35)' };
+  const paidN = sch.filter(x => x.status === 'Paid').length;
+  const last = IH.pays.filter(p => String(p.installmentId) === String(i.id) && p.status === 'Verified').sort((x, y) => String(y.paidDate).localeCompare(String(x.paidDate)))[0];
+  return '<div style="margin-top:6px"><div style="font-size:12px;opacity:.85;margin-bottom:3px">Monthly payments: <b>' + paidN + ' of ' + sch.length + '</b> paid &bull; Paid ' + ih_money(i.paid) + (i.pending > 0 ? ' (+' + ih_money(i.pending) + ' waiting)' : '') + (last ? ' &bull; Last payment ' + ih_date(last.paidDate) : '') + '</div>' +
+    '<div style="display:flex;gap:3px;flex-wrap:wrap">' + sch.map(x => '<span title="Month ' + x.n + ' - ' + esc(ih_date(x.due)) + ' - ' + esc(x.status) + '" style="width:16px;height:8px;border-radius:3px;background:' + (col[x.status] || col.Upcoming) + '"></span>').join('') + '</div></div>';
 }
 function ih_redrawList() {
   const q = IH.q.toLowerCase();
@@ -8721,7 +8730,25 @@ function ih_htmlReport() {
     card('Active Installments', active.length, IH.ins.filter(i => i.status === 'Completed').length + ' completed') + card('Total Outstanding', ih_money(outstanding)) +
     card('Total Collected (verified)', ih_money(collected)) + card('Awaiting Verification', IH.pays.filter(p => p.status === 'Pending').length) + card('With Overdue Payments', overdueIns.length, '', overdueIns.length > 0) + '</div>' +
     '<div style="font-weight:700;margin:8px 0 4px">By Branch (active)</div><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="opacity:.7"><td style="padding:6px">Branch</td><td style="padding:6px;text-align:right">Installments</td><td style="padding:6px;text-align:right">Outstanding</td></tr>' + (rows || '<tr><td style="padding:6px;opacity:.7" colspan="3">No active installments.</td></tr>') + '</table>' +
-    '<div style="font-weight:700;margin:14px 0 4px">Overdue</div>' + (od || '<div style="opacity:.7;font-size:13px">No overdue payments.</div>') + '</div>';
+    '<div style="font-weight:700;margin:14px 0 4px">Overdue</div>' + (od || '<div style="opacity:.7;font-size:13px">No overdue payments.</div>') + '</div>' + ih_htmlMonthly();
+}
+// Monthly collection monitor (Admin + Clerk): who is due in a chosen month and whether it is paid
+IH.repMonth = '';
+function ih_setRepMonth(v) { IH.repMonth = /^\d{4}-\d{2}$/.test(v) ? v : ''; if (IH.tab === 'report') ih_drawAdminTab(); }
+function ih_htmlMonthly() {
+  const month = IH.repMonth || String(IH.today || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) return '';
+  const rows = [];
+  IH.ins.forEach(i => { if (i.status === 'Cancelled') return; (i.schedule || []).forEach(x => { if (String(x.due).slice(0, 7) === month) rows.push({ i, x }); }); });
+  rows.sort((p, q) => String(p.x.due).localeCompare(String(q.x.due)) || String(p.i.employeeName).localeCompare(String(q.i.employeeName)));
+  const due = rows.reduce((t, r) => t + Number(r.x.amount || 0), 0);
+  const paidN = rows.filter(r => r.x.status === 'Paid').length;
+  const late = rows.filter(r => r.x.status === 'Overdue').length;
+  const line = r => '<tr style="border-top:1px solid rgba(128,128,128,.2);cursor:pointer" onclick="ih_openDetail(\'' + esc(r.i.id) + '\')"><td style="padding:6px">' + esc(r.i.employeeName) + '<div style="font-size:11px;opacity:.65">' + esc(r.i.branch) + '</div></td><td style="padding:6px">' + ih_date(r.x.due) + '</td><td style="padding:6px;text-align:right">' + ih_money(r.x.amount) + '<div style="font-size:11px;opacity:.65">#' + esc(r.x.n) + ' of ' + esc(r.i.term) + '</div></td><td style="padding:6px">' + ih_badge(r.x.status) + '</td></tr>';
+  return '<div class="card" style="margin-top:14px"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center"><div class="card-title" style="margin:0">Monthly Collection Monitor</div>' +
+    '<input type="month" value="' + esc(month) + '" onchange="ih_setRepMonth(this.value)" style="' + IH_INP + ';width:auto"></div>' +
+    '<div style="font-size:13px;margin:8px 0">' + rows.length + ' due &bull; Expected <b>' + ih_money(due) + '</b> &bull; Paid <b>' + paidN + '</b> of ' + rows.length + (late ? ' &bull; <span style="color:#c62828;font-weight:700">' + late + ' overdue</span>' : '') + '</div>' +
+    (rows.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="opacity:.7;text-align:left"><td style="padding:6px">Employee</td><td style="padding:6px">Due Date</td><td style="padding:6px;text-align:right">Amount</td><td style="padding:6px">Status</td></tr>' + rows.map(line).join('') + '</table></div>' : '<div style="opacity:.7;font-size:13px">No payments are due in this month.</div>') + '</div>';
 }
 
 // ── notifications: banner and chime (reuses the existing incentive chime and banner) ──
