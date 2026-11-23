@@ -9431,9 +9431,11 @@ async function att_submitCanvas(cv) {
 }
 
 // ═══════════════════ BUNDY CLOCK / DTR (staff own phone, PIN, no selfie) ═══════════════════
-const BND = { st: null, month: '', busy: false, ref: null, clockTimer: null };
+const BND = { st: null, month: '', half: (new Date().getDate() <= 15 ? '1' : '2'), busy: false, ref: null, clockTimer: null };
 function bnd_fmt12(hhmm) { const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || '')); if (!m) return esc(hhmm || ''); let h = +m[1]; const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12; return h + ':' + m[2] + ' ' + ap; }
 function bnd_dateLong(d) { const t = new Date(String(d) + 'T00:00:00'); return isNaN(t) ? esc(d) : t.toLocaleDateString('en-PH', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' }); }
+function bnd_lbl(punches, i) { const p = punches[i]; let n = 0; for (let k = 0; k <= i; k++) if (punches[k].type === p.type) n++; const w = p.type === 'IN' ? 'Time In' : 'Time Out'; return n === 1 ? 'AM ' + w : n === 2 ? 'PM ' + w : w + ' (' + n + ')'; }
+function bnd_nextLbl(punches, type) { let n = 1; (punches || []).forEach(p => { if (p.type === type) n++; }); const w = type === 'IN' ? 'Time In' : 'Time Out'; return n === 1 ? 'AM ' + w : n === 2 ? 'PM ' + w : w + ' (' + n + ')'; }
 function bnd_stopClock() { if (BND.clockTimer) { clearInterval(BND.clockTimer); BND.clockTimer = null; } }
 async function att_renderMy() {
   const pc = document.getElementById('pageContent'); bnd_stopClock();
@@ -9465,10 +9467,10 @@ function bnd_drawClock() {
     '<div style="margin:12px 0">' + att_chip('Status: ' + (s.status === 'Not in' ? 'Not in yet' : s.status === 'In' ? 'Timed in' : 'Timed out'), stCol) + (s.lateMin ? ' ' + att_chip('Late ' + att_fmtMin(s.lateMin), '#b45309') : '') + '</div>' +
     (s.active ? '<div style="max-width:260px;margin:0 auto"><input id="bndPin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="Your PIN" style="' + IH_INP + ';text-align:center;font-size:20px;letter-spacing:6px">' +
       '<label id="bndBioRow" style="display:none;gap:6px;align-items:center;justify-content:center;font-size:12px;margin-top:8px"><input type="checkbox" id="bndBio"> Also use fingerprint / face</label>' +
-      '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn btn-primary" style="flex:1;padding:14px 0;font-size:16px;justify-content:center;text-align:center" id="bndIn"' + (canIn ? '' : ' disabled') + ' onclick="bnd_punch(\'IN\')">Time In</button><button class="btn btn-ghost" style="flex:1;padding:14px 0;font-size:16px;justify-content:center;text-align:center;border:1px solid var(--border)" id="bndOut"' + (canOut ? '' : ' disabled') + ' onclick="bnd_punch(\'OUT\')">Time Out</button></div>' +
+      '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn btn-primary" style="flex:1;padding:14px 0;font-size:16px;justify-content:center;text-align:center" id="bndIn"' + (canIn ? '' : ' disabled') + ' onclick="bnd_punch(\'IN\')">' + bnd_nextLbl(s.punches, 'IN') + '</button><button class="btn btn-ghost" style="flex:1;padding:14px 0;font-size:16px;justify-content:center;text-align:center;border:1px solid var(--border)" id="bndOut"' + (canOut ? '' : ' disabled') + ' onclick="bnd_punch(\'OUT\')">' + bnd_nextLbl(s.punches, 'OUT') + '</button></div>' +
       '<div id="bndMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>' : '<div style="color:#c62828">Your attendance is disabled. Please ask your Admin.</div>') +
     '</div>' +
-    '<div class="card"><div class="card-title">Today</div>' + (s.punches.length ? s.punches.map(p => '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--border)"><span>' + (p.type === 'IN' ? 'Time In' : 'Time Out') + '</span><b>' + bnd_fmt12(p.time) + '</b></div>').join('') + (s.workedMin ? '<div style="margin-top:8px;font-size:13px">Worked so far: <b>' + att_fmtMin(s.workedMin) + '</b></div>' : '') : '<div style="opacity:.7">No punches yet today.</div>') + '</div>';
+    '<div class="card"><div class="card-title">Today</div>' + (s.punches.length ? s.punches.map((p, i) => '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--border)"><span>' + bnd_lbl(s.punches, i) + '</span><b>' + bnd_fmt12(p.time) + '</b></div>').join('') + (s.workedMin ? '<div style="margin-top:8px;font-size:13px">Worked so far: <b>' + att_fmtMin(s.workedMin) + '</b></div>' : '') : '<div style="opacity:.7">No punches yet today.</div>') + '</div>';
   const tick = () => { const c = document.getElementById('bndClock'); if (!c) { bnd_stopClock(); return; } const n = new Date(); c.textContent = n.toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Asia/Manila' }); const d = document.getElementById('bndDate'); if (d) d.textContent = n.toLocaleDateString('en-PH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'Asia/Manila' }); };
   bnd_stopClock(); tick(); BND.clockTimer = setInterval(tick, 1000);
   att_bioCheckSupport().then(ok => { const r = document.getElementById('bndBioRow'); if (r && ok) r.style.display = 'flex'; });
@@ -9500,9 +9502,9 @@ async function bnd_punch(type) {
 }
 function bnd_slipHtml(r, type) {
   const line = (a, b) => '<div class="sl-r"><span>' + a + '</span><b>' + b + '</b></div>';
-  const pun = (r.punches || []).map(p => line(p.type === 'IN' ? 'Time In' : 'Time Out', bnd_fmt12(p.time))).join('');
+  const pun = (r.punches || []).map((p, i) => line(bnd_lbl(r.punches, i), bnd_fmt12(p.time))).join('');
   return '<div class="slip"><div class="sl-c sl-t">AE HOME</div><div class="sl-c">Daily Time Record Slip</div><hr>' +
-    '<div class="sl-c sl-big">' + (type === 'IN' ? 'TIME IN' : 'TIME OUT') + '</div><div class="sl-c sl-big2">' + bnd_fmt12(r.time) + '</div><div class="sl-c">' + bnd_dateLong(r.date) + '</div><hr>' +
+    '<div class="sl-c sl-big">' + ((r.punches && r.punches.length) ? bnd_lbl(r.punches, r.punches.length - 1).toUpperCase() : (type === 'IN' ? 'TIME IN' : 'TIME OUT')) + '</div><div class="sl-c sl-big2">' + bnd_fmt12(r.time) + '</div><div class="sl-c">' + bnd_dateLong(r.date) + '</div><hr>' +
     line('Name', esc(r.name)) + line('Employee ID', esc(r.employeeId)) + line('Branch', esc(att_branchName(r.branch))) +
     (r.lateMin ? line('Late', att_fmtMin(r.lateMin)) : '') + (r.underMin ? line('Undertime', att_fmtMin(r.underMin)) : '') + (type === 'OUT' && r.workedMin ? line('Worked (last)', att_fmtMin(r.workedMin)) : '') +
     ((r.punches || []).length ? '<hr><div class="sl-c" style="font-weight:700">Today\'s punches</div>' + pun : '') +
@@ -9526,27 +9528,34 @@ function bnd_print(html, kind) {
 const BND_DTR_CSS = '.dtr{color:#000;font-size:13px}.dtr h2{margin:0;text-align:center}.dtr .sub{text-align:center;margin-bottom:10px}.dtr table{width:100%;border-collapse:collapse;margin-top:8px}.dtr th,.dtr td{border:1px solid #444;padding:4px 6px;text-align:left;font-size:12px}.dtr th{background:#eee}.dtr .sig{display:flex;gap:30px;margin-top:34px}.dtr .sig div{flex:1;border-top:1px solid #000;text-align:center;padding-top:3px;font-size:12px}';
 function bnd_dtrHtml(r) {
   const s = r.staff, t = r.totals, mon = new Date(r.month + '-01T00:00:00').toLocaleDateString('en-PH', { month: 'long', year: 'numeric' });
-  const rows = r.days.map(d => {
-    const ins = d.punches.filter(p => p.type === 'IN'), outs = d.punches.filter(p => p.type === 'OUT');
-    const ft = a => a.length ? a.map(p => bnd_fmt12(p.time)).join('<br>') : '-';
-    return '<tr><td>' + esc(d.date.substring(8)) + ' ' + esc(bnd_dateLong(d.date).split(',')[0]) + '</td><td>' + ft(ins) + '</td><td>' + (d.open ? '<i>missing</i>' : ft(outs)) + '</td><td>' + (d.lateMin ? att_fmtMin(d.lateMin) : '-') + '</td><td>' + (d.underMin ? att_fmtMin(d.underMin) : '-') + '</td><td>' + att_fmtMin(d.workedMin) + '</td><td>' + (d.manual ? 'Manual entry' : '') + '</td></tr>';
-  }).join('');
-  return '<div class="dtr"><h2>AE HOME</h2><div class="sub"><b>DAILY TIME RECORD</b><br>' + esc(mon) + '</div>' +
+  const per = r.half ? (r.half === '1' ? 'Cut-off: 1 - 15 ' : 'Cut-off: 16 - ' + r.to + ' ') + mon : mon;
+  const byDate = {}; r.days.forEach(d => { byDate[d.date] = d; });
+  const rows = [];
+  for (let n = r.from; n <= r.to; n++) {
+    const ds = r.month + '-' + String(n).padStart(2, '0'), d = byDate[ds], wd = new Date(ds + 'T00:00:00').toLocaleDateString('en-PH', { weekday: 'short' });
+    if (!d) { rows.push('<tr><td>' + n + ' ' + wd + '</td><td colspan="9" style="color:#888">' + (wd === 'Sun' ? 'Sunday' : '') + '</td></tr>'); continue; }
+    const P = d.punches, c = i => P[i] ? bnd_fmt12(P[i].time) : '-', ex = P.slice(4).map(p => (p.type === 'IN' ? 'In ' : 'Out ') + bnd_fmt12(p.time)).join(', ');
+    const lun = d.lunchMin ? att_fmtMin(d.lunchMin) + (d.lunchMin > 60 ? ' (over)' : '') : '-';
+    rows.push('<tr><td>' + n + ' ' + wd + '</td><td>' + c(0) + '</td><td>' + c(1) + '</td><td>' + c(2) + '</td><td>' + c(3) + '</td><td>' + (d.lateMin ? att_fmtMin(d.lateMin) : '-') + '</td><td>' + (d.underMin ? att_fmtMin(d.underMin) : '-') + '</td><td>' + lun + '</td><td>' + att_fmtMin(d.workedMin) + '</td><td>' + [d.open ? 'Missing Time Out' : '', d.manual ? 'Manual entry' : '', ex ? 'Extra: ' + esc(ex) : ''].filter(Boolean).join('; ') + '</td></tr>');
+  }
+  return '<div class="dtr"><h2>AE HOME</h2><div class="sub"><b>DAILY TIME RECORD</b><br>' + esc(per) + '</div>' +
     '<div><b>Name:</b> ' + esc(s.name) + ' &nbsp; <b>Employee ID:</b> ' + esc(s.employeeId) + '<br><b>Branch:</b> ' + esc(att_branchName(s.branch)) + ' &nbsp; <b>Shift:</b> ' + bnd_fmt12(s.shiftStart) + ' - ' + bnd_fmt12(s.shiftEnd) + '</div>' +
-    '<table><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Late</th><th>Under</th><th>Worked</th><th>Remarks</th></tr></thead><tbody>' + (rows || '<tr><td colspan="7" style="text-align:center">No records this month.</td></tr>') + '</tbody></table>' +
+    '<table><thead><tr><th>Date</th><th>AM In</th><th>AM Out</th><th>PM In</th><th>PM Out</th><th>Late</th><th>Under</th><th>Lunch</th><th>Worked</th><th>Remarks</th></tr></thead><tbody>' + rows.join('') + '</tbody></table>' +
     '<div style="margin-top:8px"><b>Days present:</b> ' + t.days + ' &nbsp; <b>Late:</b> ' + t.lateDays + ' day(s), ' + att_fmtMin(t.lateMin) + ' &nbsp; <b>Undertime:</b> ' + att_fmtMin(t.underMin) + ' &nbsp; <b>Total worked:</b> ' + att_fmtMin(t.workedMin) + (t.missingOut ? ' &nbsp; <b>Missing Time Out:</b> ' + t.missingOut : '') + '</div>' +
     '<div class="sig"><div>Employee signature</div><div>Verified by (Admin)</div></div></div>';
 }
 function bnd_monthBar(fn) {
   const m = BND.month, d = new Date(m + '-01T00:00:00'), shift = k => { const x = new Date(d.getFullYear(), d.getMonth() + k, 1); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0'); };
-  return '<div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:10px"><button class="btn btn-ghost btn-sm" onclick="BND.month=\'' + shift(-1) + '\';' + fn + '()">&lsaquo;</button><b>' + esc(d.toLocaleDateString('en-PH', { month: 'long', year: 'numeric' })) + '</b><button class="btn btn-ghost btn-sm" onclick="BND.month=\'' + shift(1) + '\';' + fn + '()">&rsaquo;</button></div>';
+  const hb = (h, l) => '<button class="btn btn-sm ' + (BND.half === h ? 'btn-primary' : 'btn-ghost') + '" onclick="BND.half=\'' + h + '\';' + fn + '()">' + l + '</button>';
+  return '<div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:8px"><button class="btn btn-ghost btn-sm" onclick="BND.month=\'' + shift(-1) + '\';' + fn + '()">&lsaquo;</button><b>' + esc(d.toLocaleDateString('en-PH', { month: 'long', year: 'numeric' })) + '</b><button class="btn btn-ghost btn-sm" onclick="BND.month=\'' + shift(1) + '\';' + fn + '()">&rsaquo;</button></div>' +
+    '<div style="display:flex;gap:6px;justify-content:center;margin-bottom:10px">' + hb('1', '1 - 15') + hb('2', '16 - end') + hb('', 'Whole month') + '</div>';
 }
 async function bnd_loadDtr() {
   const body = document.getElementById('bndBody'); if (!body) return;
   if (!BND.month) BND.month = new Date().toISOString().substring(0, 7);
   body.innerHTML = '<div class="card"><div style="opacity:.7">Loading DTR...</div>' + ih_barHtml() + '</div>';
   try {
-    const r = await gasRequest({ action: 'att_getMyDtr', month: BND.month }, 45000); if (currentPage !== 'attMy') return;
+    const r = await gasRequest({ action: 'att_getMyDtr', month: BND.month, half: BND.half }, 45000); if (currentPage !== 'attMy') return;
     if (!r || !r.success) { body.innerHTML = '<div class="card" style="color:#c62828">' + esc((r && r.message) || 'Could not load.') + '</div>'; return; }
     BND.dtr = r; body.innerHTML = bnd_monthBar('bnd_loadDtr') + '<div class="card" style="overflow-x:auto"><style>' + BND_DTR_CSS + '</style>' + bnd_dtrHtml(r) + '</div><div style="font-size:12px;opacity:.7;margin:6px 0">Read-only. If something is wrong, tell your Admin to correct it.</div><button class="btn btn-ghost" onclick="bnd_print(bnd_dtrHtml(BND.dtr),\'dtr\')">Print DTR</button>';
   } catch (e) { body.innerHTML = '<div class="card" style="color:#c62828">' + esc(e.message) + '</div>'; }
@@ -9558,9 +9567,39 @@ async function att_openDtr(staffId) {
 async function att_loadDtrAdmin() {
   showLoading('Loading DTR...');
   try {
-    const r = await gasRequest({ action: 'att_getDtr', staffId: BND.adminStaff, month: BND.month }, 45000); hideLoading();
+    const r = await gasRequest({ action: 'att_getDtr', staffId: BND.adminStaff, month: BND.month, half: BND.half }, 45000); hideLoading();
     if (!r || !r.success) { toast((r && r.message) || 'Could not load DTR.', 'error'); return; }
     BND.dtr = r;
     openModal('<style>' + BND_DTR_CSS + '</style>' + bnd_monthBar('att_loadDtrAdmin') + '<div style="overflow-x:auto;background:#fff;padding:8px;border:1px solid var(--border);border-radius:8px">' + bnd_dtrHtml(r) + '</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="bnd_print(bnd_dtrHtml(BND.dtr),\'dtr\')">Print DTR</button><button class="btn btn-primary" onclick="closeModalDirect()">Close</button></div>');
   } catch (e) { hideLoading(); toast(e.message, 'error'); }
 }
+
+// ═══════════ Login-page entry for Attendance (LOCKED: only shows on devices where the tester unlocked it) ═══════════
+// Unlock on your own phone/PC by opening the app link with ?attendance=1 once. Lock again with ?attendance=0.
+function att_betaOn() {
+  try {
+    const q = new URLSearchParams(location.search).get('attendance');
+    if (q === '1') localStorage.setItem('att_beta', '1'); else if (q === '0') localStorage.removeItem('att_beta');
+    return localStorage.getItem('att_beta') === '1';
+  } catch (e) { return false; }
+}
+function att_showLoginHint() {
+  const u = document.getElementById('loginUser'); if (!u) return;
+  let h = document.getElementById('attLoginHint');
+  if (!h) { h = document.createElement('div'); h.id = 'attLoginHint'; h.style.cssText = 'font-size:13px;text-align:center;margin:0 0 10px;padding:8px 10px;border-radius:10px;background:#eef6ff;color:#1e3a5f';
+    const f = document.querySelector('#loginScreen .login-card .login-form'); if (f) f.insertBefore(h, f.firstChild); }
+  h.textContent = 'Attendance staff: sign in with the username and password from your Admin. You will land on the Bundy Clock and your DTR.';
+  u.focus();
+}
+function att_injectLoginLink() {
+  try {
+    if (!att_betaOn()) return;
+    const form = document.querySelector('#loginScreen .login-card .login-form');
+    if (form && !document.getElementById('attLoginLink')) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.id = 'attLoginLink'; b.className = 'btn-link'; b.textContent = 'Attendance? Bundy Clock and DTR';
+      b.onclick = att_showLoginHint; form.appendChild(b);
+    }
+  } catch (e) {}
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', att_injectLoginLink); else att_injectLoginLink();
