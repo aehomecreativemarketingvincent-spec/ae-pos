@@ -64,6 +64,7 @@ const ROLE_NAV = {
     { id: 'inventoryAudit', icon: '', label: 'Inventory Audit' },
     { id: 'priceChecker',   icon: '', label: 'Price Checker' },
     { id: 'ihAdmin',        icon: '', label: 'In-House Installment' },
+    { id: 'attAdmin',       icon: '', label: 'Attendance' },
     { id: 'incentives',     icon: '', label: 'Incentives' },
   ],
   cashier: [
@@ -754,6 +755,7 @@ function navigateTo(page) {
     inventoryAudit: 'Inventory Audit',
     priceChecker:   'Price Checker',
     ihAdmin:        'In-House Installment',
+    attAdmin:       'Attendance',
     ihMy:           'Installment Application',
     incentives:     'Incentive Tracker'
   };
@@ -797,6 +799,7 @@ function renderPage(page) {
     inventoryAudit: audit_renderPage,
     priceChecker:   pcx_renderPage,
     ihAdmin:        ih_renderAdmin,
+    attAdmin:       att_renderAdmin,
     ihMy:           ih_renderMy,
     incentives:     inc_renderPage,
   };
@@ -820,7 +823,7 @@ function handleAuthError(res) {
 // ─── GAS REQUEST ─────────────────────────────
 // Read-only actions are safe to retry automatically when the server is busy / the network blips.
 // Writes (gasPost) are never auto-retried, to avoid saving twice.
-const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|pc_get|ih_get)/;   // not the session poller: it must never add load
+const GAS_READ_RE = /^(get|inc_get|inc_check|audit_get|pc_get|ih_get|att_get)/;   // not the session poller: it must never add load
 async function gasRequest(params, timeoutMs = 30000) {
   const canRetry = GAS_READ_RE.test(String((params && params.action) || ''));
   let lastErr;
@@ -9048,4 +9051,371 @@ function ih_signupBar(on) {
   let b = document.getElementById('ihSignupBar');
   if (on) { if (!b) { b = document.createElement('div'); b.id = 'ihSignupBar'; m.insertAdjacentElement('afterend', b); } b.innerHTML = ih_barHtml(); }
   else if (b) b.remove();
+}
+
+// ═══════════════════════════════════════════════════════════
+// ATTENDANCE (Admin only for now): staff roster, branch geofence + shifts, Time In/Out with selfie + GPS (+ optional device biometric)
+// ═══════════════════════════════════════════════════════════
+const ATT = { tab: 'today', staff: [], branches: [], today: null, logs: null, report: null, month: '', from: '', to: '', staffId: '', busy: false, stream: null, clk: null, photo: {} };
+function att_fmtMin(m) { m = Math.round(Number(m) || 0); if (m <= 0) return '0m'; const h = Math.floor(m / 60), r = m % 60; return (h ? h + 'h ' : '') + (r || !h ? r + 'm' : '').trim(); }
+function att_branchName(b) { const i = INC_BRANCHES.indexOf(b); return i >= 0 ? INC_BRANCHES_DISP[i] : (b || '-'); }
+function att_branchOpts(sel) { return INC_BRANCHES.map((b, i) => '<option value="' + esc(b) + '"' + (b === sel ? ' selected' : '') + '>' + esc(INC_BRANCHES_DISP[i]) + '</option>').join(''); }
+function att_chip(t, col) { return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;font-weight:700;color:#fff;background:' + (col || '#555') + ';margin:1px 3px 1px 0">' + esc(t) + '</span>'; }
+function att_flags(f) { return String(f || '').split(';').map(x => x.trim()).filter(Boolean).map(x => att_chip(x, x === 'Manual' ? '#6b7280' : '#c62828')).join(''); }
+function att_stopCam() { try { if (ATT.stream) ATT.stream.getTracks().forEach(t => t.stop()); } catch (e) {} ATT.stream = null; }
+(function () {   // switch the camera off whenever the clock window disappears (X button, outside click, etc.)
+  try {
+    new MutationObserver(() => { const ov = document.getElementById('modalOverlay'); if (ATT.stream && (!document.getElementById('attVideo') || (ov && ov.classList.contains('hidden')))) att_stopCam(); })
+      .observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+  } catch (e) {}
+})();
+function att_deviceId() {
+  try { let d = localStorage.getItem('att_dev'); if (!d) { d = 'D' + ih_rand(14); localStorage.setItem('att_dev', d); } return d; } catch (e) { return 'D-nostore'; }
+}
+
+async function att_renderAdmin() {
+  const pc = document.getElementById('pageContent');
+  if (!ih_isAdmin()) { pc.innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>'; return; }
+  att_stopCam();
+  pc.innerHTML = '<div id="attTabBar" class="tab-bar" style="margin-bottom:16px"></div><div id="attContent"><div class="card"><div style="opacity:.7">Loading attendance...</div>' + ih_barHtml() + '</div></div>';
+  await att_loadBase();
+  att_drawTab();
+}
+async function att_loadBase() {
+  try {
+    const [s, b] = await Promise.all([gasRequest({ action: 'att_getStaff' }, 45000), gasRequest({ action: 'att_getBranches' }, 45000)]);
+    if (s && s.success) ATT.staff = s.data || []; else toast((s && s.message) || 'Could not load staff.', 'error');
+    if (b && b.success) ATT.branches = b.data || [];
+  } catch (e) { toast('Could not load attendance: ' + e.message, 'error'); }
+}
+function att_setTab(t) { ATT.tab = t; att_drawTab(); }
+function att_drawTab() {
+  if (currentPage !== 'attAdmin') return;
+  const bar = document.getElementById('attTabBar'), el = document.getElementById('attContent'); if (!bar || !el) return;
+  const tabs = [['today', 'Today'], ['logs', 'Logs'], ['staff', 'Staff'], ['branches', 'Branches & Shifts'], ['report', 'Reports']];
+  bar.innerHTML = tabs.map(t => '<button class="tab-btn' + (ATT.tab === t[0] ? ' active' : '') + '" onclick="att_setTab(\'' + t[0] + '\')">' + t[1] + '</button>').join('');
+  if (ATT.tab === 'today') att_showToday();
+  else if (ATT.tab === 'logs') att_showLogs();
+  else if (ATT.tab === 'staff') el.innerHTML = att_htmlStaff();
+  else if (ATT.tab === 'branches') el.innerHTML = att_htmlBranches();
+  else if (ATT.tab === 'report') att_showReport();
+}
+function att_loading(msg) { const el = document.getElementById('attContent'); if (el) el.innerHTML = '<div class="card"><div style="opacity:.7">' + esc(msg || 'Loading...') + '</div>' + ih_barHtml() + '</div>'; }
+
+// ── Today ──
+async function att_showToday() {
+  att_loading('Loading today...');
+  try {
+    const r = await gasRequest({ action: 'att_getToday' }, 45000);
+    if (!r || !r.success) throw new Error((r && r.message) || 'Could not load.');
+    ATT.today = r;
+  } catch (e) { const el = document.getElementById('attContent'); if (el) el.innerHTML = '<div class="card">' + esc(e.message) + ' <button class="btn btn-ghost btn-sm" onclick="att_showToday()">Retry</button></div>'; return; }
+  if (ATT.tab !== 'today') return;
+  const d = ATT.today.data, nIn = d.filter(x => x.status === 'In').length, nOut = d.filter(x => x.status === 'Out').length, nNot = d.filter(x => x.status === 'Not in').length, nLate = d.filter(x => x.lateMin > 0).length, nFlag = d.filter(x => x.flagged > 0).length;
+  const card = (t, v, c) => '<div style="flex:1;min-width:110px;border:1px solid var(--border);border-radius:10px;padding:8px 12px;background:#fff"><div style="font-size:11px;opacity:.7">' + t + '</div><div style="font-size:20px;font-weight:800' + (c ? ';color:' + c : '') + '">' + v + '</div></div>';
+  const row = x => {
+    const st = x.status === 'In' ? '#2e7d32' : x.status === 'Out' ? '#1565c0' : '#6b7280';
+    return '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#fff"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center">' +
+      '<div><b>' + esc(x.name) + '</b> <span style="opacity:.65;font-size:12px">' + esc(x.employeeId) + ' &bull; ' + esc(att_branchName(x.branch)) + '</span></div><div>' + att_chip(x.status, st) + (x.lateMin > 0 ? att_chip('Late ' + att_fmtMin(x.lateMin), '#b45309') : '') + (x.flagged ? att_chip(x.flagged + ' flagged', '#c62828') : '') + (x.missingOut ? att_chip('Missing Time Out yesterday', '#c62828') : '') + '</div></div>' +
+      '<div style="font-size:13px;margin-top:4px;opacity:.85">Shift ' + (x.shiftStart ? esc(x.shiftStart) + ' - ' + esc(x.shiftEnd || '?') : 'not set') + ' &bull; In ' + (x.firstIn || '-') + ' &bull; Out ' + (x.lastOut || '-') + ' &bull; Worked ' + att_fmtMin(x.workedMin) + '</div>' +
+      '<div style="margin-top:8px"><button class="btn btn-primary btn-sm" onclick="att_openClock(\'' + esc(x.staffId) + '\',\'' + (x.status === 'In' ? 'OUT' : 'IN') + '\')">' + (x.status === 'In' ? 'Time Out' : 'Time In') + '</button></div></div>';
+  };
+  document.getElementById('attContent').innerHTML = '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><div class="card-title" style="margin:0">Attendance Today &bull; ' + ih_date(ATT.today.date) + '</div><button class="btn btn-ghost btn-sm" onclick="att_showToday()">Refresh</button></div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">' + card('Staff', d.length) + card('Timed In', nIn, '#2e7d32') + card('Timed Out', nOut, '#1565c0') + card('Not in yet', nNot) + card('Late', nLate, nLate ? '#b45309' : '') + card('Flagged', nFlag, nFlag ? '#c62828' : '') + '</div>' +
+    (d.length ? d.map(row).join('') : '<div style="opacity:.75">No staff yet. Open the Staff tab and press Add Staff.</div>') + '</div>';
+}
+
+// ── Logs ──
+async function att_showLogs() {
+  if (!ATT.from) { const t = ATT.today ? ATT.today.date : new Date().toISOString().slice(0, 10); ATT.to = t; const d = new Date(t + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 6); ATT.from = d.toISOString().slice(0, 10); }
+  att_loading('Loading logs...');
+  try {
+    const q = { action: 'att_getLogs', from: ATT.from, to: ATT.to }; if (ATT.staffId) q.staffId = ATT.staffId;
+    const r = await gasRequest(q, 60000);
+    if (!r || !r.success) throw new Error((r && r.message) || 'Could not load.');
+    ATT.logs = r;
+  } catch (e) { const el = document.getElementById('attContent'); if (el) el.innerHTML = '<div class="card">' + esc(e.message) + ' <button class="btn btn-ghost btn-sm" onclick="att_showLogs()">Retry</button></div>'; return; }
+  if (ATT.tab === 'logs') att_drawLogs();
+}
+function att_drawLogs() {
+  const r = ATT.logs, el = document.getElementById('attContent'); if (!r || !el) return;
+  const row = o => {
+    const map = (o.lat != null && o.lng != null) ? ' <a href="https://www.google.com/maps?q=' + encodeURIComponent(o.lat + ',' + o.lng) + '" target="_blank" rel="noopener noreferrer">Map</a>' : '';
+    return '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#fff' + (o.status === 'Voided' ? ';opacity:.5;text-decoration:line-through' : '') + '">' +
+      '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div><b>' + esc(o.name) + '</b> <span style="opacity:.65;font-size:12px">' + esc(o.employeeId) + ' &bull; ' + esc(att_branchName(o.branch)) + '</span></div><div>' + att_chip(o.type === 'IN' ? 'Time In' : 'Time Out', o.type === 'IN' ? '#2e7d32' : '#1565c0') + (o.source === 'Manual' ? att_chip('Manual', '#6b7280') : '') + (o.status === 'Voided' ? att_chip('Voided', '#6b7280') : '') + '</div></div>' +
+      '<div style="font-size:13px;margin-top:4px">' + ih_date(o.date) + ' ' + esc(String(o.time).substring(0, 5)) + (o.lateMin ? ' &bull; Late ' + att_fmtMin(o.lateMin) : '') + (o.type === 'OUT' ? ' &bull; Worked ' + att_fmtMin(o.workedMin) + (o.underMin ? ' &bull; Undertime ' + att_fmtMin(o.underMin) : '') : '') +
+      (o.distance != null ? ' &bull; ' + o.distance + ' m from branch' : '') + (o.accuracy != null ? ' &bull; GPS &plusmn;' + o.accuracy + ' m' : '') + (o.authMethod === 'biometric' ? ' &bull; Biometric verified' : '') + map + '</div>' +
+      (o.flags ? '<div style="margin-top:4px">' + att_flags(o.flags) + '</div>' : '') + (o.note ? '<div style="font-size:12px;opacity:.8;margin-top:3px">Note: ' + esc(o.note) + '</div>' : '') + (o.voidReason ? '<div style="font-size:12px;margin-top:3px">Void reason: ' + esc(o.voidReason) + '</div>' : '') +
+      '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">' + (o.hasPhoto ? '<button class="btn btn-ghost btn-sm" onclick="att_viewPhoto(\'' + esc(o.id) + '\')">View Selfie</button>' : '') + (o.status !== 'Voided' ? '<button class="btn btn-danger btn-sm" onclick="att_openVoid(\'' + esc(o.id) + '\')">Void</button>' : '') + '</div></div>';
+  };
+  el.innerHTML = '<div class="card"><div class="card-title">Attendance Logs</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:flex-end">' +
+    '<div style="flex:1;min-width:130px"><label style="font-size:12px">From</label><input type="date" id="attFrom" value="' + esc(ATT.from) + '" style="' + IH_INP + '"></div>' +
+    '<div style="flex:1;min-width:130px"><label style="font-size:12px">To</label><input type="date" id="attTo" value="' + esc(ATT.to) + '" style="' + IH_INP + '"></div>' +
+    '<div style="flex:2;min-width:160px"><label style="font-size:12px">Staff</label><select id="attStaffSel" style="' + IH_INP + '"><option value="">All staff</option>' + ATT.staff.map(s => '<option value="' + esc(s.id) + '"' + (s.id === ATT.staffId ? ' selected' : '') + '>' + esc(s.name) + ' (' + esc(s.employeeId) + ')</option>').join('') + '</select></div>' +
+    '<button class="btn btn-primary btn-sm" onclick="att_applyLogFilter()">Show</button><button class="btn btn-ghost btn-sm" onclick="att_openManual()">Add Missed Entry</button></div>' +
+    '<div style="font-size:12px;opacity:.7;margin-bottom:8px">' + r.total + ' entr' + (r.total === 1 ? 'y' : 'ies') + (r.total > r.data.length ? ' (showing the latest ' + r.data.length + ')' : '') + '</div>' +
+    (r.data.length ? r.data.map(row).join('') : '<div style="opacity:.75">No entries for this range.</div>') + '</div>';
+}
+function att_applyLogFilter() {
+  const f = (document.getElementById('attFrom') || {}).value, t = (document.getElementById('attTo') || {}).value;
+  if (!f || !t || f > t) { toast('Choose a valid date range.', 'error'); return; }
+  ATT.from = f; ATT.to = t; ATT.staffId = (document.getElementById('attStaffSel') || {}).value || ''; att_showLogs();
+}
+async function att_viewPhoto(id) {
+  openModal('<div class="modal-title">Selfie</div><div id="attPhotoBox" style="text-align:center;min-height:80px">Loading photo...</div><div style="text-align:right;margin-top:10px"><button class="btn btn-ghost btn-sm" onclick="closeModalDirect()">Close</button></div>');
+  try {
+    let data = ATT.photo[id];
+    if (!data) { const r = await gasRequest({ action: 'att_getPhoto', id }, 60000); if (!r || !r.success) throw new Error((r && r.message) || 'Could not load the photo.'); data = r.data; const ks = Object.keys(ATT.photo); if (ks.length >= 8) delete ATT.photo[ks[0]]; ATT.photo[id] = data; }
+    const box = document.getElementById('attPhotoBox'); if (box) { box.innerHTML = ''; const im = document.createElement('img'); im.src = data; im.style.cssText = 'max-width:100%;max-height:70vh;border-radius:8px'; box.appendChild(im); }
+  } catch (e) { const box = document.getElementById('attPhotoBox'); if (box) box.textContent = e.message; }
+}
+function att_openVoid(id) {
+  openModal('<div class="modal-title">Void this entry?</div><div style="font-size:13px;margin-bottom:8px">The entry stays in the sheet but is no longer counted. This is recorded in the audit log.</div><div class="field"><label>Reason (required)</label><input id="attVoidReason" type="text" maxlength="200" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-danger" id="attVoidBtn" onclick="att_doVoid(\'' + esc(id) + '\')">Void</button></div>');
+}
+async function att_doVoid(id) {
+  const reason = ((document.getElementById('attVoidReason') || {}).value || '').trim(); if (!reason) { toast('Enter the reason.', 'error'); return; }
+  if (ATT.busy) return; ATT.busy = true; const b = document.getElementById('attVoidBtn'); if (b) b.disabled = true; showLoading('Voiding entry...');
+  try { const r = await gasPost({ action: 'att_void', id, reason }, 45000); if (r && r.success) { closeModalDirect(); toast('Entry voided.', 'success'); att_drawTab(); } else { toast((r && r.message) || 'Could not void.', 'error'); if (b) b.disabled = false; } }
+  catch (e) { toast('Network error: ' + e.message, 'error'); if (b) b.disabled = false; } finally { ATT.busy = false; hideLoading(); }
+}
+function att_openManual() {
+  const t = ATT.today ? ATT.today.date : new Date().toISOString().slice(0, 10);
+  openModal('<div class="modal-title">Add Missed Entry</div><div style="font-size:13px;margin-bottom:8px">Use this when someone forgot to time in or out. It is marked Manual and has no selfie.</div>' +
+    '<div class="field"><label>Staff</label><select id="attMStaff" style="' + IH_INP + '">' + ATT.staff.map(s => '<option value="' + esc(s.id) + '">' + esc(s.name) + ' (' + esc(s.employeeId) + ')</option>').join('') + '</select></div>' +
+    '<div class="field"><label>Type</label><select id="attMType" style="' + IH_INP + '"><option value="IN">Time In</option><option value="OUT">Time Out</option></select></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Date</label><input id="attMDate" type="date" value="' + esc(t) + '" max="' + esc(t) + '" style="' + IH_INP + '"></div><div class="field" style="flex:1"><label>Time</label><input id="attMTime" type="time" style="' + IH_INP + '"></div></div>' +
+    '<div class="field"><label>Reason (required)</label><input id="attMReason" type="text" maxlength="200" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="attMBtn" onclick="att_saveManual()">Save</button></div>');
+}
+async function att_saveManual() {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim();
+  const p = { action: 'att_addManual', staffId: v('attMStaff'), type: v('attMType'), date: v('attMDate'), time: v('attMTime'), reason: v('attMReason') };
+  if (!p.staffId) { toast('Select the staff.', 'error'); return; } if (!p.date || !p.time) { toast('Enter the date and time.', 'error'); return; } if (!p.reason) { toast('Enter the reason.', 'error'); return; }
+  if (ATT.busy) return; ATT.busy = true; const b = document.getElementById('attMBtn'); if (b) b.disabled = true; showLoading('Saving entry...');
+  try { const r = await gasPost(p, 45000); if (r && r.success) { closeModalDirect(); toast('Entry added.', 'success'); att_drawTab(); } else { toast((r && r.message) || 'Could not save.', 'error', 6000); if (b) b.disabled = false; } }
+  catch (e) { toast('Network error. Check the logs before trying again.', 'error', 6000); if (b) b.disabled = false; } finally { ATT.busy = false; hideLoading(); }
+}
+
+// ── Staff ──
+function att_htmlStaff() {
+  const row = s => '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#fff' + (s.active ? '' : ';opacity:.55') + '"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div><b>' + esc(s.name) + '</b> <span style="opacity:.65;font-size:12px">' + esc(s.employeeId) + '</span></div><div>' + att_chip(s.active ? 'Active' : 'Disabled', s.active ? '#2e7d32' : '#6b7280') + '</div></div>' +
+    '<div style="font-size:13px;opacity:.85;margin-top:3px">' + esc(att_branchName(s.branch)) + (s.position ? ' &bull; ' + esc(s.position) : '') + ' &bull; Shift ' + (s.shiftStart ? esc(s.shiftStart) + ' - ' + esc(s.shiftEnd || '?') : 'follows branch') + '</div>' +
+    '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="att_openStaff(\'' + esc(s.id) + '\')">Edit</button></div></div>';
+  return '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><div class="card-title" style="margin:0">Attendance Staff</div><button class="btn btn-primary btn-sm" onclick="att_openStaff(\'\')">Add Staff</button></div>' +
+    (ATT.staff.length ? ATT.staff.map(row).join('') : '<div style="opacity:.75">No staff yet. Press Add Staff.</div>') + '</div>';
+}
+function att_openStaff(id) {
+  const s = id ? ATT.staff.find(x => x.id === id) : null, v = k => s ? esc(s[k] || '') : '';
+  openModal('<div class="modal-title">' + (s ? 'Edit' : 'Add') + ' Staff</div>' +
+    '<div class="field"><label>Employee ID</label><input id="attSEid" type="text" maxlength="20" value="' + v('employeeId') + '" style="' + IH_INP + ';text-transform:uppercase"></div>' +
+    '<div class="field"><label>Full name</label><input id="attSName" type="text" maxlength="80" value="' + v('name') + '" style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>Branch</label><select id="attSBranch" style="' + IH_INP + '">' + att_branchOpts(s ? s.branch : '') + '</select></div>' +
+    '<div class="field"><label>Position (optional)</label><input id="attSPos" type="text" maxlength="60" value="' + v('position') + '" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Shift start (optional)</label><input id="attSStart" type="time" value="' + v('shiftStart') + '" style="' + IH_INP + '"></div><div class="field" style="flex:1"><label>Shift end (optional)</label><input id="attSEnd" type="time" value="' + v('shiftEnd') + '" style="' + IH_INP + '"></div></div>' +
+    '<div style="font-size:12px;opacity:.7;margin-bottom:8px">Leave the shift empty to follow the branch shift.</div>' +
+    '<label style="display:flex;gap:6px;align-items:center;font-size:13px;margin-bottom:8px"><input type="checkbox" id="attSActive"' + (!s || s.active ? ' checked' : '') + '> Active</label>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="attSBtn" onclick="att_saveStaff(\'' + esc(id || '') + '\')">Save</button></div>');
+}
+async function att_saveStaff(id) {
+  const v = k => ((document.getElementById(k) || {}).value || '').trim();
+  const p = { action: 'att_saveStaff', id: id || '', employeeId: v('attSEid').toUpperCase(), name: v('attSName'), branch: v('attSBranch'), position: v('attSPos'), shiftStart: v('attSStart'), shiftEnd: v('attSEnd'), active: !!(document.getElementById('attSActive') || {}).checked };
+  if (!p.name) { toast('Enter the full name.', 'error'); return; } if (!/^[A-Z0-9\-]{3,20}$/.test(p.employeeId)) { toast('Employee ID: 3-20 letters, numbers or dashes.', 'error'); return; }
+  if ((p.shiftStart && !p.shiftEnd) || (!p.shiftStart && p.shiftEnd)) { toast('Enter both shift start and end, or leave both empty.', 'error'); return; }
+  if (ATT.busy) return; ATT.busy = true; const b = document.getElementById('attSBtn'); if (b) b.disabled = true; showLoading('Saving staff...');
+  try { const r = await gasPost(p, 45000); if (r && r.success) { closeModalDirect(); toast('Staff saved.', 'success'); await att_loadBase(); att_drawTab(); } else { toast((r && r.message) || 'Could not save.', 'error', 6000); if (b) b.disabled = false; } }
+  catch (e) { toast('Network error. Check the list before trying again.', 'error', 6000); if (b) b.disabled = false; } finally { ATT.busy = false; hideLoading(); }
+}
+
+// ── Branches & shifts ──
+function att_htmlBranches() {
+  const row = (b, i) => {
+    const c = ATT.branches.find(x => x.branch === b);
+    return '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#fff"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b>' + esc(INC_BRANCHES_DISP[i]) + '</b><div>' + (c && c.lat != null ? att_chip('Location set', '#2e7d32') : att_chip('No location', '#b45309')) + '</div></div>' +
+      '<div style="font-size:13px;opacity:.85;margin-top:3px">' + (c && c.lat != null ? 'Radius ' + c.radius + ' m' : 'Not set: entries will be flagged') + ' &bull; Shift ' + (c && c.shiftStart ? esc(c.shiftStart) + ' - ' + esc(c.shiftEnd || '?') + ' (grace ' + c.grace + ' min)' : 'not set') + '</div>' +
+      '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="att_openBranch(\'' + esc(b) + '\')">Edit</button></div></div>';
+  };
+  return '<div class="card"><div class="card-title">Branch Location and Shift</div><div style="font-size:12px;opacity:.75;margin-bottom:10px">Set where each branch is so we can flag entries made outside it, and the shift hours used to compute late and undertime.</div>' + INC_BRANCHES.map(row).join('') + '</div>';
+}
+function att_openBranch(b) {
+  const c = ATT.branches.find(x => x.branch === b) || {}, v = k => (c[k] == null ? '' : esc(c[k]));
+  openModal('<div class="modal-title">' + esc(att_branchName(b)) + '</div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Latitude</label><input id="attBLat" type="text" inputmode="decimal" value="' + v('lat') + '" style="' + IH_INP + '"></div><div class="field" style="flex:1"><label>Longitude</label><input id="attBLng" type="text" inputmode="decimal" value="' + v('lng') + '" style="' + IH_INP + '"></div></div>' +
+    '<button type="button" class="btn btn-ghost btn-sm" onclick="att_useMyLocation()" style="margin-bottom:8px">Use my current location (stand inside the branch)</button><div id="attBGps" style="font-size:12px;margin-bottom:8px"></div>' +
+    '<div class="field"><label>Allowed radius (meters)</label><input id="attBRad" type="number" min="10" max="5000" value="' + (c.radius || 100) + '" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Shift start</label><input id="attBStart" type="time" value="' + v('shiftStart') + '" style="' + IH_INP + '"></div><div class="field" style="flex:1"><label>Shift end</label><input id="attBEnd" type="time" value="' + v('shiftEnd') + '" style="' + IH_INP + '"></div></div>' +
+    '<div class="field"><label>Grace period (minutes)</label><input id="attBGrace" type="number" min="0" max="120" value="' + (c.grace != null ? c.grace : 10) + '" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="attBBtn" onclick="att_saveBranch(\'' + esc(b) + '\')">Save</button></div>');
+}
+function att_useMyLocation() {
+  const msg = document.getElementById('attBGps'); if (!navigator.geolocation) { if (msg) msg.textContent = 'Location is not available on this device.'; return; }
+  if (msg) msg.textContent = 'Getting location...';
+  navigator.geolocation.getCurrentPosition(p => {
+    const a = document.getElementById('attBLat'), o = document.getElementById('attBLng'); if (a) a.value = p.coords.latitude.toFixed(6); if (o) o.value = p.coords.longitude.toFixed(6);
+    if (msg) msg.textContent = 'Location filled in (accuracy about ' + Math.round(p.coords.accuracy) + ' m).';
+  }, e => { if (msg) msg.textContent = 'Could not get the location: ' + (e && e.message ? e.message : 'permission denied') + '.'; }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+}
+async function att_saveBranch(b) {
+  const v = k => ((document.getElementById(k) || {}).value || '').trim();
+  const p = { action: 'att_saveBranch', branch: b, lat: v('attBLat'), lng: v('attBLng'), radius: v('attBRad'), shiftStart: v('attBStart'), shiftEnd: v('attBEnd'), grace: v('attBGrace') };
+  if ((p.lat === '') !== (p.lng === '')) { toast('Enter both latitude and longitude, or leave both empty.', 'error'); return; }
+  if ((p.shiftStart && !p.shiftEnd) || (!p.shiftStart && p.shiftEnd)) { toast('Enter both shift start and end, or leave both empty.', 'error'); return; }
+  if (ATT.busy) return; ATT.busy = true; const bt = document.getElementById('attBBtn'); if (bt) bt.disabled = true; showLoading('Saving branch...');
+  try { const r = await gasPost(p, 45000); if (r && r.success) { closeModalDirect(); toast('Branch saved.', 'success'); await att_loadBase(); att_drawTab(); } else { toast((r && r.message) || 'Could not save.', 'error', 6000); if (bt) bt.disabled = false; } }
+  catch (e) { toast('Network error: ' + e.message, 'error'); if (bt) bt.disabled = false; } finally { ATT.busy = false; hideLoading(); }
+}
+
+// ── Reports ──
+async function att_showReport() {
+  if (!ATT.month) ATT.month = ((ATT.today && ATT.today.date) || new Date().toISOString().slice(0, 10)).slice(0, 7);
+  att_loading('Loading report...');
+  try { const r = await gasRequest({ action: 'att_getReport', month: ATT.month }, 60000); if (!r || !r.success) throw new Error((r && r.message) || 'Could not load.'); ATT.report = r; }
+  catch (e) { const el = document.getElementById('attContent'); if (el) el.innerHTML = '<div class="card">' + esc(e.message) + ' <button class="btn btn-ghost btn-sm" onclick="att_showReport()">Retry</button></div>'; return; }
+  if (ATT.tab !== 'report') return;
+  const d = ATT.report.data, td = 'padding:6px;border-top:1px solid rgba(128,128,128,.2)';
+  document.getElementById('attContent').innerHTML = '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><div class="card-title" style="margin:0">Monthly Attendance Report</div><div style="display:flex;gap:8px;align-items:center"><input type="month" value="' + esc(ATT.month) + '" onchange="att_setMonth(this.value)" style="' + IH_INP + ';width:auto"><button class="btn btn-ghost btn-sm" onclick="att_exportReport()">Export CSV</button></div></div>' +
+    (d.length ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="opacity:.7;text-align:left"><td style="padding:6px">Staff</td><td style="padding:6px;text-align:right">Days</td><td style="padding:6px;text-align:right">Late days</td><td style="padding:6px;text-align:right">Late</td><td style="padding:6px;text-align:right">Undertime</td><td style="padding:6px;text-align:right">Hours</td><td style="padding:6px;text-align:right">Flagged</td><td style="padding:6px;text-align:right">No Time Out</td></tr>' +
+      d.map(x => '<tr><td style="' + td + '">' + esc(x.name) + '<div style="font-size:11px;opacity:.65">' + esc(x.employeeId) + ' &bull; ' + esc(att_branchName(x.branch)) + '</div></td><td style="' + td + ';text-align:right">' + x.daysPresent + '</td><td style="' + td + ';text-align:right">' + x.lateDays + '</td><td style="' + td + ';text-align:right">' + att_fmtMin(x.lateMin) + '</td><td style="' + td + ';text-align:right">' + att_fmtMin(x.underMin) + '</td><td style="' + td + ';text-align:right">' + (x.workedMin / 60).toFixed(1) + '</td><td style="' + td + ';text-align:right">' + x.flagged + '</td><td style="' + td + ';text-align:right">' + x.missingOut + '</td></tr>').join('') + '</table></div>' : '<div style="opacity:.75">No staff yet.</div>') +
+    '<div style="font-size:12px;opacity:.7;margin-top:8px">Late counts the first Time In of each day. Undertime counts the last Time Out of each day. Hours are the total of all In/Out pairs. Voided entries are not counted.</div></div>';
+}
+function att_setMonth(m) { if (/^\d{4}-\d{2}$/.test(m)) { ATT.month = m; att_showReport(); } }
+function att_csv(v) { let t = String(v == null ? '' : v); if (/^[=+\-@]/.test(t)) t = "'" + t; return '"' + t.replace(/"/g, '""') + '"'; }
+function att_exportReport() {
+  const r = ATT.report; if (!r) return;
+  const head = ['Employee ID', 'Name', 'Branch', 'Days present', 'Late days', 'Late minutes', 'Undertime minutes', 'Hours worked', 'Flagged entries', 'Days without Time Out'];
+  const rows = r.data.map(x => [x.employeeId, x.name, att_branchName(x.branch), x.daysPresent, x.lateDays, x.lateMin, x.underMin, (x.workedMin / 60).toFixed(2), x.flagged, x.missingOut]);
+  const csv = [head].concat(rows).map(a => a.map(att_csv).join(',')).join('\r\n');
+  try {
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), url = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = url; a.download = 'attendance-' + r.month + '.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch (e) { toast('Could not export: ' + e.message, 'error'); }
+}
+
+// ── Time In / Time Out window: optional biometric + GPS + selfie with watermark ──
+async function att_bioCheck() {
+  try {
+    if (!window.PublicKeyCredential || !window.isSecureContext || !PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) return 'unavailable';
+    if (!(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) return 'unavailable';
+    const rnd = n => { const a = new Uint8Array(n); crypto.getRandomValues(a); return a; };
+    let stored = null; try { stored = localStorage.getItem('att_cred'); } catch (e) {}
+    if (stored) {
+      const id = Uint8Array.from(atob(stored), c => c.charCodeAt(0));
+      await navigator.credentials.get({ publicKey: { challenge: rnd(32), allowCredentials: [{ id, type: 'public-key' }], userVerification: 'required', timeout: 60000 } });
+      return 'biometric';
+    }
+    const cred = await navigator.credentials.create({ publicKey: { challenge: rnd(32), rp: { name: 'AE Home POS' }, user: { id: rnd(16), name: 'attendance-device', displayName: 'Attendance device' },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }], authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' }, timeout: 60000 } });
+    try { localStorage.setItem('att_cred', btoa(String.fromCharCode.apply(null, new Uint8Array(cred.rawId)))); } catch (e) {}
+    return 'biometric';
+  } catch (e) { return 'failed'; }
+}
+function att_openClock(staffId, type) {
+  const s = ATT.staff.find(x => x.id === staffId); if (!s || ATT.busy) return;
+  att_stopCam();
+  ATT.clk = { staffId, type, name: s.name, eid: s.employeeId, auth: 'skipped', gps: null, gpsState: 'wait', camState: 'wait', ref: ih_rand(18), upload: null, done: false, busy: false };
+  openModal('<div class="modal-title">' + (type === 'IN' ? 'Time In' : 'Time Out') + ': ' + esc(s.name) + '</div>' +
+    '<div id="attClkBody"><div style="font-size:13px;margin-bottom:8px">Step 1 (optional): confirm with this phone\'s fingerprint or face unlock.</div>' +
+    '<div style="margin-bottom:10px"><button type="button" class="btn btn-ghost btn-sm" id="attBioBtn" onclick="att_doBio()">Use fingerprint / face unlock</button> <span id="attBioSt" style="font-size:12px;opacity:.8"></span></div>' +
+    '<div style="font-size:13px;margin-bottom:4px">Step 2: location <span id="attGpsSt" style="opacity:.8">Getting location...</span></div>' +
+    '<div style="font-size:13px;margin-bottom:6px">Step 3: take the selfie</div>' +
+    '<div id="attCamBox" style="position:relative;background:#111;border-radius:10px;overflow:hidden;min-height:160px;text-align:center"><video id="attVideo" playsinline autoplay muted style="width:100%;max-height:50vh;display:block"></video><div id="attCamMsg" style="color:#fff;font-size:12px;padding:8px;position:absolute;left:0;right:0;bottom:0;background:rgba(0,0,0,.45)">Starting camera...</div></div>' +
+    '<div id="attFallback" style="display:none;margin-top:6px"><input id="attFile" type="file" accept="image/*" capture="user" style="display:none" onchange="att_onFile(this)"><button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById(\'attFile\').click()">Take photo with the phone camera app</button></div>' +
+    '<div id="attClkProg" style="font-size:13px;margin:8px 0"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px"><button class="btn btn-ghost" id="attClkCancel" onclick="att_closeClock()">Cancel</button><button class="btn btn-primary" id="attClkGo" onclick="att_captureClock()" disabled>Take Selfie and Submit</button></div></div>');
+  const bio = document.getElementById('attBioBtn');
+  if (bio) att_bioCheckSupport().then(ok => { if (!ok) { bio.style.display = 'none'; const st = document.getElementById('attBioSt'); if (st) st.textContent = 'Fingerprint is not available on this device. Skipped.'; if (ATT.clk) ATT.clk.auth = 'unavailable'; } });
+  att_startGps(); att_startCam();
+}
+async function att_bioCheckSupport() { try { return !!(window.PublicKeyCredential && window.isSecureContext && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch (e) { return false; } }
+function att_closeClock() { att_stopCam(); closeModalDirect(); }
+async function att_doBio() {
+  const st = document.getElementById('attBioSt'), b = document.getElementById('attBioBtn'); if (!ATT.clk) return;
+  if (b) b.disabled = true; if (st) st.textContent = 'Waiting for fingerprint / face unlock...';
+  const res = await att_bioCheck(); if (!ATT.clk) return; ATT.clk.auth = res;
+  if (st) st.innerHTML = res === 'biometric' ? '<span style="color:#2e7d32;font-weight:700">Verified</span>' : res === 'unavailable' ? 'Not available on this device. Skipped.' : '<span style="color:#c62828">Not verified. You can try again or continue without it.</span>';
+  if (b && res !== 'biometric' && res !== 'unavailable') b.disabled = false;
+}
+function att_startGps() {
+  const st = () => document.getElementById('attGpsSt'), c = ATT.clk; if (!c) return;
+  if (!navigator.geolocation) { c.gpsState = 'fail'; if (st()) st().innerHTML = '<span style="color:#c62828">Location not available (will be flagged)</span>'; att_updateGo(); return; }
+  navigator.geolocation.getCurrentPosition(p => {
+    if (ATT.clk !== c) return; c.gps = { lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }; c.gpsState = 'ok';
+    if (st()) st().innerHTML = '<span style="color:#2e7d32;font-weight:700">Found</span> (accuracy about ' + Math.round(p.coords.accuracy) + ' m)'; att_updateGo();
+  }, e => {
+    if (ATT.clk !== c) return; c.gpsState = 'fail';
+    if (st()) st().innerHTML = '<span style="color:#c62828">Could not get location (' + esc(e && e.message ? e.message : 'denied') + '). It will be flagged.</span>'; att_updateGo();
+  }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+}
+async function att_startCam() {
+  const c = ATT.clk, msg = () => document.getElementById('attCamMsg'); if (!c) return;
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Camera preview is not supported here.');
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 960 } }, audio: false });
+    if (ATT.clk !== c || !document.getElementById('attVideo')) { stream.getTracks().forEach(t => t.stop()); return; }
+    ATT.stream = stream; const v = document.getElementById('attVideo'); v.srcObject = stream; try { await v.play(); } catch (e) {}
+    c.camState = 'ok'; if (msg()) msg().style.display = 'none'; att_updateGo();
+  } catch (e) {
+    if (ATT.clk !== c) return; c.camState = 'fail';
+    if (msg()) msg().textContent = 'Camera preview could not start (' + (e && e.message ? e.message : 'blocked') + '). Use the button below.';
+    const fb = document.getElementById('attFallback'); if (fb) fb.style.display = 'block'; att_updateGo();
+  }
+}
+function att_updateGo() { const c = ATT.clk, b = document.getElementById('attClkGo'); if (!c || !b) return; b.disabled = c.busy || c.done || c.gpsState === 'wait' || c.camState !== 'ok'; }
+function att_stamp(src, w, h) {
+  const sc = Math.min(1, 960 / Math.max(w, h)), W = Math.max(1, Math.round(w * sc)), H = Math.max(1, Math.round(h * sc));
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H; const x = cv.getContext('2d'); x.fillStyle = '#000'; x.fillRect(0, 0, W, H); x.drawImage(src, 0, 0, W, H);
+  const c = ATT.clk, g = c.gps, d = new Date();
+  const dateTxt = d.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: '2-digit' }), timeTxt = d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const lines = [c.name + ' (' + c.eid + ')  -  ' + (c.type === 'IN' ? 'TIME IN' : 'TIME OUT'), dateTxt + '  ' + timeTxt, g ? 'Lat ' + g.lat.toFixed(5) + '  Lng ' + g.lng.toFixed(5) + '  (+/-' + Math.round(g.accuracy) + ' m)' : 'Location not available'];
+  const fs = Math.max(12, Math.round(W / 34)), pad = Math.round(fs * 0.6), bh = pad * 2 + fs * 1.25 * lines.length;
+  x.fillStyle = 'rgba(0,0,0,0.6)'; x.fillRect(0, H - bh, W, bh); x.fillStyle = '#fff'; x.font = 'bold ' + fs + 'px sans-serif'; x.textBaseline = 'top';
+  lines.forEach((t, i) => x.fillText(t, pad, H - bh + pad + i * fs * 1.25, W - pad * 2));
+  return cv;
+}
+function att_onFile(input) {
+  const f = input.files && input.files[0]; input.value = ''; if (!f || !ATT.clk) return;
+  const img = new Image(), url = URL.createObjectURL(f);
+  img.onload = () => { URL.revokeObjectURL(url); att_submitCanvas(att_stamp(img, img.naturalWidth, img.naturalHeight)); };
+  img.onerror = () => { URL.revokeObjectURL(url); toast('Could not read the photo. Try again.', 'error'); };
+  img.src = url;
+}
+function att_captureClock() {
+  const c = ATT.clk, v = document.getElementById('attVideo'); if (!c || c.busy || c.done) return;
+  if (!v || !v.videoWidth) { toast('The camera is not ready yet.', 'error'); return; }
+  att_submitCanvas(att_stamp(v, v.videoWidth, v.videoHeight));
+}
+async function att_submitCanvas(cv) {
+  const c = ATT.clk; if (!c || c.busy || c.done) return;
+  c.busy = true; const go = document.getElementById('attClkGo'), cancel = document.getElementById('attClkCancel'), prog = document.getElementById('attClkProg');
+  if (go) { go.disabled = true; go.classList.add('ih-busy'); } if (cancel) cancel.disabled = true;
+  try {
+    if (!c.upload) {
+      ih_setProg(prog, 'Preparing selfie...', 5);
+      const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.85)); if (!blob) throw new Error('Could not process the photo.');
+      const b64 = await ih_compress(new File([blob], 'selfie.jpg', { type: 'image/jpeg' }));
+      const up = await ih_uploadProof(b64, (d, t) => ih_setProg(prog, 'Uploading selfie ' + d + ' of ' + t + '...', 10 + Math.round(80 * d / t)));
+      c.upload = up; att_stopCam();
+    }
+    ih_setProg(prog, 'Recording ' + (c.type === 'IN' ? 'Time In' : 'Time Out') + '...', 95);
+    const g = c.gps || {};
+    const res = await gasPost({ action: 'att_clock', staffId: c.staffId, type: c.type, lat: g.lat, lng: g.lng, accuracy: g.accuracy, auth: c.auth, deviceId: att_deviceId(), deviceTime: Date.now(), uploadId: c.upload.uploadId, chunks: c.upload.total, clientRef: c.ref }, 60000);
+    if (res && res.success) {
+      c.done = true; const fl = res.flags || [];
+      const body = document.getElementById('attClkBody');
+      if (body) body.innerHTML = '<div style="text-align:center;padding:10px 0"><div style="font-size:18px;font-weight:800;color:#2e7d32">' + (c.type === 'IN' ? 'Timed In' : 'Timed Out') + ' at ' + esc(res.time) + '</div><div style="font-size:13px;margin-top:4px">' + esc(c.name) + ' &bull; ' + ih_date(res.date) + '</div>' +
+        (res.lateMin ? '<div style="margin-top:6px">' + att_chip('Late ' + att_fmtMin(res.lateMin), '#b45309') + '</div>' : '') + (res.underMin ? '<div style="margin-top:6px">' + att_chip('Undertime ' + att_fmtMin(res.underMin), '#b45309') + '</div>' : '') +
+        (c.type === 'OUT' ? '<div style="margin-top:6px;font-size:13px">Worked ' + att_fmtMin(res.workedMin) + '</div>' : '') + (fl.length ? '<div style="margin-top:8px">' + fl.map(f => att_chip(f, '#c62828')).join('') + '</div><div style="font-size:12px;opacity:.75">Flagged entries are shown to the Admin in the Logs tab.</div>' : '') +
+        '</div><div style="text-align:right"><button class="btn btn-primary" onclick="closeModalDirect()">Done</button></div>';
+      toast('Recorded.', 'success'); if (ATT.tab === 'today') att_showToday();
+    } else {
+      if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc((res && res.message) || 'Could not record.') + '</span>';
+      c.busy = false; if (go) { go.classList.remove('ih-busy'); } if (cancel) cancel.disabled = false;
+      if (res && /Already timed in|no open Time In|disabled/.test(res.message || '')) { c.upload = null; if (ATT.tab === 'today') att_showToday(); }
+    }
+  } catch (e) {
+    if (prog) prog.innerHTML = '<span style="color:#c62828">' + esc(e.message) + ' Press the button to retry. It will not record twice.</span>';
+    c.busy = false; if (go) go.classList.remove('ih-busy'); if (cancel) cancel.disabled = false;
+    if (!ATT.stream && !c.upload) { c.camState = 'fail'; const fb = document.getElementById('attFallback'); if (fb) fb.style.display = 'block'; }
+  }
+  const b2 = document.getElementById('attClkGo'); if (b2) { if (c.done) b2.disabled = true; else { c.camState = c.upload ? 'ok' : c.camState; b2.disabled = false; } }
 }
