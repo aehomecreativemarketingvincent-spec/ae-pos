@@ -95,6 +95,9 @@ const ROLE_NAV = {
   employee: [
     { id: 'ihMy',       icon: '', label: 'Installment Application' },
   ],
+  attstaff: [
+    { id: 'attMy',      icon: '', label: 'Bundy Clock' },
+  ],
   viewer: [
     { id: 'dashboard', icon: '', label: 'Dashboard' },
     { id: 'receipts',  icon: '', label: 'Receipts' },
@@ -723,7 +726,7 @@ function initApp() {
   buildNav(role);
 
   // Default page
-  const defaultPages = { admin: 'dashboard', cashier: 'pos', clerk: 'inventory', viewer: 'dashboard', agent: 'incentives', verifier: 'incentives', employee: 'ihMy' };
+  const defaultPages = { admin: 'dashboard', cashier: 'pos', clerk: 'inventory', viewer: 'dashboard', agent: 'incentives', verifier: 'incentives', employee: 'ihMy', attstaff: 'attMy' };
   navigateTo(defaultPages[role] || 'dashboard');
 }
 
@@ -756,6 +759,7 @@ function navigateTo(page) {
     priceChecker:   'Price Checker',
     ihAdmin:        'In-House Installment',
     attAdmin:       'Attendance',
+    attMy:          'Bundy Clock',
     ihMy:           'Installment Application',
     incentives:     'Incentive Tracker'
   };
@@ -800,6 +804,7 @@ function renderPage(page) {
     priceChecker:   pcx_renderPage,
     ihAdmin:        ih_renderAdmin,
     attAdmin:       att_renderAdmin,
+    attMy:          att_renderMy,
     ihMy:           ih_renderMy,
     incentives:     inc_renderPage,
   };
@@ -3383,6 +3388,7 @@ function openEditCashierModal(id) {
             <option value="agent" ${c.role==='agent'?'selected':''}>Sales Agent (Incentives only)</option>
             <option value="verifier" ${c.role==='verifier'?'selected':''}>Incentive Verifier (Verify/Reject only)</option>
             <option value="employee" ${c.role==='employee'?'selected':''}>Employee (Installment only)</option>
+            <option value="attstaff" ${c.role==='attstaff'?'selected':''}>Attendance Staff (Bundy only)</option>
             <option value="admin" ${c.role==='admin'?'selected':''}>Admin</option>
           </select>
         </div>
@@ -9201,7 +9207,7 @@ async function att_saveManual() {
 function att_htmlStaff() {
   const row = s => '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;background:#fff' + (s.active ? '' : ';opacity:.55') + '"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div><b>' + esc(s.name) + '</b> <span style="opacity:.65;font-size:12px">' + esc(s.employeeId) + '</span></div><div>' + att_chip(s.active ? 'Active' : 'Disabled', s.active ? '#2e7d32' : '#6b7280') + '</div></div>' +
     '<div style="font-size:13px;opacity:.85;margin-top:3px">' + esc(att_branchName(s.branch)) + (s.position ? ' &bull; ' + esc(s.position) : '') + ' &bull; Shift ' + (s.shiftStart ? esc(s.shiftStart) + ' - ' + esc(s.shiftEnd || '?') : 'follows branch') + '</div>' +
-    '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="att_openStaff(\'' + esc(s.id) + '\')">Edit</button></div></div>';
+    '<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="att_openStaff(\'' + esc(s.id) + '\')">Edit</button> <button class="btn btn-ghost btn-sm" onclick="att_openDtr(\'' + esc(s.id) + '\')">DTR</button> ' + (s.hasLogin ? att_chip('Login: ' + esc(s.username), '#2e7d32') : att_chip('No login', '#b45309')) + '</div></div>';
   return '<div class="card"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><div class="card-title" style="margin:0">Attendance Staff</div><button class="btn btn-primary btn-sm" onclick="att_openStaff(\'\')">Add Staff</button></div>' +
     (ATT.staff.length ? ATT.staff.map(row).join('') : '<div style="opacity:.75">No staff yet. Press Add Staff.</div>') + '</div>';
 }
@@ -9214,12 +9220,16 @@ function att_openStaff(id) {
     '<div class="field"><label>Position (optional)</label><input id="attSPos" type="text" maxlength="60" value="' + v('position') + '" style="' + IH_INP + '"></div>' +
     '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Shift start (optional)</label><input id="attSStart" type="time" value="' + v('shiftStart') + '" style="' + IH_INP + '"></div><div class="field" style="flex:1"><label>Shift end (optional)</label><input id="attSEnd" type="time" value="' + v('shiftEnd') + '" style="' + IH_INP + '"></div></div>' +
     '<div style="font-size:12px;opacity:.7;margin-bottom:8px">Leave the shift empty to follow the branch shift.</div>' +
+    '<div style="border-top:1px solid var(--border);padding-top:8px;margin:6px 0"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Bundy login (staff uses own phone)</div>' +
+    '<div class="field"><label>Username' + (s && s.hasLogin ? ' (cannot change)' : '') + '</label><input id="attSUser" type="text" maxlength="30" autocomplete="off" value="' + v('username') + '"' + (s && s.hasLogin ? ' disabled' : '') + ' style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>Password' + (s && s.hasLogin ? ' (leave empty to keep)' : '') + '</label><input id="attSPw" type="text" maxlength="64" autocomplete="off" style="' + IH_INP + '"></div>' +
+    '<div class="field"><label>PIN, 4-6 digits' + (s && s.hasPin ? ' (leave empty to keep)' : '') + '</label><input id="attSPin" type="text" inputmode="numeric" maxlength="6" autocomplete="off" style="' + IH_INP + '"></div></div>' +
     '<label style="display:flex;gap:6px;align-items:center;font-size:13px;margin-bottom:8px"><input type="checkbox" id="attSActive"' + (!s || s.active ? ' checked' : '') + '> Active</label>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="attSBtn" onclick="att_saveStaff(\'' + esc(id || '') + '\')">Save</button></div>');
 }
 async function att_saveStaff(id) {
   const v = k => ((document.getElementById(k) || {}).value || '').trim();
-  const p = { action: 'att_saveStaff', id: id || '', employeeId: v('attSEid').toUpperCase(), name: v('attSName'), branch: v('attSBranch'), position: v('attSPos'), shiftStart: v('attSStart'), shiftEnd: v('attSEnd'), active: !!(document.getElementById('attSActive') || {}).checked };
+  const p = { action: 'att_saveStaff', id: id || '', employeeId: v('attSEid').toUpperCase(), name: v('attSName'), branch: v('attSBranch'), position: v('attSPos'), shiftStart: v('attSStart'), shiftEnd: v('attSEnd'), active: !!(document.getElementById('attSActive') || {}).checked, username: v('attSUser'), password: v('attSPw'), pin: v('attSPin') };
   if (!p.name) { toast('Enter the full name.', 'error'); return; } if (!/^[A-Z0-9\-]{3,20}$/.test(p.employeeId)) { toast('Employee ID: 3-20 letters, numbers or dashes.', 'error'); return; }
   if ((p.shiftStart && !p.shiftEnd) || (!p.shiftStart && p.shiftEnd)) { toast('Enter both shift start and end, or leave both empty.', 'error'); return; }
   if (ATT.busy) return; ATT.busy = true; const b = document.getElementById('attSBtn'); if (b) b.disabled = true; showLoading('Saving staff...');
@@ -9418,4 +9428,139 @@ async function att_submitCanvas(cv) {
     if (!ATT.stream && !c.upload) { c.camState = 'fail'; const fb = document.getElementById('attFallback'); if (fb) fb.style.display = 'block'; }
   }
   const b2 = document.getElementById('attClkGo'); if (b2) { if (c.done) b2.disabled = true; else { c.camState = c.upload ? 'ok' : c.camState; b2.disabled = false; } }
+}
+
+// ═══════════════════ BUNDY CLOCK / DTR (staff own phone, PIN, no selfie) ═══════════════════
+const BND = { st: null, month: '', busy: false, ref: null, clockTimer: null };
+function bnd_fmt12(hhmm) { const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || '')); if (!m) return esc(hhmm || ''); let h = +m[1]; const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12; return h + ':' + m[2] + ' ' + ap; }
+function bnd_dateLong(d) { const t = new Date(String(d) + 'T00:00:00'); return isNaN(t) ? esc(d) : t.toLocaleDateString('en-PH', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' }); }
+function bnd_stopClock() { if (BND.clockTimer) { clearInterval(BND.clockTimer); BND.clockTimer = null; } }
+async function att_renderMy() {
+  const pc = document.getElementById('pageContent'); bnd_stopClock();
+  if (!currentUser || currentUser.role !== 'attstaff') { pc.innerHTML = '<div class="card"><div class="card-title">Access denied</div></div>'; return; }
+  pc.innerHTML = '<div id="bndTabBar" class="tab-bar" style="margin-bottom:16px"><button class="tab-btn active" id="bndT1" onclick="bnd_tab(1)">Bundy Clock</button><button class="tab-btn" id="bndT2" onclick="bnd_tab(2)">My DTR</button></div><div id="bndBody"><div class="card"><div style="opacity:.7">Loading...</div>' + ih_barHtml() + '</div></div>';
+  bnd_tab(1);
+}
+function bnd_tab(n) {
+  const a = document.getElementById('bndT1'), b = document.getElementById('bndT2'); if (!a || !b) return;
+  a.classList.toggle('active', n === 1); b.classList.toggle('active', n === 2);
+  if (n === 1) bnd_loadStatus(); else { bnd_stopClock(); BND.month = BND.month || (BND.st && BND.st.date ? BND.st.date.substring(0, 7) : ''); bnd_loadDtr(); }
+}
+async function bnd_loadStatus() {
+  const body = document.getElementById('bndBody'); if (!body) return;
+  try {
+    const r = await gasRequest({ action: 'att_getMyStatus' }, 45000);
+    if (currentPage !== 'attMy') return;
+    if (!r || !r.success) { body.innerHTML = '<div class="card"><div style="color:#c62828">' + esc((r && r.message) || 'Could not load.') + '</div></div>'; return; }
+    BND.st = r; bnd_drawClock();
+  } catch (e) { if (body) body.innerHTML = '<div class="card"><div style="color:#c62828">' + esc(e.message) + '</div><button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="bnd_loadStatus()">Retry</button></div>'; }
+}
+function bnd_drawClock() {
+  const body = document.getElementById('bndBody'), s = BND.st; if (!body || !s) return;
+  const stCol = s.status === 'In' ? '#2e7d32' : (s.status === 'Out' ? '#6b7280' : '#b45309');
+  const canIn = s.active && s.status !== 'In', canOut = s.active && s.status === 'In';
+  body.innerHTML = '<div class="card" style="text-align:center">' +
+    '<div style="font-weight:700">' + esc(s.staff.name) + '</div><div style="font-size:12px;opacity:.7">' + esc(s.staff.employeeId) + ' &bull; ' + esc(att_branchName(s.staff.branch)) + ' &bull; Shift ' + bnd_fmt12(s.staff.shiftStart) + ' - ' + bnd_fmt12(s.staff.shiftEnd) + '</div>' +
+    '<div id="bndClock" style="font-size:44px;font-weight:800;letter-spacing:1px;margin:14px 0 2px;font-variant-numeric:tabular-nums">--:--:--</div><div id="bndDate" style="font-size:13px;opacity:.7"></div>' +
+    '<div style="margin:12px 0">' + att_chip('Status: ' + (s.status === 'Not in' ? 'Not in yet' : s.status === 'In' ? 'Timed in' : 'Timed out'), stCol) + (s.lateMin ? ' ' + att_chip('Late ' + att_fmtMin(s.lateMin), '#b45309') : '') + '</div>' +
+    (s.active ? '<div style="max-width:260px;margin:0 auto"><input id="bndPin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="Your PIN" style="' + IH_INP + ';text-align:center;font-size:20px;letter-spacing:6px">' +
+      '<label id="bndBioRow" style="display:none;gap:6px;align-items:center;justify-content:center;font-size:12px;margin-top:8px"><input type="checkbox" id="bndBio"> Also use fingerprint / face</label>' +
+      '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn btn-primary" style="flex:1;padding:14px 0;font-size:16px;justify-content:center;text-align:center" id="bndIn"' + (canIn ? '' : ' disabled') + ' onclick="bnd_punch(\'IN\')">Time In</button><button class="btn btn-ghost" style="flex:1;padding:14px 0;font-size:16px;justify-content:center;text-align:center;border:1px solid var(--border)" id="bndOut"' + (canOut ? '' : ' disabled') + ' onclick="bnd_punch(\'OUT\')">Time Out</button></div>' +
+      '<div id="bndMsg" style="font-size:12px;margin-top:8px;min-height:16px"></div></div>' : '<div style="color:#c62828">Your attendance is disabled. Please ask your Admin.</div>') +
+    '</div>' +
+    '<div class="card"><div class="card-title">Today</div>' + (s.punches.length ? s.punches.map(p => '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--border)"><span>' + (p.type === 'IN' ? 'Time In' : 'Time Out') + '</span><b>' + bnd_fmt12(p.time) + '</b></div>').join('') + (s.workedMin ? '<div style="margin-top:8px;font-size:13px">Worked so far: <b>' + att_fmtMin(s.workedMin) + '</b></div>' : '') : '<div style="opacity:.7">No punches yet today.</div>') + '</div>';
+  const tick = () => { const c = document.getElementById('bndClock'); if (!c) { bnd_stopClock(); return; } const n = new Date(); c.textContent = n.toLocaleTimeString('en-GB', { hour12: false, timeZone: 'Asia/Manila' }); const d = document.getElementById('bndDate'); if (d) d.textContent = n.toLocaleDateString('en-PH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'Asia/Manila' }); };
+  bnd_stopClock(); tick(); BND.clockTimer = setInterval(tick, 1000);
+  att_bioCheckSupport().then(ok => { const r = document.getElementById('bndBioRow'); if (r && ok) r.style.display = 'flex'; });
+}
+function bnd_gps() {
+  return new Promise(res => {
+    if (!navigator.geolocation) return res(null);
+    let done = false; const t = setTimeout(() => { if (!done) { done = true; res(null); } }, 9000);
+    navigator.geolocation.getCurrentPosition(p => { if (!done) { done = true; clearTimeout(t); res({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }); } }, () => { if (!done) { done = true; clearTimeout(t); res(null); } }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+  });
+}
+async function bnd_punch(type) {
+  if (BND.busy) return;
+  const pinEl = document.getElementById('bndPin'), msg = document.getElementById('bndMsg'), pin = pinEl ? pinEl.value.trim() : '';
+  if (!/^\d{4,6}$/.test(pin)) { if (msg) msg.innerHTML = '<span style="color:#c62828">Enter your 4-6 digit PIN.</span>'; if (pinEl) pinEl.focus(); return; }
+  BND.busy = true; const bi = document.getElementById('bndIn'), bo = document.getElementById('bndOut'); if (bi) bi.disabled = true; if (bo) bo.disabled = true;
+  if (!BND.ref || BND.ref.type !== type) BND.ref = { type, id: 'BND-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8) };
+  try {
+    let auth = 'skipped'; const bio = document.getElementById('bndBio');
+    if (bio && bio.checked) { if (msg) msg.textContent = 'Verifying fingerprint / face...'; auth = await att_bioCheck(); }
+    if (msg) msg.textContent = 'Getting location...'; const g = await bnd_gps() || {};
+    showLoading(type === 'IN' ? 'Recording Time In...' : 'Recording Time Out...');
+    const r = await gasPost({ action: 'att_clockSelf', type, pin, lat: g.lat, lng: g.lng, accuracy: g.accuracy, auth, deviceId: att_deviceId(), deviceTime: Date.now(), clientRef: BND.ref.id }, 45000);
+    hideLoading();
+    if (r && r.success) { BND.ref = null; bnd_showSlip(r, type); bnd_loadStatus(); }
+    else { if (msg) msg.innerHTML = '<span style="color:#c62828">' + esc((r && r.message) || 'Could not record.') + '</span>'; if (/Already timed in|no open Time In/.test((r && r.message) || '')) { BND.ref = null; bnd_loadStatus(); } else { if (pinEl) pinEl.value = ''; const s = BND.st; if (bi) bi.disabled = !(s && s.status !== 'In'); if (bo) bo.disabled = !(s && s.status === 'In'); } }
+  } catch (e) { hideLoading(); if (msg) msg.innerHTML = '<span style="color:#c62828">' + esc(e.message) + ' Press again to retry. It will not record twice.</span>'; if (bi) bi.disabled = false; if (bo) bo.disabled = false; }
+  finally { BND.busy = false; }
+}
+function bnd_slipHtml(r, type) {
+  const line = (a, b) => '<div class="sl-r"><span>' + a + '</span><b>' + b + '</b></div>';
+  const pun = (r.punches || []).map(p => line(p.type === 'IN' ? 'Time In' : 'Time Out', bnd_fmt12(p.time))).join('');
+  return '<div class="slip"><div class="sl-c sl-t">AE HOME</div><div class="sl-c">Daily Time Record Slip</div><hr>' +
+    '<div class="sl-c sl-big">' + (type === 'IN' ? 'TIME IN' : 'TIME OUT') + '</div><div class="sl-c sl-big2">' + bnd_fmt12(r.time) + '</div><div class="sl-c">' + bnd_dateLong(r.date) + '</div><hr>' +
+    line('Name', esc(r.name)) + line('Employee ID', esc(r.employeeId)) + line('Branch', esc(att_branchName(r.branch))) +
+    (r.lateMin ? line('Late', att_fmtMin(r.lateMin)) : '') + (r.underMin ? line('Undertime', att_fmtMin(r.underMin)) : '') + (type === 'OUT' && r.workedMin ? line('Worked (last)', att_fmtMin(r.workedMin)) : '') +
+    ((r.punches || []).length ? '<hr><div class="sl-c" style="font-weight:700">Today\'s punches</div>' + pun : '') +
+    '<hr><div class="sl-c" style="font-size:11px">Ref: ' + esc(r.ref || r.id) + '</div><div class="sl-c" style="font-size:11px">Keep this slip. Check your DTR for corrections.</div></div>';
+}
+const BND_SLIP_CSS = '.slip{font-family:"Courier New",monospace;font-size:13px;color:#000;max-width:300px;margin:0 auto;padding:8px 6px}.slip hr{border:0;border-top:1px dashed #000;margin:7px 0}.sl-c{text-align:center}.sl-t{font-size:18px;font-weight:800}.sl-big{font-size:16px;font-weight:800;margin-top:2px}.sl-big2{font-size:26px;font-weight:800}.sl-r{display:flex;justify-content:space-between;gap:8px;margin:2px 0}.sl-r b{text-align:right}';
+function bnd_showSlip(r, type) {
+  BND.slip = bnd_slipHtml(r, type);
+  openModal('<style>' + BND_SLIP_CSS + '</style><div style="background:#fff;border:1px solid var(--border);border-radius:8px;padding:6px;margin-bottom:10px">' + BND.slip + '</div>' +
+    (r.flags && r.flags.length ? '<div style="margin-bottom:8px;text-align:center">' + r.flags.map(f => att_chip(f, '#b45309')).join(' ') + '</div>' : '') +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="bnd_print(BND.slip,\'slip\')">Print slip</button><button class="btn btn-primary" onclick="closeModalDirect()">Done</button></div>');
+}
+function bnd_print(html, kind) {
+  const old = document.getElementById('bndPrintFrame'); if (old) old.remove();
+  const f = document.createElement('iframe'); f.id = 'bndPrintFrame'; f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+  document.body.appendChild(f); const d = f.contentWindow.document; d.open();
+  d.write('<!doctype html><html><head><meta charset="utf-8"><title>' + (kind === 'slip' ? 'Slip' : 'DTR') + '</title><style>' + BND_SLIP_CSS + (kind === 'slip' ? '@page{size:58mm auto;margin:2mm}.slip{max-width:none}' : '@page{margin:12mm}') + 'body{margin:0;font-family:Arial,sans-serif}' + BND_DTR_CSS + '</style></head><body>' + html + '</body></html>'); d.close();
+  setTimeout(() => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch (e) { toast('Could not open print.', 'error'); } }, 300);
+}
+// ── DTR ──
+const BND_DTR_CSS = '.dtr{color:#000;font-size:13px}.dtr h2{margin:0;text-align:center}.dtr .sub{text-align:center;margin-bottom:10px}.dtr table{width:100%;border-collapse:collapse;margin-top:8px}.dtr th,.dtr td{border:1px solid #444;padding:4px 6px;text-align:left;font-size:12px}.dtr th{background:#eee}.dtr .sig{display:flex;gap:30px;margin-top:34px}.dtr .sig div{flex:1;border-top:1px solid #000;text-align:center;padding-top:3px;font-size:12px}';
+function bnd_dtrHtml(r) {
+  const s = r.staff, t = r.totals, mon = new Date(r.month + '-01T00:00:00').toLocaleDateString('en-PH', { month: 'long', year: 'numeric' });
+  const rows = r.days.map(d => {
+    const ins = d.punches.filter(p => p.type === 'IN'), outs = d.punches.filter(p => p.type === 'OUT');
+    const ft = a => a.length ? a.map(p => bnd_fmt12(p.time)).join('<br>') : '-';
+    return '<tr><td>' + esc(d.date.substring(8)) + ' ' + esc(bnd_dateLong(d.date).split(',')[0]) + '</td><td>' + ft(ins) + '</td><td>' + (d.open ? '<i>missing</i>' : ft(outs)) + '</td><td>' + (d.lateMin ? att_fmtMin(d.lateMin) : '-') + '</td><td>' + (d.underMin ? att_fmtMin(d.underMin) : '-') + '</td><td>' + att_fmtMin(d.workedMin) + '</td><td>' + (d.manual ? 'Manual entry' : '') + '</td></tr>';
+  }).join('');
+  return '<div class="dtr"><h2>AE HOME</h2><div class="sub"><b>DAILY TIME RECORD</b><br>' + esc(mon) + '</div>' +
+    '<div><b>Name:</b> ' + esc(s.name) + ' &nbsp; <b>Employee ID:</b> ' + esc(s.employeeId) + '<br><b>Branch:</b> ' + esc(att_branchName(s.branch)) + ' &nbsp; <b>Shift:</b> ' + bnd_fmt12(s.shiftStart) + ' - ' + bnd_fmt12(s.shiftEnd) + '</div>' +
+    '<table><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Late</th><th>Under</th><th>Worked</th><th>Remarks</th></tr></thead><tbody>' + (rows || '<tr><td colspan="7" style="text-align:center">No records this month.</td></tr>') + '</tbody></table>' +
+    '<div style="margin-top:8px"><b>Days present:</b> ' + t.days + ' &nbsp; <b>Late:</b> ' + t.lateDays + ' day(s), ' + att_fmtMin(t.lateMin) + ' &nbsp; <b>Undertime:</b> ' + att_fmtMin(t.underMin) + ' &nbsp; <b>Total worked:</b> ' + att_fmtMin(t.workedMin) + (t.missingOut ? ' &nbsp; <b>Missing Time Out:</b> ' + t.missingOut : '') + '</div>' +
+    '<div class="sig"><div>Employee signature</div><div>Verified by (Admin)</div></div></div>';
+}
+function bnd_monthBar(fn) {
+  const m = BND.month, d = new Date(m + '-01T00:00:00'), shift = k => { const x = new Date(d.getFullYear(), d.getMonth() + k, 1); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0'); };
+  return '<div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:10px"><button class="btn btn-ghost btn-sm" onclick="BND.month=\'' + shift(-1) + '\';' + fn + '()">&lsaquo;</button><b>' + esc(d.toLocaleDateString('en-PH', { month: 'long', year: 'numeric' })) + '</b><button class="btn btn-ghost btn-sm" onclick="BND.month=\'' + shift(1) + '\';' + fn + '()">&rsaquo;</button></div>';
+}
+async function bnd_loadDtr() {
+  const body = document.getElementById('bndBody'); if (!body) return;
+  if (!BND.month) BND.month = new Date().toISOString().substring(0, 7);
+  body.innerHTML = '<div class="card"><div style="opacity:.7">Loading DTR...</div>' + ih_barHtml() + '</div>';
+  try {
+    const r = await gasRequest({ action: 'att_getMyDtr', month: BND.month }, 45000); if (currentPage !== 'attMy') return;
+    if (!r || !r.success) { body.innerHTML = '<div class="card" style="color:#c62828">' + esc((r && r.message) || 'Could not load.') + '</div>'; return; }
+    BND.dtr = r; body.innerHTML = bnd_monthBar('bnd_loadDtr') + '<div class="card" style="overflow-x:auto"><style>' + BND_DTR_CSS + '</style>' + bnd_dtrHtml(r) + '</div><div style="font-size:12px;opacity:.7;margin:6px 0">Read-only. If something is wrong, tell your Admin to correct it.</div><button class="btn btn-ghost" onclick="bnd_print(bnd_dtrHtml(BND.dtr),\'dtr\')">Print DTR</button>';
+  } catch (e) { body.innerHTML = '<div class="card" style="color:#c62828">' + esc(e.message) + '</div>'; }
+}
+// Admin: DTR per staff
+async function att_openDtr(staffId) {
+  BND.month = BND.month || new Date().toISOString().substring(0, 7); BND.adminStaff = staffId; att_loadDtrAdmin();
+}
+async function att_loadDtrAdmin() {
+  showLoading('Loading DTR...');
+  try {
+    const r = await gasRequest({ action: 'att_getDtr', staffId: BND.adminStaff, month: BND.month }, 45000); hideLoading();
+    if (!r || !r.success) { toast((r && r.message) || 'Could not load DTR.', 'error'); return; }
+    BND.dtr = r;
+    openModal('<style>' + BND_DTR_CSS + '</style>' + bnd_monthBar('att_loadDtrAdmin') + '<div style="overflow-x:auto;background:#fff;padding:8px;border:1px solid var(--border);border-radius:8px">' + bnd_dtrHtml(r) + '</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-ghost" onclick="bnd_print(bnd_dtrHtml(BND.dtr),\'dtr\')">Print DTR</button><button class="btn btn-primary" onclick="closeModalDirect()">Close</button></div>');
+  } catch (e) { hideLoading(); toast(e.message, 'error'); }
 }
