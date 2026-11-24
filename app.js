@@ -9158,7 +9158,7 @@ function att_drawLogs() {
     '<div style="flex:1;min-width:130px"><label style="font-size:12px">From</label><input type="date" id="attFrom" value="' + esc(ATT.from) + '" style="' + IH_INP + '"></div>' +
     '<div style="flex:1;min-width:130px"><label style="font-size:12px">To</label><input type="date" id="attTo" value="' + esc(ATT.to) + '" style="' + IH_INP + '"></div>' +
     '<div style="flex:2;min-width:160px"><label style="font-size:12px">Staff</label><select id="attStaffSel" style="' + IH_INP + '"><option value="">All staff</option>' + ATT.staff.map(s => '<option value="' + esc(s.id) + '"' + (s.id === ATT.staffId ? ' selected' : '') + '>' + esc(s.name) + ' (' + esc(s.employeeId) + ')</option>').join('') + '</select></div>' +
-    '<button class="btn btn-primary btn-sm" onclick="att_applyLogFilter()">Show</button><button class="btn btn-ghost btn-sm" onclick="att_openManual()">Add Missed Entry</button></div>' +
+    '<button class="btn btn-primary btn-sm" onclick="att_applyLogFilter()">Show</button><button class="btn btn-ghost btn-sm" onclick="att_openManual()">Add Missed Entry</button><button class="btn btn-ghost btn-sm" onclick="att_openBulk()">Bulk Entry</button></div>' +
     '<div style="font-size:12px;opacity:.7;margin-bottom:8px">' + r.total + ' entr' + (r.total === 1 ? 'y' : 'ies') + (r.total > r.data.length ? ' (showing the latest ' + r.data.length + ')' : '') + '</div>' +
     (r.data.length ? r.data.map(row).join('') : '<div style="opacity:.75">No entries for this range.</div>') + '</div>';
 }
@@ -9199,7 +9199,7 @@ async function att_saveManual() {
   const p = { action: 'att_addManual', staffId: v('attMStaff'), type: v('attMType'), date: v('attMDate'), time: v('attMTime'), reason: v('attMReason') };
   if (!p.staffId) { toast('Select the staff.', 'error'); return; } if (!p.date || !p.time) { toast('Enter the date and time.', 'error'); return; } if (!p.reason) { toast('Enter the reason.', 'error'); return; }
   if (ATT.busy) return; ATT.busy = true; const b = document.getElementById('attMBtn'); if (b) b.disabled = true; showLoading('Saving entry...');
-  try { const r = await gasPost(p, 45000); if (r && r.success) { closeModalDirect(); toast('Entry added.', 'success'); att_drawTab(); } else { toast((r && r.message) || 'Could not save.', 'error', 6000); if (b) b.disabled = false; } }
+  try { const r = await gasPost(p, 45000); if (r && r.success) { closeModalDirect(); toast(r.warning ? 'Entry added. ' + r.warning : 'Entry added.', r.warning ? 'warning' : 'success', r.warning ? 9000 : undefined); att_drawTab(); } else { toast((r && r.message) || 'Could not save.', 'error', 6000); if (b) b.disabled = false; } }
   catch (e) { toast('Network error. Check the logs before trying again.', 'error', 6000); if (b) b.disabled = false; } finally { ATT.busy = false; hideLoading(); }
 }
 
@@ -9624,3 +9624,39 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind); else bind();
 })();
+
+// ── Bulk missed entries (Admin picks the staff, any date range, and the times) ──
+function att_openBulk() {
+  const t = ATT.today ? ATT.today.date : new Date().toISOString().slice(0, 10), tm = (id, lbl, val) => '<div class="field" style="flex:1;min-width:120px"><label>' + lbl + '</label><input id="' + id + '" type="time" value="' + val + '" style="' + IH_INP + '"></div>';
+  openModal('<div class="modal-title">Bulk Entry</div><div style="font-size:13px;margin-bottom:8px">Use this for several missed days at once. Choose the dates, then untick any day that was an off day. Marked Manual, no selfie. Days that already have punches are skipped.</div>' +
+    '<div class="field"><label>Staff</label><select id="attBkStaff" style="' + IH_INP + '">' + ATT.staff.map(s => '<option value="' + esc(s.id) + '">' + esc(s.name) + ' (' + esc(s.employeeId) + ')</option>').join('') + '</select></div>' +
+    '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>From</label><input id="attBkFrom" type="date" max="' + esc(t) + '" onchange="att_bulkList()" style="' + IH_INP + '"></div><div class="field" style="flex:1"><label>To</label><input id="attBkTo" type="date" max="' + esc(t) + '" onchange="att_bulkList()" style="' + IH_INP + '"></div></div>' +
+    '<div id="attBkDates" style="margin:4px 0 10px;font-size:13px;max-height:170px;overflow:auto"><span style="opacity:.7">Pick the From and To dates.</span></div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' + tm('attBkAi', 'AM Time In', '08:00') + tm('attBkAo', 'AM Time Out', '12:00') + '</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' + tm('attBkPi', 'PM Time In', '13:00') + tm('attBkPo', 'PM Time Out', '17:00') + '</div>' +
+    '<div style="font-size:12px;opacity:.7;margin-bottom:8px">Clear both fields of a pair to skip it.</div>' +
+    '<div class="field"><label>Reason (required)</label><input id="attBkReason" type="text" maxlength="200" style="' + IH_INP + '"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="attBkBtn" onclick="att_saveBulk()">Save</button></div>');
+}
+function att_bulkList() {
+  const f = (document.getElementById('attBkFrom') || {}).value, t = (document.getElementById('attBkTo') || {}).value, box = document.getElementById('attBkDates'); if (!box) return;
+  if (!f || !t) { box.innerHTML = '<span style="opacity:.7">Pick the From and To dates.</span>'; return; }
+  if (f > t) { box.innerHTML = '<span style="color:#c62828">The From date must not be after the To date.</span>'; return; }
+  const out = []; for (let d = new Date(f + 'T00:00:00'); d <= new Date(t + 'T00:00:00') && out.length < 32; d.setDate(d.getDate() + 1)) out.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'));
+  if (out.length > 31) { box.innerHTML = '<span style="color:#c62828">Pick at most 31 days at a time.</span>'; return; }
+  box.innerHTML = out.map(d => '<label style="display:flex;gap:8px;align-items:center;padding:3px 0"><input type="checkbox" class="attBkD" value="' + d + '" checked> ' + esc(bnd_dateLong(d)) + '</label>').join('');
+}
+async function att_saveBulk() {
+  const v = id => ((document.getElementById(id) || {}).value || '').trim();
+  const dates = Array.from(document.querySelectorAll('.attBkD')).filter(c => c.checked).map(c => c.value);
+  if (!dates.length) { toast('Pick the dates first.', 'error'); return; }
+  const times = { amIn: v('attBkAi'), amOut: v('attBkAo'), pmIn: v('attBkPi'), pmOut: v('attBkPo') };
+  if (!times.amIn && !times.amOut && !times.pmIn && !times.pmOut) { toast('Enter the times.', 'error'); return; }
+  if (!v('attBkReason')) { toast('Enter the reason.', 'error'); return; }
+  if (ATT.busy) return; ATT.busy = true; const b = document.getElementById('attBkBtn'); if (b) b.disabled = true; showLoading('Saving entries...');
+  try {
+    const r = await gasPost({ action: 'att_addManualBulk', staffId: v('attBkStaff'), dates, times, reason: v('attBkReason') }, 90000);
+    if (r && r.success) { closeModalDirect(); toast(r.days + ' day(s) added (' + r.entries + ' entries).' + (r.skipped && r.skipped.length ? ' Skipped (already had punches): ' + r.skipped.join(', ') + '.' : ''), r.skipped && r.skipped.length ? 'warning' : 'success', 9000); att_drawTab(); }
+    else { toast((r && r.message) || 'Could not save.', 'error', 6000); if (b) b.disabled = false; }
+  } catch (e) { toast('Network error. Check the logs before trying again; nothing is added twice for days that already have punches.', 'error', 8000); if (b) b.disabled = false; } finally { ATT.busy = false; hideLoading(); }
+}
