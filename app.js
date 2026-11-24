@@ -9603,3 +9603,23 @@ function att_injectLoginLink() {
   } catch (e) {}
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', att_injectLoginLink); else att_injectLoginLink();
+
+// Tester unlock without a URL (for installed PWA): tap the "AE HOME" logo 5 times quickly. Same 5 taps again locks it.
+(function att_logoTap() {
+  function bind() {
+    const el = document.querySelector('#loginScreen .login-logo-text'); if (!el || el._attTap) return; el._attTap = true;
+    let n = 0, t = null;
+    el.addEventListener('click', () => {
+      n++; clearTimeout(t); t = setTimeout(() => { n = 0; }, 2500);
+      if (n >= 5) {
+        n = 0;
+        try {
+          const on = localStorage.getItem('att_beta') === '1';
+          if (on) { localStorage.removeItem('att_beta'); const l = document.getElementById('attLoginLink'); if (l) l.remove(); const h = document.getElementById('attLoginHint'); if (h) h.remove(); toast('Attendance entry locked.', 'info'); }
+          else { localStorage.setItem('att_beta', '1'); att_injectLoginLink(); toast('Attendance entry unlocked on this device.', 'success'); }
+        } catch (e) { toast('Could not change the lock on this device.', 'error'); }
+      }
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind); else bind();
+})();
