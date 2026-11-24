@@ -9254,6 +9254,7 @@ function att_openBranch(b) {
     '<button type="button" class="btn btn-ghost btn-sm" onclick="att_useMyLocation()" style="margin-bottom:8px">Use my current location (stand inside the branch)</button><div id="attBGps" style="font-size:12px;margin-bottom:8px"></div>' +
     '<div class="field"><label>Allowed radius (meters)</label><input id="attBRad" type="number" min="10" max="5000" value="' + (c.radius || 100) + '" style="' + IH_INP + '"></div>' +
     '<div style="display:flex;gap:8px"><div class="field" style="flex:1"><label>Shift start</label><input id="attBStart" type="time" value="' + v('shiftStart') + '" style="' + IH_INP + '"></div><div class="field" style="flex:1"><label>Shift end</label><input id="attBEnd" type="time" value="' + v('shiftEnd') + '" style="' + IH_INP + '"></div></div>' +
+    '<div class="field"><label>Lunch break length (minutes)</label><input id="attBLunch" type="number" min="0" max="240" value="' + (c.lunchMin != null ? c.lunchMin : 60) + '" style="' + IH_INP + '"><div style="font-size:12px;opacity:.7">Example 60. Counted from the staff\'s own AM Time Out, so any lunch hour works. Late for the PM Time In starts after this plus the grace. Use 0 to skip.</div></div>' +
     '<div class="field"><label>Grace period (minutes)</label><input id="attBGrace" type="number" min="0" max="120" value="' + (c.grace != null ? c.grace : 10) + '" style="' + IH_INP + '"></div>' +
     '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-ghost" onclick="closeModalDirect()">Cancel</button><button class="btn btn-primary" id="attBBtn" onclick="att_saveBranch(\'' + esc(b) + '\')">Save</button></div>');
 }
@@ -9267,7 +9268,7 @@ function att_useMyLocation() {
 }
 async function att_saveBranch(b) {
   const v = k => ((document.getElementById(k) || {}).value || '').trim();
-  const p = { action: 'att_saveBranch', branch: b, lat: v('attBLat'), lng: v('attBLng'), radius: v('attBRad'), shiftStart: v('attBStart'), shiftEnd: v('attBEnd'), grace: v('attBGrace') };
+  const p = { action: 'att_saveBranch', branch: b, lat: v('attBLat'), lng: v('attBLng'), radius: v('attBRad'), shiftStart: v('attBStart'), shiftEnd: v('attBEnd'), lunchMin: v('attBLunch'), grace: v('attBGrace') };
   if ((p.lat === '') !== (p.lng === '')) { toast('Enter both latitude and longitude, or leave both empty.', 'error'); return; }
   if ((p.shiftStart && !p.shiftEnd) || (!p.shiftStart && p.shiftEnd)) { toast('Enter both shift start and end, or leave both empty.', 'error'); return; }
   if (ATT.busy) return; ATT.busy = true; const bt = document.getElementById('attBBtn'); if (bt) bt.disabled = true; showLoading('Saving branch...');
@@ -9533,7 +9534,7 @@ function bnd_dtrHtml(r) {
   const rows = [];
   for (let n = r.from; n <= r.to; n++) {
     const ds = r.month + '-' + String(n).padStart(2, '0'), d = byDate[ds], wd = new Date(ds + 'T00:00:00').toLocaleDateString('en-PH', { weekday: 'short' });
-    if (!d) { rows.push('<tr><td>' + n + ' ' + wd + '</td><td colspan="9" style="color:#888">' + (wd === 'Sun' ? 'Sunday' : '') + '</td></tr>'); continue; }
+    if (!d) { rows.push('<tr><td>' + n + ' ' + wd + '</td><td colspan="9" style="color:#888">No record</td></tr>'); continue; }
     const P = d.punches, c = i => P[i] ? bnd_fmt12(P[i].time) : '-', ex = P.slice(4).map(p => (p.type === 'IN' ? 'In ' : 'Out ') + bnd_fmt12(p.time)).join(', ');
     const lun = d.lunchMin ? att_fmtMin(d.lunchMin) + (d.lunchMin > 60 ? ' (over)' : '') : '-';
     rows.push('<tr><td>' + n + ' ' + wd + '</td><td>' + c(0) + '</td><td>' + c(1) + '</td><td>' + c(2) + '</td><td>' + c(3) + '</td><td>' + (d.lateMin ? att_fmtMin(d.lateMin) : '-') + '</td><td>' + (d.underMin ? att_fmtMin(d.underMin) : '-') + '</td><td>' + lun + '</td><td>' + att_fmtMin(d.workedMin) + '</td><td>' + [d.open ? 'Missing Time Out' : '', d.manual ? 'Manual entry' : '', ex ? 'Extra: ' + esc(ex) : ''].filter(Boolean).join('; ') + '</td></tr>');
